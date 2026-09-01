@@ -1,0 +1,105 @@
+// Number lines: the knobs that choose values.
+//
+// Every variable gets one. Free variables get a handle you can drag; derived
+// ones get a read-only marker that moves when its inputs do. Lines start docked
+// under their box, can be pulled off onto the canvas, and can be dropped onto
+// one another to share a single axis -- which is a way of *seeing* two values
+// together, not a claim that they are equal.
+//
+// A line refers to variables by (box, name), so an axis can carry values from
+// two different boxes. The panel therefore belongs to the canvas, not to any
+// one box.
+//
+// Each line zooms and pans on its own, independently of the canvas.
+#pragma once
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "blocks.h"
+#include "fontstore.h"
+#include "raylib.h"
+#include "viewport.h"
+
+namespace sb {
+
+struct AxisRef {
+  CodeBlock*  block = nullptr;
+  std::string name;
+};
+
+struct NumberLine {
+  std::vector<AxisRef> refs;
+  float                centre = 0.0f;
+  float                span = 4.0f;   // values across the full width
+  bool                 docked = true;
+  Vector2              worldPos{};    // only meaningful once undocked
+  // Which box a docked line stacks under. Stays put when lines merge.
+  CodeBlock*           dock = nullptr;
+};
+
+class AxisPanel {
+ public:
+  using Blocks = std::vector<std::unique_ptr<CodeBlock>>;
+
+  // Brings the set of lines into step with every box's variables, keeping
+  // whatever arrangement already exists for the ones that survived. Returns
+  // true if lines came or went, which changes how much room a box takes up.
+  bool Sync(const Blocks& blocks);
+  // Drops everything belonging to a box that is going away.
+  void Forget(const CodeBlock* block);
+
+  // Returns true if it took the pointer or the wheel, so the canvas can stay
+  // put while an axis is being used.
+  bool HandleInput(const Viewport& viewport, FontStore& fonts, const Blocks& blocks);
+  void Draw(const Viewport& viewport, FontStore& fonts) const;
+
+  // The variables whose row is being hovered or dragged. Everything standing
+  // for a variable wears its colour, and this is what says which one is in use
+  // so its name can be boxed where it is written.
+  void ActiveVariables(const Viewport& viewport, FontStore& fonts,
+                       std::vector<std::pair<CodeBlock*, std::string>>* out) const;
+
+  // The screen rectangle the rows docked under a box cover, or a zero-size one
+  // if nothing is docked there. They travel with the box, so as far as the
+  // canvas is concerned they are part of it.
+  Rectangle DockedBounds(const CodeBlock* block, const Viewport& viewport,
+                         FontStore& fonts) const;
+
+  bool Empty() const { return lines_.empty(); }
+  // True while a row is being dragged. A drag in flight has to be offered the
+  // pointer before anything else, or letting go over another window's rim would
+  // leave the row stuck to the cursor.
+  bool Dragging() const { return drag_ != Drag::None; }
+
+  // --- persistence --------------------------------------------------------
+  const std::vector<NumberLine>& Lines() const { return lines_; }
+  void Clear() { lines_.clear(); drag_ = Drag::None; }
+  void Adopt(std::vector<NumberLine> lines) { lines_ = std::move(lines); }
+
+ private:
+  enum class Drag { None, Handle, Pan, Move };
+
+  Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
+  static Rectangle AxisArea(Rectangle row);
+  const mathprogram::Variable* Resolve(const AxisRef& ref) const;
+  // Points the line at everything now on it. Used when two lines merge, since
+  // the host's old window need not contain the arriving value at all.
+  void Reframe(NumberLine& line) const;
+
+  std::vector<NumberLine> lines_;
+
+  Drag        drag_ = Drag::None;
+  std::size_t dragLine_ = 0;
+  AxisRef     dragRef_;     // the handle being moved, for Drag::Handle
+  Vector2     dragGrab_{};  // pointer offset within the row, for Drag::Move
+  // Where a row being carried is drawn. It keeps its slot in the stack until
+  // it is dropped, so the row you are aiming at does not slide out from under
+  // the pointer as you pick this one up.
+  Vector2     dragScreenPos_{};
+  bool        dragMoved_ = false;
+};
+
+}  // namespace sb

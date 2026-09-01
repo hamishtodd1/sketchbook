@@ -1,0 +1,105 @@
+// The live program behind a box of mathematical lines.
+//
+// A box is compiled once. Its free variables are then passed in as command-line
+// arguments and every variable's value is printed back, so moving a knob costs
+// one process launch (a few milliseconds) instead of a rebuild.
+//
+// The declaration the user writes stays abstract -- `float a;`. The initialiser
+// that makes it compile is injected here, never in their text.
+#pragma once
+
+#include <future>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "compiler.h"
+#include "types/RealFunction.h"
+
+namespace sb::mathprogram {
+
+// What a variable is. Each kind needs two things of its type: how to render it
+// as LaTeX, and how to make an example of it.
+enum class Kind {
+  Real,      // float / double
+  Function,  // RealFunction: a function from reals to reals
+};
+
+struct Variable {
+  std::string name;
+  std::string latexName;
+  Kind        kind = Kind::Real;
+  bool        free = false;    // declared with no initialiser: yours to choose
+  float       example = 0.0f;  // what the type's example generator produced
+  float       value = 0.0f;    // Real: what it currently is
+  bool        known = false;   // has a value actually been computed yet
+  // Function: what it evaluates to across the sample window below. A function
+  // cannot be printed as a number, so this is how one gets back to the screen.
+  std::vector<float> samples;
+};
+
+enum class State {
+  Empty,        // nothing to build
+  Building,     // a compile is in flight
+  Ready,        // built, and values are live
+  Failed,       // the compiler rejected it
+  NoCompiler,   // nothing to build it with
+};
+
+class Program {
+ public:
+  Program() = default;
+  ~Program();
+  Program(const Program&) = delete;
+  Program& operator=(const Program&) = delete;
+
+  // Rebuilds from the box's lines. Values of variables that survive the edit
+  // are carried over, so editing does not reset the knobs you have set.
+  void Rebuild(const std::vector<std::string>& lines);
+
+  // Collects finished builds and runs. Call every frame.
+  void Poll();
+
+  // Sets a free variable and schedules a re-run. Repeated calls while a run is
+  // in flight coalesce into a single follow-up, so dragging stays smooth.
+  void SetValue(std::size_t index, float value);
+
+  // Values to adopt on the next rebuild, for a canvas loaded from disk. They
+  // lose to anything already on screen, and are consumed once.
+  void Restore(std::vector<std::pair<std::string, float>> values);
+
+  State                        state() const { return state_; }
+  const std::vector<Variable>& variables() const { return variables_; }
+  const compiler::Diagnostic&  error() const { return error_; }
+  const std::string&           detail() const { return detail_; }
+  // How many lines were prepended to the user's text, for diagnostic mapping.
+  static int                   LineOffset();
+
+ private:
+  // One printed line: a name and the numbers after its `=`. A real prints one
+  // number, a function prints its whole sample run.
+  struct RunValue {
+    std::string        name;
+    std::vector<float> numbers;
+  };
+  struct RunOutput {
+    bool                  ok = false;
+    std::vector<RunValue> values;
+  };
+
+  void Launch();
+
+  std::vector<Variable> variables_;
+  State                 state_ = State::Empty;
+  compiler::Diagnostic  error_;
+  std::string           detail_;
+  std::string           exePath_;
+
+  std::vector<std::pair<std::string, float>> restore_;
+
+  std::future<compiler::Build> build_;
+  std::future<RunOutput>       run_;
+  bool                         runQueued_ = false;
+};
+
+}  // namespace sb::mathprogram

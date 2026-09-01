@@ -1,0 +1,322 @@
+# sketchbook
+
+An infinite pan/zoom canvas in C++20 on [raylib](https://www.raylib.com/), with
+editable code boxes wired to a real C++ compiler, and a TeX maths typesetter.
+
+![the initial screen](docs/screenshot.png)
+
+## Building
+
+raylib is pulled in by CMake at configure time, so the only prerequisites are a
+C++20 compiler and CMake 3.20+. The first configure clones and builds raylib and
+takes a few minutes; after that it is cached in `build/_deps`.
+
+```sh
+cmake --preset mingw        # MSYS2 GCC; use --preset default for MSVC
+cmake --build --preset mingw
+./build/sketchbook.exe
+```
+
+The `mingw` preset points at `C:/msys64` and drives the build with MSYS `make`,
+so it does not need ninja or `mingw32-make`. Assets are copied next to the
+executable after each build; the binary also falls back to the source tree, so
+it runs from anywhere.
+
+## Using it
+
+| Input | Action |
+| --- | --- |
+| Right-drag (or middle-drag) | Pan |
+| Drag one finger | Pan |
+| Two-finger pinch | Zoom about the midpoint of the fingers |
+| Wheel, or trackpad pinch | Zoom about the cursor |
+| Click a code box | Select it and put the caret where you clicked |
+| Click anywhere else | Deselect, and rebuild if the text changed |
+| Type with nothing selected | Start a new box in the middle of the view |
+| `Ctrl`+`Enter` | Rebuild the selected box |
+| Hover a line | Show it as code, with the injected value |
+| `Ctrl`+`Z` | Undo, in the box being edited |
+| `Ctrl`+`left`/`right` | Move the caret by word |
+| `Ctrl`+`S` / `Ctrl`+`O` | Save (back to the same file) / open a canvas |
+| Drag a number-line handle | Choose that variable's value |
+| Wheel over a number line or plot | Zoom that window only |
+| Hover or drag a number line or plot | Box its variable wherever it is written |
+| Hover any window's edge | Its rim appears |
+| Drag a rim | Move that window; drop it on another of its kind to merge them |
+| `Esc` | Open/close the options menu |
+
+Editing keys are the usual ones: arrows, `Home`, `End`, `Backspace`, `Delete`,
+`Enter` (which carries the current indentation onto the new line) and `Tab`
+(four spaces). A press that moves more than a few pixels is a drag rather than a
+click, so it does not move the caret.
+
+The **right button pans** and nothing on the canvas uses it, so a pan works
+wherever the pointer is — including over a window that has claimed the wheel for
+its own scale. The left button belongs to the contents of the canvas: clicking
+places the caret, dragging a rim moves a window, dragging a handle chooses a
+value. A box left completely empty is discarded when you click away.
+
+Every window on the canvas -- code boxes, number lines and plots alike -- is moved by
+the **rim** around its edge, which appears when you hover there. Handles win
+over the rim, so grabbing a value never moves the row by accident. A rim is
+chrome rather than content, so it keeps the same thickness in screen pixels at
+every zoom level and stays equally easy to hit.
+
+A focused box grows two buttons above it: a **math/code toggle**, and a **cross**
+that deletes the box and its number lines.
+
+Every window's top-left corner **snaps to the nearest grid dot** -- to the grid
+as drawn, so placement gets finer as you zoom in. Boxes additionally **never
+overlap**: a box put down on top of another steps clear of it along whichever
+edge is nearest, a whole dot at a time. The number lines and plots docked under
+a box count as part of it, since they travel with it. Dragging, typing a new box
+and loading a file all go through the same placement, so there is no way to end
+up with a canvas that breaks either rule.
+
+Canvases save and load from the Escape menu, or with `Ctrl`+`S` and `Ctrl`+`O`.
+`Ctrl`+`S` writes straight back to wherever the canvas came from and only asks
+when there is nowhere to go. A file can also be opened from the command line:
+`sketchbook.exe path.sketch`. The format is plain text, one record per line, so
+a canvas diffs and merges like source.
+
+Two dev-only flags exist for capturing a frame without a human at the keyboard:
+`--screenshot <file.png>` and `--frames <n>`, plus `--width`/`--height`.
+
+## LaTeX and C++
+
+The point of the program: **behind every piece of LaTeX there is compileable
+C++**, and the LaTeX is generated from it. See CLAUDE.md for where this is
+going.
+
+A line of the mathematical subset has two readings. `float a;` is valid C++, and
+it reads as `a ∈ ℝ`. `float c = (a + b) / 2;` reads as a real fraction. Lines
+with no mathematical reading simply stay code, which is the designed fallback,
+and the flip is per-line — a box can be part equation, part code.
+
+Declarations stay abstract. To make them compile, an initialiser is **injected**
+(`float a = -0.778;`), generated per type by an example generator, and never
+part of your text. Hover a line to see it, in blue. Giving the box the caret
+turns all of it into Monokai-coloured code and hides the injections: while you
+are editing, what you see is your own text.
+
+A line the compiler complained about always shows its code, so the red caret has
+real characters to point at.
+
+A box is sized for the **worst case across both readings**: the wider of its
+LaTeX and its code, and the taller of the two for every row. So flipping a line,
+focusing the box, or dragging a knob never changes its shape. The slot kept for
+an injected value is a fixed number of columns for the same reason -- sizing it
+to the current number would make the box breathe as you drag.
+
+Every variable has a **colour of its own**, from viridis, and everything that
+stands for it wears it: its handle on a number line, its curve on a plot, its
+name written beside either. Hover or grab one of those windows and the variable's
+name lights up in the box it came from -- in the LaTeX or in the code, whichever
+that line is showing, and on every line that mentions it. Colour says *which*
+variable; shape says whether it is yours to move.
+
+Every variable then gets a **number line** docked under the box: free variables
+get a handle you can drag, derived ones a marker that follows. Drop one line's
+rim onto another and they share a single axis — a way of seeing two values
+together, not a claim that they are equal. The merged axis **reframes itself**
+around every value now on it, so both are in view with room at the ends; seeing
+them together is the whole point of the gesture. The two need not come from the
+same box: an axis belongs to the canvas. Each axis zooms and pans on its own
+wheel, independently of the canvas.
+
+## Functions
+
+A `float` is a real; a `RealFunction` is a function from reals to reals. It is
+`std::function<float(float)>` with the vector space operations added, so it is
+exactly what a C++ programmer already means by one:
+
+```cpp
+RealFunction f;                                  f : R -> R
+RealFunction g = [](float x) {                   g(x) = sin(1.4x)
+    return sin(1.4f * x); };
+RealFunction h = f + 2 * g;                      h = f + 2g
+```
+
+A declaration with no initialiser gets an example the same way a real does, only
+the example is a lambda rather than a number -- a wave, a parabola, a bump or a
+line -- shown in blue when you hover the line.
+
+Each function gets a **plot** instead of a number line, drawn from samples the
+program prints back. **Input runs up the vertical axis and output along the
+horizontal one**: the transpose of the usual convention, chosen because these
+axes are going to become spacetime diagrams. Both axes share one scale, so the
+window is square and a slope of one is a diagonal. Drop one plot's rim onto
+another and both curves share a set of axes, each named in its own colour --
+which is what a vector space looks like.
+
+Dragging a knob does **not** recompile. The box is built once, its free
+variables are passed in as arguments, and every value is printed back, so a drag
+costs one process launch of a few milliseconds. Recompilation happens only when
+the code changes.
+
+## The built-in compiler
+
+A box that declares no variables of its own falls back to older behaviour: it is
+a translation unit that should define `bool testFunc()`, and the square beside it
+shows the answer — **red** for `true`, **blue** for `false`, neutral grey while
+building or when there is nothing truthful to report. This predates the LaTeX
+direction and is kept only until it is in the way.
+
+Either way, a box is rebuilt when you deselect it (only if the text actually
+changed) or when you press `Ctrl`+`Enter`.
+
+`compiler.cpp` appends
+
+```cpp
+int main() { return testFunc() ? 0 : 1; }
+```
+
+builds a real executable, and runs it **out of process**, reading the answer
+back from the exit code. Two things fall out of that. Nothing is *prepended*, so
+a diagnostic at line N of the generated file is at line N of the box and error
+positions map straight onto the caret. And because the code on the canvas runs
+in its own process, an infinite loop or a null dereference in it cannot take the
+app down — those come back as `Crashed` (there is a 5s watchdog on the run and
+25s on the build).
+
+Builds happen on a worker thread and are collected by `CodeBlock::Poll`, so the
+canvas keeps panning at full rate while g++ works.
+
+When compilation fails, the earliest error is shown in a white balloon, black
+text, in a proportional face at 75% of the code size, with its top-left corner just below
+the offending character and a red caret marking it. Parsing the `file:line:col:
+error:` prefix works backwards from the `: error:` marker, because a Windows
+path has colons of its own.
+
+The compiler is found at first use: `$SKETCHBOOK_CXX` if set, then `g++` and
+`clang++` on `PATH`, then the usual MSYS2/MinGW install locations — the app is
+normally launched from a shell that never had MSYS2 on `PATH`. If none is found
+the boxes say so rather than silently doing nothing.
+
+## How it works
+
+### Touch
+
+raylib's `GetTouchPointCount()` only carries real data on Android and web. On
+the Windows desktop backend GLFW synthesises a single touch point from the
+mouse, so a two-finger pinch is invisible to it and pinch-zoom cannot be built
+on raylib's touch API alone.
+
+`src/touch_win32.cpp` therefore subclasses the window procedure and reads
+`WM_POINTER` messages, which is how a Win8+ app gets genuine multi-touch. The
+`GetPointerType`/`GetPointerInfo` entry points are resolved with
+`GetProcAddress` rather than linked, so the binary still starts on an older
+system (it just falls back to mouse-only input). That file never includes
+`raylib.h`: `<windows.h>` also declares `Rectangle`, `CloseWindow` and
+`ShowCursor`, and the two headers cannot coexist in one translation unit.
+
+Legacy mouse events synthesised from touch are deliberately passed through
+rather than swallowed, so a finger tap still reaches raylib's mouse API and can
+work the menu. The viewport ignores mouse panning while any finger is down, with
+a short cooldown after the last one lifts, so a pan is never applied twice.
+
+Note that `FLAG_WINDOW_HIGHDPI` is deliberately *not* set. GLFW is already
+per-monitor DPI aware, so the window is sized in real pixels either way; turning
+the flag on adds `GLFW_SCALE_TO_MONITOR`, which leaves the draw space scaled by
+the monitor factor while `GetMousePosition()` keeps reporting unscaled
+coordinates. With it off, screen size, render size, mouse position and the
+`WM_POINTER` coordinates are all the same pixel space.
+
+### Staying sharp under zoom
+
+raylib rasterises a font atlas at one fixed pixel size, so a 16px atlas blown up
+to 400px is mush. Nothing here is drawn through `BeginMode2D`; the canvas
+transform is applied on the CPU (`Viewport::ToScreen`) and the zoom is folded
+into the *font size* instead of into a matrix.
+
+`FontStore` keeps a small LRU cache of atlases on a size ladder
+(16/24/32/48/64/96/128px em) and hands back the rung nearest the size actually
+being drawn, so glyphs are always rasterised close to their final size.
+
+One subtlety worth knowing: raylib's `fontSize` argument is a stbtt pixel
+*height* — ascent to descent — not an em, and the faces disagree on that ratio.
+Asking every face for "size 48" would silently set Main and Math-Italic at
+different scales, so the store reads `head`/`hhea` out of each TTF itself and
+converts the em it wants into the per-face size that yields it.
+
+### The maths
+
+`src/tex/` is a real implementation of TeX's box-and-glue model for maths mode,
+not string substitution:
+
+- Atoms are classified Ord/Op/Bin/Rel/Open/Close/Punct/Inner, and inter-atom
+  spacing comes from TeX's table in chapter 18 of *The TeXbook*. Binary
+  operators are reclassified as ordinary when they cannot be binary — a leading
+  minus, or one operator straight after another — which is why `-x` is set
+  tighter than `a - x`.
+- Fractions, radicals, scripts and limits are positioned with the Computer
+  Modern σ/ξ font parameters (`texparams` in `fontstore.h`).
+- `\left(`…`\right)` grows a delimiter by choosing among the Size1..Size4 cuts,
+  then centres it on the maths axis.
+
+Supported: the symbol set in `tex_symbols.cpp` (Greek, operators, relations,
+arrows, AMS extras), super/subscripts with proper limit placement on big
+operators, `\frac` `\dfrac` `\tfrac` `\binom`, `\sqrt` with an optional index,
+`\left`…`\right`, `\big`..`\Bigg`, accents, `\overline`, `\underline`, `\text`,
+`\operatorname`, the `\math*` alphabet switches, explicit spacing, style
+switches, and the `matrix`/`pmatrix`/`bmatrix`/`vmatrix`/`cases` environments.
+
+Every codepoint/face pairing in the symbol table was checked against the actual
+cmaps of the bundled fonts, so a lookup that succeeds is guaranteed to
+rasterise. `\neq` and `\notin` are the exceptions — no glyph for them exists
+anywhere in the font set, so they are built as `\not` applied to `=` and `\in`,
+which is what KaTeX does too.
+
+Parsing is forgiving by design: an unknown command is drawn as upright literal
+text and reported through `Layout::error` rather than blanking the formula.
+
+Known gaps: there is no blackboard-bold face, so `\mathbb` falls back to bold;
+and italic correction is not applied before a superscript, because raylib's
+glyph metrics do not expose it. Maths boxes are display-only — editing is code
+boxes for now.
+
+## Other known gaps
+
+- Editing has no selection, clipboard or undo yet; it is caret-and-type.
+- Closing the window while a build is in flight leaves the process alive until
+  the compiler exits, because the pending `std::future` is joined on shutdown.
+  Builds are normally well under a second.
+- Only GCC and Clang diagnostics are parsed. MSVC uses a different format and
+  needs a `vcvars` environment, so it is not attempted.
+
+## Layout
+
+```
+src/
+  main.cpp        entry point, window setup, frame capture
+  app.{h,cpp}     scene, focus and input routing
+  viewport.*      pan/zoom camera and gesture handling
+  touch.*         multi-touch front end
+  touch_win32.*   WM_POINTER backend (no raylib.h in here)
+  process.*       child process + output capture (no raylib.h in here)
+  compiler.*      toolchain discovery, build/run, diagnostic parsing
+  mathline.*      the C++ subset: one line -> LaTeX + what it declares
+  mathprogram.*   assemble a box into a program, build it, re-run it on values
+  types/          one directory per supported type -- the extension point
+    RealFunction.*      the type: the C++ the app injects, and how one prints
+    RealFunctionViz.*   its plot, and its example generator
+    RealViz.*           a real's number line, and its example generator
+    examples.h          the generators, declared away from raylib
+  highlight.*     Monokai colouring for a line of C++
+  filedialog.*    native open/save dialogs (no raylib.h in here)
+  grid.*          the dotted grid
+  blocks.*        the editable code card and the maths card
+  ui.*            the options menu
+  fontstore.*     face registry, size-ladder atlas cache, TTF metrics
+  text.*          plain-text measure/draw/wrap on top of FontStore
+  tex/
+    tex.h           AST, layout and drawing interface
+    tex_parse.cpp   recursive-descent parser
+    tex_layout.cpp  TeX box model, spacing table, drawing
+    tex_symbols.cpp symbol/accent/operator tables
+assets/fonts/     Computer Modern (via KaTeX) and JetBrains Mono, both OFL
+```
+
+## Licence
+
+The bundled fonts are OFL; see `assets/fonts/LICENSES.md`. raylib is zlib/libpng.

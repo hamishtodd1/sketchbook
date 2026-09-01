@@ -1,0 +1,38 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "default",
+      "displayName": "Default (auto-detect toolchain)",
+      "description": "Uses whatever generator and compiler CMake finds. Good for MSVC.",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "mingw",
+      "displayName": "MSYS2 MinGW-w64",
+      "description": "GCC from an MSYS2 install, driven by MSYS make. No ninja required.",
+      "generator": "MSYS Makefiles",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_MAKE_PROGRAM": "C:/msys64/usr/bin/make.exe",
+        "CMAKE_C_COMPILER": "C:/msys64/mingw64/bin/gcc.exe",
+        "CMAKE_CXX_COMPILER": "C:/msys64/mingw64/bin/g++.exe"
+      }
+    },
+    {
+      "name": "mingw-debug",
+      "inherits": "mingw",
+      "displayName": "MSYS2 MinGW-w64 (Debug)",
+      "binaryDir": "${sourceDir}/build-debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "default", "configurePreset": "default", "jobs": 0 },
+    { "name": "mingw", "configurePreset": "mingw", "jobs": 0 },
+    { "name": "mingw-debug", "configurePreset": "mingw-debug", "jobs": 0 }
+  ]
+}
