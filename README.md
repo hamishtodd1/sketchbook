@@ -43,6 +43,10 @@ it runs from anywhere.
 | Hover or drag a number line or plot | Box its variable wherever it is written |
 | Hover any window's edge | Its rim appears |
 | Drag a rim | Move that window; drop it on another of its kind to merge them |
+| Drag a window onto the cross | Close it |
+| Drag the background | Lasso a selection |
+| `Delete` | Throw the selection away |
+| `Ctrl`+`C` / `X` / `V` | Copy, cut, paste the selected boxes |
 | `Esc` | Open/close the options menu |
 
 Editing keys are the usual ones: arrows, `Home`, `End`, `Backspace`, `Delete`,
@@ -62,8 +66,27 @@ over the rim, so grabbing a value never moves the row by accident. A rim is
 chrome rather than content, so it keeps the same thickness in screen pixels at
 every zoom level and stays equally easy to hit.
 
-A focused box grows two buttons above it: a **math/code toggle**, and a **cross**
-that deletes the box and its number lines.
+A focused box grows one button above it: a **math/code toggle**.
+
+**Left-dragging the background draws a lasso**, and everything whose middle it
+went round is selected. Selected windows wear their rim. A selection then
+behaves as one window: it moves together, `Delete` throws it all away, and
+`Ctrl`+`C` / `Ctrl`+`X` / `Ctrl`+`V` copy, cut and paste the boxes in it -- at
+the pointer, arriving selected. Clicking anywhere clears it.
+
+Everything on the canvas is a window -- a code box, a number line, a plot, a
+shader's picture -- and every one of them is carried by its rim and thrown away
+the same way. **Carrying a window brings up a cross at the foot of the app
+window**; drag onto it and the window is absorbed, pull off and nothing has
+happened, let go and it is gone.
+
+Closing a **control** writes its value into the code. A number line for a free
+variable is what chooses that value, so throwing it away has to leave the value
+somewhere: `float a;` becomes `float a = 0.4;` and the box rebuilds. What was
+injected is now yours. Closing a plot, a shader's picture, or a derived
+variable's marker takes away the view and nothing else. Editing the literal back
+out brings the knob back: a free variable always has somewhere to be moved
+from.
 
 Every window's top-left corner **snaps to the nearest grid dot** -- to the grid
 as drawn, so placement gets finer as you zoom in. Boxes additionally **never
@@ -111,8 +134,14 @@ to the current number would make the box breathe as you drag.
 Every variable has a **colour of its own**, from viridis, and everything that
 stands for it wears it: its handle on a number line, its curve on a plot, its
 name written beside either. Hover or grab one of those windows and the variable's
-name lights up in the box it came from -- in the LaTeX or in the code, whichever
-that line is showing, and on every line that mentions it. Colour says *which*
+name lights up in the box it came from, in that variable's colour, wherever it is
+written -- in the LaTeX or in the code, whichever that line is showing, and on
+every line that mentions it -- with a curve of the same colour running from the
+pointer to each one.
+
+Hovering a **shader's picture** lights up `fragTexCoord`, because that is what
+the pointer is: the point the shader is being evaluated at, and the point its
+number lines are read from. Colour says *which*
 variable; shape says whether it is yours to move.
 
 Every variable then gets a **number line** docked under the box: free variables
@@ -123,6 +152,31 @@ around every value now on it, so both are in view with room at the ends; seeing
 them together is the whole point of the gesture. The two need not come from the
 same box: an axis belongs to the canvas. Each axis zooms and pans on its own
 wheel, independently of the canvas.
+
+## Two languages
+
+A box is **C++ by default**. If the C++ compiler refuses it, the same lines are
+tried as **GLSL**, because a box that says `vec2 p = fragTexCoord;` was never
+trying to be C++. Nothing declares the language; a box is whichever one will
+have it.
+
+Either way the app supplies the ends and you write the middle. For C++ that is
+the includes, the argv reader and a `main` that prints every value back; for
+GLSL it is the fragment-shader interface, one `uniform float` per knob, and a
+`void main() {` ... `}` around your lines. A free real reaches a program through
+argv and a shader through a uniform, so **a knob drives either without
+rebuilding** -- one re-runs the executable, the other just draws the next frame.
+
+A box that compiles as a shader draws itself in a square beside the card. Lines
+with no mathematical reading stay as code, so a shader box is usually part
+equation and part GLSL.
+
+Its derived variables still reach their number lines: a second shader, the same
+lines with different ends, renders each one's bits into a pixel of a one-row
+target that is read back. Inside a fragment shader a variable is a field rather
+than a number, so it is read **at a point** -- the one under the pointer while
+you are over the picture, its middle otherwise. Move the mouse across the
+preview and the number lines follow the field.
 
 ## Functions
 

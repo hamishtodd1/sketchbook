@@ -50,7 +50,12 @@ bool App::Init(const std::string& assetDir, std::string* error) {
   return true;
 }
 
-void App::Shutdown() { fonts_.Unload(); }
+void App::Shutdown() {
+  // The blocks go first, and by hand: a shader has to be released while the
+  // graphics context still exists, and destructors run after it is gone.
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->ReleaseGpu();
+  fonts_.Unload();
+}
 
 bool App::OpenCanvas(const std::string& path) { return LoadCanvas(path); }
 
@@ -81,7 +86,8 @@ Rectangle App::Footprint(const CodeBlock* block) {
   // The number lines docked under a box move with it and read as part of it,
   // so a box that clears the card but lands on the knobs has not cleared.
   const Rectangle docks[] = {axes_.DockedBounds(block, viewport_, fonts_),
-                             plots_.DockedBounds(block, viewport_, fonts_)};
+                             plots_.DockedBounds(block, viewport_, fonts_),
+                             shaders_.DockedBounds(block, viewport_, fonts_)};
   for (const Rectangle& dock : docks) {
     if (dock.width <= 0.0f || dock.height <= 0.0f) continue;
     const float right = std::max(rect.x + rect.width, dock.x + dock.width);
@@ -167,12 +173,24 @@ bool App::HandleBlockDrag() {
   const Vector2 pointer = GetMousePosition();
 
   if (dragBlock_ != nullptr) {
+    if (GetMouseDelta().x != 0.0f || GetMouseDelta().y != 0.0f) dragBlockMoved_ = true;
+    const bool absorbing = dragBlockMoved_ && OverDropTarget(pointer);
+    dragBlock_->SetAbsorbed(absorbing);
+
     if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-      const Vector2 world = viewport_.ToWorld(pointer);
-      PlaceBlock(dragBlock_, {world.x - dragBlockGrab_.x, world.y - dragBlockGrab_.y});
+      // While it is on the target it stops moving as well as stops being drawn:
+      // it is being held over the cross, not placed anywhere.
+      if (!absorbing) {
+        const Vector2 world = viewport_.ToWorld(pointer);
+        PlaceBlock(dragBlock_, {world.x - dragBlockGrab_.x, world.y - dragBlockGrab_.y});
+      }
     } else {
-      dragBlock_->SetDragging(false);
+      CodeBlock* dropped = dragBlock_;
+      dropped->SetDragging(false);
+      dropped->SetAbsorbed(false);
       dragBlock_ = nullptr;
+      dragBlockMoved_ = false;
+      if (absorbing) RemoveBlock(dropped);
     }
     return true;
   }
@@ -185,7 +203,9 @@ bool App::HandleBlockDrag() {
     const Vector2 origin = hit->WorldPosition();
     dragBlockGrab_ = {world.x - origin.x, world.y - origin.y};
     dragBlock_ = hit;
+    dragBlockMoved_ = false;
     hit->SetDragging(true);
+    if (!hit->Selected()) ClearSelection();
   }
   // Hovering the rim is enough to claim the pointer: a click there is a grab,
   // never a pan or a caret placement.
@@ -198,6 +218,8 @@ void App::RemoveBlock(CodeBlock* block) {
   if (dragBlock_ == block) dragBlock_ = nullptr;
   axes_.Forget(block);
   plots_.Forget(block);
+  shaders_.Forget(block);
+  block->ReleaseGpu();
   codeBlocks_.erase(std::remove_if(codeBlocks_.begin(), codeBlocks_.end(),
                                    [block](const std::unique_ptr<CodeBlock>& candidate) {
                                      return candidate.get() == block;
@@ -246,6 +268,182 @@ CodeBlock* App::NewBlockAtCentre() {
   return block;
 }
 
+// ------------------------------------------------------------------ selection
+
+void App::ClearSelection() {
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->SetSelected(false);
+  axes_.ClearSelection();
+  plots_.ClearSelection();
+  shaders_.ClearSelection();
+}
+
+bool App::AnySelected() const {
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    if (block->Selected()) return true;
+  }
+  return axes_.AnySelected() || plots_.AnySelected() || shaders_.AnySelected();
+}
+
+bool App::SelectedRimAt(Vector2 point) {
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    if (block->Selected() && block->OnRim(point, viewport_, fonts_)) return true;
+  }
+  return axes_.SelectedRimAt(point, viewport_, fonts_) ||
+         plots_.SelectedRimAt(point, viewport_, fonts_) ||
+         shaders_.SelectedRimAt(point, viewport_, fonts_);
+}
+
+void App::DeleteSelection() {
+  axes_.DeleteSelection();
+  plots_.DeleteSelection();
+  shaders_.DeleteSelection();
+
+  // Boxes last: removing one takes its windows with it, and the panels have
+  // already had their say about the ones that were selected in their own right.
+  for (std::size_t i = 0; i < codeBlocks_.size();) {
+    if (codeBlocks_[i]->Selected()) {
+      RemoveBlock(codeBlocks_[i].get());
+      continue;   // the vector shifted under us
+    }
+    ++i;
+  }
+}
+
+void App::CopySelection(bool cut) {
+  clipboard_.clear();
+
+  bool  any = false;
+  Vector2 corner{0.0f, 0.0f};
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    if (!block->Selected()) continue;
+    const Vector2 origin = block->WorldPosition();
+    if (!any) { corner = origin; any = true; continue; }
+    corner = {std::min(corner.x, origin.x), std::min(corner.y, origin.y)};
+  }
+  if (!any) return;
+
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    if (!block->Selected()) continue;
+    Clipping clip;
+    clip.lines = block->Lines();
+    clip.em = block->Em();
+    clip.showMath = block->ShowMath();
+    const Vector2 origin = block->WorldPosition();
+    clip.offset = {origin.x - corner.x, origin.y - corner.y};
+    // The knobs come along: a copy that started from zero would not be a copy.
+    for (const mathprogram::Variable& variable : block->Variables()) {
+      if (variable.free && variable.kind == mathprogram::Kind::Real) {
+        clip.values.emplace_back(variable.name, variable.value);
+      }
+    }
+    clipboard_.push_back(std::move(clip));
+  }
+
+  if (cut) DeleteSelection();
+}
+
+void App::PasteClipboard() {
+  if (clipboard_.empty()) return;
+
+  // Where you are pointing is where it lands.
+  const Vector2 anchor = sb::SnapToGrid(viewport_.ToWorld(GetMousePosition()), viewport_.Zoom());
+  ClearSelection();
+
+  for (const Clipping& clip : clipboard_) {
+    auto block = std::make_unique<CodeBlock>(
+        Vector2{anchor.x + clip.offset.x, anchor.y + clip.offset.y}, clip.em, clip.lines);
+    block->SetShowMath(clip.showMath);
+    block->RestoreValues(clip.values);
+    block->RequestCompile();
+    // Selected as they arrive, so the paste can be moved straight where it is
+    // wanted without hunting for it.
+    block->SetSelected(true);
+    codeBlocks_.push_back(std::move(block));
+    PlaceBlock(codeBlocks_.back().get(), codeBlocks_.back()->WorldPosition());
+  }
+}
+
+void App::HandleSelection() {
+  const Vector2 pointer = GetMousePosition();
+
+  // --- moving everything selected at once ----------------------------------
+  if (selectionDrag_) {
+    const Vector2 world = viewport_.ToWorld(pointer);
+    const Vector2 wanted = {world.x - selectionGrab_.x, world.y - selectionGrab_.y};
+    // Snapped as one vector rather than per window, so the arrangement inside
+    // the selection survives the move exactly and everything stays on the grid.
+    const Vector2 delta = sb::SnapToGrid(wanted, viewport_.Zoom());
+    if (delta.x != 0.0f || delta.y != 0.0f) selectionMoved_ = true;
+
+    const bool absorbing = selectionMoved_ && OverDropTarget(pointer);
+    for (auto& [block, from] : selectionFrom_) {
+      block->SetAbsorbed(absorbing);
+      if (!absorbing) block->SetWorldPosition({from.x + delta.x, from.y + delta.y});
+    }
+    if (!absorbing) {
+      axes_.MoveSelection(delta);
+      plots_.MoveSelection(delta);
+      shaders_.MoveSelection(delta);
+    }
+
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+      for (auto& [block, from] : selectionFrom_) block->SetAbsorbed(false);
+      selectionDrag_ = false;
+      selectionMoved_ = false;
+      selectionFrom_.clear();
+      if (absorbing) {
+        DeleteSelection();
+      } else {
+        // The group moved rigidly and may have landed on something that was not
+        // part of it; the canvas puts that right once the gesture is over.
+        SettleBlocks();
+      }
+    }
+    return;
+  }
+
+  // --- starting one --------------------------------------------------------
+  if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && AnySelected() && SelectedRimAt(pointer)) {
+    selectionDrag_ = true;
+    selectionMoved_ = false;
+    selectionGrab_ = viewport_.ToWorld(pointer);
+    selectionFrom_.clear();
+    for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+      if (block->Selected()) selectionFrom_.emplace_back(block.get(), block->WorldPosition());
+    }
+    axes_.BeginSelectionDrag();
+    plots_.BeginSelectionDrag();
+    shaders_.BeginSelectionDrag();
+    return;
+  }
+
+  // --- drawing the lasso ---------------------------------------------------
+  if (lassoActive_) {
+    if (lasso_.empty() ||
+        std::hypot(pointer.x - lasso_.back().x, pointer.y - lasso_.back().y) > kLassoStep) {
+      lasso_.push_back(pointer);
+    }
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+      axes_.SelectWithin(lasso_, viewport_, fonts_);
+      plots_.SelectWithin(lasso_, viewport_, fonts_);
+      shaders_.SelectWithin(lasso_, viewport_, fonts_);
+      for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+        block->SetSelected(LassoCatches(lasso_, block->Measure(viewport_, fonts_).rect));
+      }
+      lassoActive_ = false;
+      lasso_.clear();
+    }
+    return;
+  }
+
+  if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && BlockAt(pointer) == nullptr) {
+    // The background, and nothing else, is what the lasso is drawn on.
+    lassoActive_ = true;
+    lasso_.clear();
+    lasso_.push_back(pointer);
+  }
+}
+
 void App::HandlePointer() {
   if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
     pressActive_ = true;
@@ -260,6 +458,8 @@ void App::HandlePointer() {
   if (moved > kClickSlop) return;  // that was a pan, not a click
 
   CodeBlock* hit = BlockAt(release);
+  // Clicking anywhere is a new intent: whatever was selected is not it.
+  ClearSelection();
   SetFocus(hit);
   if (hit != nullptr) hit->PlaceCaret(release, viewport_, fonts_);
 }
@@ -340,6 +540,9 @@ void App::Update() {
   if (canvasActive && !consumed && plots_.Dragging()) {
     consumed = plots_.HandleInput(viewport_, fonts_);
   }
+  if (canvasActive && !consumed && shaders_.Dragging()) {
+    consumed = shaders_.HandleInput(viewport_, fonts_);
+  }
 
   // Otherwise input goes to the innermost thing first: a focused box's buttons,
   // then the windows, then the canvas.
@@ -349,28 +552,40 @@ void App::Update() {
   if (canvasActive && !consumed) consumed = HandleBlockDrag();
   if (canvasActive && !consumed) consumed = axes_.HandleInput(viewport_, fonts_, codeBlocks_);
   if (canvasActive && !consumed) consumed = plots_.HandleInput(viewport_, fonts_);
+  if (canvasActive && !consumed) consumed = shaders_.HandleInput(viewport_, fonts_);
 
   if (canvasActive && !consumed) {
-    HandlePointer();
-    HandleTyping();
+    // The lasso and the group it caught come first: a press on a selected
+    // window's rim moves the whole selection, not just that one.
+    HandleSelection();
+    if (!lassoActive_ && !selectionDrag_) {
+      HandlePointer();
+      HandleTyping();
+    }
   } else {
     pressActive_ = false;
+    lassoActive_ = false;
+  }
+
+  // Keys that act on the selection, and only while no box is being typed into.
+  if (canvasActive && focus_ == nullptr && AnySelected() &&
+      IsKeyPressed(KEY_DELETE)) {
+    DeleteSelection();
+  }
+  if (canvasActive && focus_ == nullptr && ctrl) {
+    if (IsKeyPressed(KEY_C)) CopySelection(/*cut=*/false);
+    if (IsKeyPressed(KEY_X)) CopySelection(/*cut=*/true);
+    if (IsKeyPressed(KEY_V)) PasteClipboard();
   }
 
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->Poll();
-
-  // A box asked to be closed by its own cross.
-  for (std::size_t i = 0; i < codeBlocks_.size(); ++i) {
-    if (!codeBlocks_[i]->CloseRequested()) continue;
-    RemoveBlock(codeBlocks_[i].get());
-    break;
-  }
 
   // A box that has just gained (or lost) number lines is a different size than
   // it was a frame ago, so this is the moment to check nobody is sitting on
   // anybody. Only on the change: it is far too much work to do every frame.
   bool shapesChanged = axes_.Sync(codeBlocks_);
   shapesChanged = plots_.Sync(codeBlocks_) || shapesChanged;
+  shapesChanged = shaders_.Sync(codeBlocks_) || shapesChanged;
   if (shapesChanged) SettleBlocks();
 
   // A window being hovered or dragged lights up the variable it stands for,
@@ -380,6 +595,7 @@ void App::Update() {
   if (canvasActive) {
     axes_.ActiveVariables(viewport_, fonts_, &active);
     plots_.ActiveVariables(viewport_, fonts_, &active);
+    shaders_.ActiveVariables(viewport_, fonts_, &active);
   }
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     std::vector<std::string> names;
@@ -404,10 +620,24 @@ void App::Draw() {
 
   axes_.Draw(viewport_, fonts_);
   plots_.Draw(viewport_, fonts_);
+  shaders_.Draw(viewport_, fonts_);
 
   // Error balloons last, so they are never buried under a neighbouring card.
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     block->DrawOverlay(viewport_, fonts_);
+  }
+
+  // Selected windows wear their rim whether or not they are being pointed at.
+  axes_.DrawSelectionRims(viewport_, fonts_);
+  plots_.DrawSelectionRims(viewport_, fonts_);
+  shaders_.DrawSelectionRims(viewport_, fonts_);
+
+  if (lassoActive_) DrawLasso(lasso_);
+
+  // Carrying a window brings up the one place it can be thrown away.
+  if (dragBlockMoved_ || selectionMoved_ || axes_.Carrying() || plots_.Carrying() ||
+      shaders_.Carrying()) {
+    DrawDropTarget(OverDropTarget(GetMousePosition()));
   }
 
   menu_.Draw(fonts_, options_);
@@ -440,6 +670,8 @@ bool App::SaveCanvas(const std::string& path) {
         file << "val " << variable.name << " " << variable.value << "\n";
       }
     }
+    for (const std::string& name : block->Hidden()) file << "hide " << name << "\n";
+    if (block->ShaderHidden()) file << "hideshader\n";
     file << "end\n";
   }
 
@@ -456,6 +688,11 @@ bool App::SaveCanvas(const std::string& path) {
     for (const AxisRef& ref : line.refs) {
       file << "ref " << indexOf(ref.block) << " " << ref.name << "\n";
     }
+  }
+
+  for (const ShaderView& view : shaders_.Views()) {
+    file << "shader " << (view.docked ? 1 : 0) << " " << view.worldPos.x << " "
+         << view.worldPos.y << " " << indexOf(view.block) << "\n";
   }
 
   for (const Plot& plot : plots_.Plots()) {
@@ -490,6 +727,13 @@ bool App::LoadCanvas(const std::string& path) {
     bool                                      showMath = false;
     std::vector<std::string>                  lines;
     std::vector<std::pair<std::string, float>> values;
+    std::vector<std::string>                   hidden;
+    bool                                       shaderHidden = false;
+  };
+  struct LoadedShader {
+    bool    docked = true;
+    Vector2 worldPos{};
+    int     block = -1;
   };
   struct LoadedAxis {
     bool                                     docked = true;
@@ -511,6 +755,7 @@ bool App::LoadCanvas(const std::string& path) {
   std::vector<LoadedBlock> blocks;
   std::vector<LoadedAxis>  axes;
   std::vector<LoadedPlot>  plots;
+  std::vector<LoadedShader> shaderViews;
   Vector2 centre{0.0f, 0.0f};
   float   zoom = 1.0f;
   bool    grid = true;
@@ -554,6 +799,18 @@ bool App::LoadCanvas(const std::string& path) {
       float value = 0.0f;
       stream >> name >> value;
       blocks.back().values.emplace_back(name, value);
+    } else if (keyword == "hide" && inBlock) {
+      std::string name;
+      stream >> name;
+      if (!name.empty()) blocks.back().hidden.push_back(name);
+    } else if (keyword == "hideshader" && inBlock) {
+      blocks.back().shaderHidden = true;
+    } else if (keyword == "shader") {
+      LoadedShader view;
+      int docked = 1;
+      stream >> docked >> view.worldPos.x >> view.worldPos.y >> view.block;
+      view.docked = (docked != 0);
+      shaderViews.push_back(view);
     } else if (keyword == "end") {
       inBlock = false;
     } else if (keyword == "axis") {
@@ -587,12 +844,15 @@ bool App::LoadCanvas(const std::string& path) {
   focus_ = nullptr;
   axes_.Clear();
   plots_.Clear();
+  shaders_.Clear();
   codeBlocks_.clear();
   mathBlocks_.clear();
 
   for (LoadedBlock& loaded : blocks) {
     auto block = std::make_unique<CodeBlock>(loaded.position, loaded.em, std::move(loaded.lines));
     block->SetShowMath(loaded.showMath);
+    block->RestoreHidden(std::move(loaded.hidden));
+    block->SetShaderHidden(loaded.shaderHidden);
     block->RestoreValues(std::move(loaded.values));
     block->RequestCompile();
     codeBlocks_.push_back(std::move(block));
@@ -633,6 +893,17 @@ bool App::LoadCanvas(const std::string& path) {
     if (!plot.refs.empty()) curves.push_back(std::move(plot));
   }
   plots_.Adopt(std::move(curves));
+
+  std::vector<ShaderView> views;
+  for (const LoadedShader& loaded : shaderViews) {
+    if (loaded.block < 0 || loaded.block >= static_cast<int>(codeBlocks_.size())) continue;
+    ShaderView view;
+    view.block = codeBlocks_[static_cast<std::size_t>(loaded.block)].get();
+    view.docked = loaded.docked;
+    view.worldPos = loaded.worldPos;
+    views.push_back(view);
+  }
+  shaders_.Adopt(std::move(views));
 
   options_.showGridDots = grid;
   viewport_.Reset(centre, zoom);

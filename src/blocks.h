@@ -66,14 +66,51 @@ class CodeBlock {
   std::string Text() const;
   const std::vector<std::string>& Lines() const { return lines_; }
 
-  // The buttons that appear on a focused box. Returns true if it took the
+  // The button that appears on a focused box. Returns true if it took the
   // click, so nothing behind it also reacts.
   bool HandleChrome(const Viewport& viewport, FontStore& fonts);
-  bool CloseRequested() const { return closeRequested_; }
+
+  // A box being carried onto the drop target stops being drawn -- it and
+  // everything docked under it -- so that it reads as absorbed.
+  void SetAbsorbed(bool absorbed) { absorbed_ = absorbed; }
+  bool Absorbed() const { return absorbed_; }
+
+  // Caught by the lasso. A selected window wears its rim, moves with the rest
+  // of the selection, and goes with it.
+  void SetSelected(bool selected) { selected_ = selected; }
+  bool Selected() const { return selected_; }
+
+  // --- closing ------------------------------------------------------------
+  //
+  // Closing a window is remembered, or the next Sync would put it straight
+  // back. Kept on the box because it is a fact about one of its variables.
+  void Hide(const std::string& name);
+  void Unhide(const std::string& name);
+  bool IsHidden(const std::string& name) const;
+  const std::vector<std::string>& Hidden() const { return hidden_; }
+  void RestoreHidden(std::vector<std::string> names) { hidden_ = std::move(names); }
+
+  void HideShader() { shaderHidden_ = true; }
+  bool ShaderHidden() const { return shaderHidden_; }
+  void SetShaderHidden(bool hidden) { shaderHidden_ = hidden; }
+
+  // Writes a free variable's present value into the source, so that it keeps
+  // that value with no knob to hold it. Throwing away a control has to leave
+  // the thing it controlled somewhere. Returns true if the text changed.
+  bool BakeVariable(const std::string& name);
+
+  // Draws this box's shader into a rectangle. The window that owns that
+  // rectangle lives elsewhere; the GPU side of it lives here.
+  bool HasShader() const { return haveShader_; }
+  void DrawShaderInto(Rectangle rect) const;
+  void SetProbePoint(Vector2 point) const { probePoint_ = point; }
 
   // --- the live program ---------------------------------------------------
   void RequestCompile();
   void Poll();
+  // Frees whatever this box holds on the GPU. Called while the window is still
+  // open, because a destructor may well run after the context has gone.
+  void ReleaseGpu();
   compiler::Status Status() const { return outcome_.status; }
 
   const std::vector<mathprogram::Variable>& Variables() const { return program_.variables(); }
@@ -125,7 +162,6 @@ class CodeBlock {
 
   struct Chrome {
     Rectangle toggle{};
-    Rectangle close{};
   };
 
   void   EnsureCache(FontStore& fonts, float emPx) const;
@@ -139,6 +175,14 @@ class CodeBlock {
   int    ErrorLine() const;
   std::string Injection(int line) const;
   Chrome ChromeRects(const Geometry& g) const;
+
+  // Compiles the GLSL the program assembled. Must be called on the thread that
+  // owns the graphics context, which is why the program cannot do it itself.
+  void   CompileShader();
+  // Renders the probe shader into its one-row target and reads the pixels back,
+  // which is how a shader box gets values onto its number lines. Only when
+  // something it depends on has moved: a read is a stall.
+  void   ProbeIfNeeded();
 
   void   PushUndo(EditKind kind);
   void   Undo();
@@ -159,7 +203,10 @@ class CodeBlock {
   // When focused, the box shows all code. The toggle flips it back to reading
   // as mathematics while still being editable line by line.
   bool   showMath_ = false;
-  bool   closeRequested_ = false;
+  bool   absorbed_ = false;
+  bool   selected_ = false;
+  std::vector<std::string> hidden_;
+  bool   shaderHidden_ = false;
   int    caretLine_ = 0;
   int    caretCol_ = 0;   // byte offset within lines_[caretLine_]
   double blinkAnchor_ = 0.0;
@@ -176,6 +223,27 @@ class CodeBlock {
   double                lastEditTime_ = -1.0;
 
   mathprogram::Program program_;
+
+  // The GPU side of a box whose code turned out to be GLSL: the shader itself,
+  // the uniform slots its knobs drive, and a blank surface for it to cover.
+  Shader                                shader_{};
+  bool                                  haveShader_ = false;
+  std::vector<std::pair<std::string, int>> uniforms_;
+  Texture2D                             previewSurface_{};
+  bool                                  havePreviewSurface_ = false;
+
+  // The second shader, the one that answers questions instead of drawing, and
+  // the one-pixel-per-variable target it answers into.
+  Shader                                probeShader_{};
+  bool                                  haveProbe_ = false;
+  std::vector<std::pair<std::string, int>> probeUniforms_;
+  int                                   probePointLocation_ = -1;
+  RenderTexture2D                       probeTarget_{};
+  bool                                  haveProbeTarget_ = false;
+  // Where in the picture the numbers are read: under the pointer while you are
+  // over it, its middle otherwise. Resolved while drawing.
+  mutable Vector2                       probePoint_{0.5f, 0.5f};
+  std::vector<float>                    probeSignature_;
 
   // Legacy path: a box that declares no variables but does define
   // `bool testFunc()` still gets its red/blue square.

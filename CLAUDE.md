@@ -141,6 +141,20 @@ possible. GLSL should eventually be possible too.
 parts that do have a LaTeX equivalent become LaTeX inline, expanding or
 contracting that region of the box. The rest stays as code.
 
+**Numbers read as numbers.** `2.`, `2.0` and `2` are the same number, and it is
+written `2`. The trailing zeros and the trailing point are how a float is
+spelled in code, like the `f` suffix that was already being dropped -- none of
+it is mathematics. `1.5` keeps its digits; `100` is left alone.
+
+**`:=` for a rule, `=` for a fixed value.** In code `=` always *makes* the left
+side equal to the right, which is what a mathematician writes `:=` for. But a
+line whose right-hand side is a bare number is not a rule, it fixes a value once
+-- and "let a = 0.4" is how that is written. So the test is whether the
+right-hand side mentions anything: `c := rac{a+b}{2}` recomputes when a or b
+move, `a = 0.4` never moves. The distinction is worth having on screen because
+it is exactly the difference between the lines that respond to a knob and the
+lines that do not. TeX has no glyph for it, so it is composed.
+
 **The LaTeX never shows numbers.** It is the mathematician's statement and stays
 abstract. Concrete values live in the knobs and in the hovered code view.
 
@@ -195,6 +209,21 @@ box it came from, in that variable's colour, wherever it is written: in the
 LaTeX or in the code, whichever that line is currently showing, and on every
 line that mentions it rather than only its declaration.
 
+**And the pointer is joined to what it lights up**, by a curve in the same
+colour, drawn in the overlay pass so it runs over every window rather than being
+chopped in half by one. The box says *that* this is the same thing; the curve
+says which pointer it is the same thing as, which starts to matter as soon as
+two windows are open at once. It leaves both ends horizontally and lands on
+whichever side of the name the pointer is already on, so it never crosses the
+thing it is pointing at.
+
+**The pointer over a shader's picture is `fragTexCoord`.** Not a metaphor: that
+is the value the shader is being evaluated at, and it is the value the probe
+reads the number lines from. So it is reported as the thing under the cursor
+like any variable, its name lights up wherever the box writes it, and the curve
+runs from the cursor to it. A box mentions it without declaring it, so it takes
+the next colour along from the box's own variables.
+
 Finding the mention is easy in code, where the font is monospaced and a name is
 a column. In LaTeX it needs help, and the way it gets it is worth knowing: when
 `mathline` writes the LaTeX it wraps every identifier in `\sbref{k}{...}`, a
@@ -203,6 +232,60 @@ rides through parsing onto the node, and through layout onto every item the node
 produced. So the renderer can ask "where did the third identifier end up?" and
 get an answer in pixels, without the typesetter knowing anything about
 variables.
+
+### Windows, and closing them
+
+Everything on the canvas is a **window**: a code box, a number line, a plot, a
+shader's picture. All of them are carried by the rim around their edge, all land
+on the grid, and all are thrown away the same way.
+
+**Carrying a window brings up a cross at the foot of the app window.** Drag onto
+it and the window is *absorbed* -- it stops being drawn, and the cross swells to
+say so. Pull off and nothing has happened. Let go while it is absorbed and the
+window is gone. There is no close button on anything: one gesture, every window,
+and it is the tablet gesture rather than something to be learnt.
+
+**A lasso selects.** Left-dragging the background draws a loop, and everything
+whose middle it went round is selected -- the middle rather than any overlap, so
+what is caught is exactly what was circled. Selection is shown by the rim, the
+same rim that appears when a window is pointed at: there is no second visual
+language for "this one".
+
+A selection then behaves as **one window**. It moves together, by a whole number
+of grid steps applied to the group as one vector, so the arrangement inside it
+survives the move exactly and everything stays on the lattice; it can be carried
+onto the drop target together; and Delete throws it all away, with the same
+consequences closing each window by itself would have had.
+
+**Ctrl+C, Ctrl+X and Ctrl+V take the boxes only.** A number line without the box
+whose variable it stands for would be a window about nothing, so the clipboard
+holds boxes -- their text, their size, and the values their knobs were at. The
+copies get their own windows when they compile, which is what was wanted anyway.
+They paste where the pointer is, and arrive selected, so a paste can be put
+where it belongs without hunting for it.
+
+**Closing is remembered.** Otherwise the next Sync would put the window straight
+back. What is closed is kept on the box, since it is a fact about one of its
+variables, and it is saved with the canvas.
+
+**Closing a control writes its value into the code.** A number line for a free
+variable is not a view, it is the thing choosing the value -- so throwing it
+away has to leave that value somewhere. The initialiser that was only ever
+injected becomes the user's own text: `float a;` becomes `float a = 0.4;`, and
+the box rebuilds. What was temporary is now permanent, which is exactly what
+losing its knob should mean. Undo puts it back.
+
+**And taking the literal back out brings the knob back.** Closing a knob is what
+wrote its value into the code, so editing that value away is asking for the knob
+again -- a hidden variable that has become free once more is un-hidden. The
+invariant is simply that a free variable always has somewhere to be moved from.
+A closed window on a *derived* variable stays closed, since nothing about it has
+changed.
+
+Nothing else has that consequence. A plot, a shader's picture and a derived
+variable's marker are all views: closing one takes away the view and nothing
+else. The rule is worth stating plainly -- **a window that controls something
+bakes what it controlled; a window that only shows something does not.**
 
 ### Number lines
 
@@ -307,6 +390,69 @@ its knob is a re-run; a free *function* cannot, so its example is written into
 the source and changing it would be a rebuild. That is why a function has no
 knob yet.
 
+### Two languages
+
+A box is **C++ by default**. If the C++ compiler refuses it, the same lines are
+tried as **GLSL** -- because a box that says `vec2 p = fragTexCoord;` was never
+trying to be C++. Nothing declares which language a box is in; the box is
+whichever one will have it.
+
+Both languages get the same treatment, which is the point: the user writes the
+middle of something and the app supplies the ends. For C++ that is includes, the
+argv reader and a `main` that prints every value back. For GLSL it is the
+fragment-shader interface raylib expects, one uniform per knob, and a `void
+main() {` ... `}` around the lines. The two bodies are assembled **line for
+line** with each other -- a declaration that becomes a uniform leaves a blank
+line behind rather than vanishing -- so a diagnostic from either language lands
+on the same row of the box.
+
+**A free real reaches a program through argv and a shader through a uniform.**
+Either way its knob moves it without rebuilding: the C++ path re-runs the
+executable, the GLSL path just draws the next frame. That is the same bargain,
+and it is why dragging a knob on a shader box is instant.
+
+**A shader reports values back too**, by rendering them instead of the picture.
+A second shader is compiled from the same lines with different ends: the
+varying replaced by a point given as a uniform, and the user's own write to
+`finalColor` overwritten by ours, which packs the bits of one variable into the
+four bytes of a pixel. It draws into a target one pixel wide per derived
+variable -- `int(gl_FragCoord.x)` picks which -- and those pixels are read back.
+Exact, not scaled: the four bytes of the pixel are the four bytes of the float,
+so a number line shows the value and not an approximation of it.
+
+The real difficulty was never the reporting. It is that **inside a fragment
+shader a variable is a field, not a number**: `r = length(p) * k` has a
+different value at every pixel, so "the value of r" is not a question until a
+point has been chosen. So the point is a uniform, and pointing at the picture is
+what chooses it -- hover the preview and the number lines read the field under
+the cursor; look away and they read its middle. That makes the preview a way of
+*reading* a shader rather than only looking at one, and it is the same idea as
+lighting up a variable's name: two windows, one thing.
+
+A read is a stall, so it only happens when something it depends on has moved --
+a knob, or the pointer over the picture.
+
+Compiling GLSL means talking to the graphics context, which `mathprogram` knows
+nothing about and must keep knowing nothing about. So the program assembles the
+source and stops in `State::Shading`; the host compiles it on the thread that
+owns the context and calls `ShaderCompiled`. Errors come back the same way C++
+errors do -- driver logs are worded differently by every vendor, and the two
+shapes in the wild are parsed in `compiler::ParseGlslLog`.
+
+**When neither language will take a box**, the failure reported is the one from
+whichever language the text was trying to be, decided by whether it mentions a
+word only GLSL has. Without that rule someone writing a shader would be shown a
+C++ complaint about `vec2`, which is true and useless.
+
+A GLSL box shows **what it draws**, in a window beside the card. Unlike a number
+line or a plot it stands for a whole box rather than for one variable, so there
+is one per shader box; in every other way it is an ordinary window, with a rim
+to carry it by and the grid to land on.
+
+Known edges: a box with no `float` declarations never reaches either compiler
+(the rule that keeps ordinary notes from being built), so a shader with no knobs
+does not run yet. `RealFunction` is C++ only.
+
 ### Plots
 
 A real is seen on a number line; a function is seen on a plot. **Input runs up
@@ -366,8 +512,7 @@ code. Lines merge onto a shared axis by dragging one grip onto another, and each
 axis zooms on its own wheel.
 
 Editing a box turns the *whole* box into Monokai-coloured code, with a
-math/code toggle and a cross to delete it, both shown only while the box has
-the caret. Undo is Ctrl+Z; Ctrl+left/right move by word. A line the compiler
+math/code toggle shown only while the box has the caret. Undo is Ctrl+Z; Ctrl+left/right move by word. A line the compiler
 complained about always reveals its code, so the red caret has real characters
 to point at; the message sits in a white balloon in a proportional face.
 
@@ -397,6 +542,14 @@ Every window is moved by the **rim** around its edge, which appears on hover.
 Boxes are sized for the worst case across both readings, so nothing changes
 shape when a line flips or a value changes width. They snap to the grid and
 push each other apart rather than overlapping.
+
+A box whose code the C++ compiler refuses is tried as GLSL, and one that
+compiles draws itself in a square beside the card, with its free reals wired to
+uniforms so the knobs reshape the picture live. `C:\sketches\glsl.sketch` is an
+example: `vec2 p = fragTexCoord - 0.5;` is what makes C++ give up, that line
+stays code because it has no mathematical reading, and the lines around it still
+read as equations. Its derived variables are read back off the GPU, at the point
+in the picture the pointer is over.
 
 The canvas pans on the **right button** and zooms on the wheel; one finger pans
 and two pinch. The left button belongs to the contents of the canvas -- a click
@@ -444,8 +597,17 @@ sections above.
   -- what `RealFunction` is, what operators exist -- and right now nothing in the
   program shows it to you.
 
-- GLSL: what would that even look like? Far off, but it shapes how much we
-  assume about the target language.
+- A shader's derived values are read at one point. Would a number line be
+  better as a *range* -- the least and greatest the variable takes across the
+  whole picture -- with the point under the cursor marked inside it?
+
+- A shader box needs at least one `float` to be built at all, since a box with
+  no variables is left alone on purpose. What is the right rule?
+
+- **Nothing brings a closed window back.** A variable whose number line has been
+  thrown away is still in the code and still has a value; there is just no way
+  to ask for its window again. The escape menu could offer it, or the name in
+  the equation could be clickable.
 - Undo is per box and is lost when a box is deleted; there is no canvas-level
   undo. Is that enough?
 - Nothing warns before discarding unsaved work on load or on close.

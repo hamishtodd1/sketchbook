@@ -2,12 +2,15 @@
 
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "types/RealViz.h"
 #include "blocks.h"
 #include "fontstore.h"
 #include "types/RealFunctionViz.h"
+#include "selection.h"
+#include "shaderwindow.h"
 #include "ui.h"
 #include "viewport.h"
 
@@ -49,6 +52,19 @@ class App {
   // widen with no one having moved anything. Run when that happens.
   void      SettleBlocks();
 
+  // --- selection ----------------------------------------------------------
+  //
+  // Dragging the background draws a lasso; what it catches behaves as one
+  // window from then on -- it moves together, it can be carried onto the drop
+  // target together, and Delete throws it all away.
+  void HandleSelection();
+  void ClearSelection();
+  bool AnySelected() const;
+  bool SelectedRimAt(Vector2 point);
+  void DeleteSelection();
+  void CopySelection(bool cut);
+  void PasteClipboard();
+
   bool SaveCanvas(const std::string& path);
   bool LoadCanvas(const std::string& path);
 
@@ -62,6 +78,7 @@ class App {
   // set of axes can carry variables from two different boxes at once.
   AxisPanel                               axes_;
   PlotPanel                               plots_;
+  ShaderPanel                             shaders_;
 
   // Where this canvas came from, so Ctrl+S can save straight back to it.
   std::string currentPath_;
@@ -69,8 +86,31 @@ class App {
   CodeBlock* focus_ = nullptr;
   CodeBlock* dragBlock_ = nullptr;
   Vector2    dragBlockGrab_{};   // world offset from the box origin to the pointer
+  bool       dragBlockMoved_ = false;
   bool       pressActive_ = false;
   Vector2    pressOrigin_{};
+
+  // The loop being drawn, in screen points, while the background is dragged.
+  std::vector<Vector2> lasso_;
+  bool                 lassoActive_ = false;
+
+  // Moving everything selected at once. The whole group translates rigidly by a
+  // whole number of grid steps, so their arrangement survives the move exactly.
+  bool                                             selectionDrag_ = false;
+  bool                                             selectionMoved_ = false;
+  Vector2                                          selectionGrab_{};
+  std::vector<std::pair<CodeBlock*, Vector2>>      selectionFrom_;
+
+  // What Ctrl+C took. Only boxes: a number line without the box whose variable
+  // it stands for would be a window about nothing.
+  struct Clipping {
+    std::vector<std::string>                   lines;
+    float                                      em = 26.0f;
+    bool                                       showMath = false;
+    std::vector<std::pair<std::string, float>> values;
+    Vector2                                    offset{};   // from the group's corner
+  };
+  std::vector<Clipping> clipboard_;
 };
 
 }  // namespace sb

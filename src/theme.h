@@ -47,6 +47,48 @@ inline void DrawRim(Rectangle rect, float zoom, bool active) {
                               active ? kRimActive : kRim);
 }
 
+// ----------------------------------------------------------- the drop target
+// Carrying a window by its rim brings up a cross at the foot of the app window.
+// Drag onto it and the window is absorbed -- it stops being drawn, and letting
+// go there is what throws it away. Pull off again and nothing has happened.
+//
+// This is the only way to close a window, and it is the same gesture for every
+// kind of window, which is why it lives out here with the rim rather than as a
+// button on any one of them.
+inline constexpr Color kDropBg      = {  56,  57,  50, 220 };
+inline constexpr Color kDropHot     = { 236,  98,  92, 255 };
+inline constexpr Color kDropMark    = { 226, 226, 220, 255 };
+inline constexpr float kDropSide    = 62.0f;   // screen pixels
+inline constexpr float kDropMargin  = 26.0f;
+
+inline Rectangle DropTargetRect() {
+  return {static_cast<float>(GetScreenWidth()) * 0.5f - kDropSide * 0.5f,
+          static_cast<float>(GetScreenHeight()) - kDropSide - kDropMargin, kDropSide,
+          kDropSide};
+}
+
+inline bool OverDropTarget(Vector2 point) {
+  return CheckCollisionPointRec(point, DropTargetRect());
+}
+
+inline void DrawDropTarget(bool absorbing) {
+  Rectangle rect = DropTargetRect();
+  if (absorbing) {
+    // It swells as it takes the window in, so the gesture reads before you let
+    // go rather than after.
+    const float grow = kDropSide * 0.14f;
+    rect = {rect.x - grow, rect.y - grow, rect.width + 2.0f * grow, rect.height + 2.0f * grow};
+  }
+  DrawRectangleRounded(rect, 0.28f, 10, absorbing ? kDropHot : kDropBg);
+
+  const float inset = rect.width * 0.32f;
+  const float thickness = std::max(2.0f, rect.width * 0.055f);
+  DrawLineEx({rect.x + inset, rect.y + inset},
+             {rect.x + rect.width - inset, rect.y + rect.height - inset}, thickness, kDropMark);
+  DrawLineEx({rect.x + rect.width - inset, rect.y + inset},
+             {rect.x + inset, rect.y + rect.height - inset}, thickness, kDropMark);
+}
+
 // ------------------------------------------------------------------ canvas
 inline constexpr Color kCanvasBg   = { 232, 232, 232, 255 };  // pure light gray
 inline constexpr Color kGridDot    = { 148, 148, 148, 255 };
@@ -81,7 +123,6 @@ inline constexpr Color kTokOperator = { 249,  38, 114, 255 };
 inline constexpr Color kChromeBg     = {  56,  57,  50, 255 };
 inline constexpr Color kChromeHover  = {  84,  85,  74, 255 };
 inline constexpr Color kChromeText   = { 226, 226, 220, 255 };
-inline constexpr Color kChromeClose  = { 236,  98,  92, 255 };
 
 // The compiler error balloon: black on white.
 inline constexpr Color kErrorBg      = { 255, 255, 255, 255 };

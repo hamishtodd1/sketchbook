@@ -38,11 +38,22 @@ struct Variable {
   std::vector<float> samples;
 };
 
+// The point a fragment shader is being evaluated at. Worth a name out here
+// because hovering a shader's picture *is* setting it: the pointer over the
+// picture is that value, which makes it a variable like any other as far as the
+// canvas is concerned.
+inline constexpr const char* kShaderInput = "fragTexCoord";
+
+// A box is C++ by default. If the C++ compiler rejects it, the same text is
+// tried as GLSL -- the same lines, wrapped in different boilerplate -- because
+// a box that says `vec2 p = fragTexCoord;` was never meant to be C++.
 enum class State {
   Empty,        // nothing to build
-  Building,     // a compile is in flight
-  Ready,        // built, and values are live
-  Failed,       // the compiler rejected it
+  Building,     // a C++ compile is in flight
+  Shading,      // C++ rejected it; whoever owns the GPU should try the shader
+  Ready,        // built as C++, and values are live
+  ShaderReady,  // built as a shader, and its uniforms are live
+  Failed,       // neither language would take it
   NoCompiler,   // nothing to build it with
 };
 
@@ -68,6 +79,25 @@ class Program {
   // lose to anything already on screen, and are consumed once.
   void Restore(std::vector<std::pair<std::string, float>> values);
 
+  // --- the shader half ----------------------------------------------------
+  //
+  // Compiling GLSL means talking to the graphics context, which this half of
+  // the program knows nothing about. So it assembles the source and hands it
+  // over: the host compiles it on the thread that owns the context and says
+  // what happened.
+  const std::string& glslSource() const { return glsl_; }
+  // A second shader, the same lines over again, whose job is to hand a value
+  // back rather than to draw. Each pixel of a one-row target reports one
+  // derived variable, packed into its four bytes.
+  const std::string&              glslProbeSource() const { return glslProbe_; }
+  const std::vector<std::string>& probedNames() const { return probed_; }
+  // What the probe read, in probedNames() order.
+  void                            SetProbedValues(const std::vector<float>& values);
+  // Lines of boilerplate before the user's first line in it, so a diagnostic
+  // can be moved back into the box's own coordinates.
+  int                shaderLineOffset() const { return glslOffset_; }
+  void               ShaderCompiled(bool ok, const std::string& log);
+
   State                        state() const { return state_; }
   const std::vector<Variable>& variables() const { return variables_; }
   const compiler::Diagnostic&  error() const { return error_; }
@@ -91,6 +121,17 @@ class Program {
 
   std::vector<Variable> variables_;
   State                 state_ = State::Empty;
+
+  // The shader the box would be, assembled alongside the C++ and only used if
+  // the C++ is refused.
+  std::string              glsl_;
+  std::string              glslProbe_;
+  std::vector<std::string> probed_;
+  int                      glslOffset_ = 0;
+  // Whether the text mentions anything only GLSL has. It decides which of two
+  // failures to report when neither language would take the box.
+  bool                 looksLikeGlsl_ = false;
+  compiler::Diagnostic cppError_;
   compiler::Diagnostic  error_;
   std::string           detail_;
   std::string           exePath_;

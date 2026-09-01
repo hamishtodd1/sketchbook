@@ -6,6 +6,7 @@
 #include <string>
 
 #include "grid.h"
+#include "selection.h"
 #include "types/examples.h"
 #include "tex/tex.h"
 #include "text.h"
@@ -137,6 +138,13 @@ bool AxisPanel::Sync(const Blocks& blocks) {
     for (const mathprogram::Variable& variable : block->Variables()) {
       // A function is not a point on a line. It gets a plot instead.
       if (variable.kind != mathprogram::Kind::Real) continue;
+      if (block->IsHidden(variable.name)) {
+        // A line thrown away stays thrown away -- unless the variable has gone
+        // back to being free. Closing a knob is what wrote its value into the
+        // code; taking that value out again is asking for the knob back.
+        if (!variable.free) continue;
+        block->Unhide(variable.name);
+      }
 
       bool present = false;
       for (const NumberLine& line : lines_) {
@@ -184,6 +192,71 @@ Rectangle AxisPanel::RectFor(std::size_t index, const Viewport& viewport,
   const Vector2 anchor = line.dock->DockAnchor(viewport, fonts);
   const float y = anchor.y + (kRowGap + static_cast<float>(slot) * (kRowHeight + kRowGap)) * zoom;
   return {anchor.x, y, width, kRowHeight * zoom};
+}
+
+
+// ------------------------------------------------------------------ selection
+void AxisPanel::SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
+                             FontStore& fonts) {
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    lines_[i].selected = LassoCatches(lasso, RectFor(i, viewport, fonts));
+  }
+}
+
+void AxisPanel::ClearSelection() {
+  for (NumberLine& line : lines_) line.selected = false;
+}
+
+bool AxisPanel::AnySelected() const {
+  for (const NumberLine& line : lines_) {
+    if (line.selected) return true;
+  }
+  return false;
+}
+
+bool AxisPanel::SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const {
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    if (!lines_[i].selected) continue;
+    if (PointOnRim(RectFor(i, viewport, fonts), point)) return true;
+  }
+  return false;
+}
+
+void AxisPanel::BeginSelectionDrag() {
+  for (NumberLine& line : lines_) line.dragFrom = line.worldPos;
+}
+
+void AxisPanel::MoveSelection(Vector2 worldDelta) {
+  for (NumberLine& line : lines_) {
+    // A docked row has no position of its own: it follows its box, and moves
+    // when the box does.
+    if (!line.selected || line.docked) continue;
+    line.worldPos = {line.dragFrom.x + worldDelta.x, line.dragFrom.y + worldDelta.y};
+  }
+}
+
+void AxisPanel::DeleteSelection() {
+  for (NumberLine& line : lines_) {
+    if (!line.selected) continue;
+    // The same bargain as closing one by itself: a knob thrown away leaves the
+    // value it was choosing behind, written into the code.
+    for (const AxisRef& ref : line.refs) {
+      if (ref.block == nullptr) continue;
+      ref.block->BakeVariable(ref.name);
+      ref.block->Hide(ref.name);
+    }
+  }
+  lines_.erase(std::remove_if(lines_.begin(), lines_.end(),
+                              [](const NumberLine& line) { return line.selected; }),
+               lines_.end());
+  drag_ = Drag::None;
+}
+
+void AxisPanel::DrawSelectionRims(const Viewport& viewport, FontStore& fonts) const {
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    if (!lines_[i].selected) continue;
+    DrawRim(RectFor(i, viewport, fonts), viewport.Zoom(), true);
+  }
 }
 
 void AxisPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
@@ -298,6 +371,18 @@ bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Bl
           merged = true;
           break;
         }
+        if (!merged && OverDropTarget(pointer)) {
+          // Thrown away. A number line is a *control*, so whatever it was
+          // holding has to go somewhere: the value a knob was choosing is
+          // written into the code, where it stays without anything to hold it.
+          for (const AxisRef& ref : lines_[dragLine_].refs) {
+            if (ref.block == nullptr) continue;
+            ref.block->BakeVariable(ref.name);
+            ref.block->Hide(ref.name);
+          }
+          lines_.erase(lines_.begin() + static_cast<std::ptrdiff_t>(dragLine_));
+          merged = true;   // nothing left to place
+        }
         if (!merged) {
           // Dropped on empty canvas: it lives there now, on the grid like every
           // other window.
@@ -380,6 +465,12 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
 
   for (std::size_t i = 0; i < lines_.size(); ++i) {
     const NumberLine& line = lines_[i];
+    const bool carried = (drag_ == Drag::Move && dragMoved_ && i == dragLine_);
+    // Absorbed by the drop target, or belonging to a box that is: gone from the
+    // canvas until you pull off it.
+    if (carried && OverDropTarget(GetMousePosition())) continue;
+    if (line.docked && line.dock != nullptr && line.dock->Absorbed()) continue;
+
     const Rectangle row = RectFor(i, viewport, fonts);
     const Rectangle area = AxisArea(row);
     const float scale = row.height / kRowHeight;
@@ -387,8 +478,8 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     DrawRectangleRounded(row, 0.28f, 8, kAxisBg);
     DrawRectangleRoundedLinesEx(row, 0.28f, 8, 1.0f, kAxisBorder);
 
-    const bool carried = (drag_ == Drag::Move && dragMoved_ && i == dragLine_);
     if (carried || PointOnRim(row, GetMousePosition())) DrawRim(row, zoom, carried);
+
 
     const float axisY = row.y + row.height * 0.58f;
     DrawLineEx({area.x, axisY}, {area.x + area.width, axisY}, std::max(1.0f, 1.2f * scale),

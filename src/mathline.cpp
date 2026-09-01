@@ -52,6 +52,13 @@ std::vector<Token> Tokenize(std::string_view source, bool* ok) {
       if (i < source.size() && (source[i] == 'f' || source[i] == 'F')) ++i;
       std::string text(source.substr(start, i - start));
       if (!text.empty() && (text.back() == 'f' || text.back() == 'F')) text.pop_back();
+      // So is the rest of how a float is spelled: `2.` and `2.0` are both the
+      // number two, and that is written `2`.
+      if (text.find('.') != std::string::npos) {
+        while (!text.empty() && text.back() == '0') text.pop_back();
+        if (!text.empty() && text.back() == '.') text.pop_back();
+        if (text.empty()) text = "0";   // `.0` and `0.0` alike
+      }
       tokens.push_back({Tok::Number, text});
       continue;
     }
@@ -215,6 +222,23 @@ class Parser {
 // for equality, since a tag makes otherwise identical renderings differ.
 std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string>* marks);
 
+// Which equals sign a line has earned.
+//
+// In code `=` always *makes* the left side equal to the right, which is what a
+// mathematician writes `:=` for. But not every such line is a rule: one whose
+// right-hand side is a bare number fixes a value once and for all, and "let
+// a = 0.4" is how that is written. So:
+//
+//   the right-hand side mentions something  ->  `:=`, a rule that recomputes
+//   the right-hand side is a constant       ->  `=`,  a value being fixed
+//
+// TeX has no single glyph for it, so it is composed, the way LaTeX itself is
+// obliged to.
+// Two relations set side by side, which TeX spaces at nothing at all -- the gap
+// between them is the glyphs' own bearings, and that is what makes the pair
+// read as one symbol rather than as a colon that has fallen onto an equals.
+const char* Defines(bool rule) { return rule ? " := " : " = "; }
+
 // Tags one mention of a name.
 std::string Marked(const std::string& name, std::vector<std::string>* marks) {
   if (marks == nullptr) return NameToLatex(name);
@@ -257,6 +281,10 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
     case NodeKind::Ident:
       return Marked(node.text, marks);
     case NodeKind::Call: {
+      if (node.text == "length" && node.args.size() == 1) {
+        // A shader's `length` is the norm, and a norm is written with bars.
+        return "\\left\\Vert " + Emit(*node.args[0], 0, marks) + " \\right\\Vert";
+      }
       if (node.text == "sqrt" && node.args.size() == 1) {
         return "\\sqrt{" + Emit(*node.args[0], 0, marks) + "}";
       }
@@ -463,8 +491,11 @@ Line Parse(std::string_view source) {
     line.type = type;
     line.name = name;
     line.hasInitialiser = true;
-    line.latex = Marked(name, &line.marks) + "(" + NameToLatex(parameter) + ") = " +
-                 Emit(*expression, 0, &line.marks);
+    const std::string head = Marked(name, &line.marks) + "(" + NameToLatex(parameter) + ")";
+    const std::string body2 = Emit(*expression, 0, &line.marks);
+    // Everything the body mentions is now marked; anything beyond the name
+    // itself means the definition depends on something.
+    line.latex = head + Defines(line.marks.size() > 1) + body2;
     return line;
   }
 
@@ -481,7 +512,9 @@ Line Parse(std::string_view source) {
   line.type = type;
   line.name = name;
   line.hasInitialiser = true;
-  line.latex = Marked(name, &line.marks) + " = " + Emit(*expression, 0, &line.marks);
+  const std::string head = Marked(name, &line.marks);
+  const std::string body = Emit(*expression, 0, &line.marks);
+  line.latex = head + Defines(line.marks.size() > 1) + body;
   return line;
 }
 

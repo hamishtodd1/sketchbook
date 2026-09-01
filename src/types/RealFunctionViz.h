@@ -40,6 +40,8 @@ struct Plot {
   bool                  docked = true;
   Vector2               worldPos{};
   CodeBlock*            dock = nullptr;
+  bool                  selected = false;
+  Vector2               dragFrom{};
 };
 
 class PlotPanel {
@@ -66,6 +68,24 @@ class PlotPanel {
 
   // As AxisPanel::Dragging: a drag in flight gets the pointer first.
   bool Dragging() const { return drag_ != Drag::None; }
+  // As AxisPanel::Carrying.
+  bool Carrying() const { return drag_ == Drag::Move && dragMoved_; }
+
+  // --- selection ----------------------------------------------------------
+  // The lasso catches windows by their middle. A selected one wears its rim,
+  // moves with the rest of the selection, and goes with it.
+  void SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
+                    FontStore& fonts);
+  void ClearSelection();
+  bool AnySelected() const;
+  bool SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const;
+  // Remembers where everything selected is, so a drag can place it relative to
+  // there rather than accumulating a delta frame by frame.
+  void BeginSelectionDrag();
+  void MoveSelection(Vector2 worldDelta);
+  void DeleteSelection();
+  void DrawSelectionRims(const Viewport& viewport, FontStore& fonts) const;
+
 
   // --- persistence --------------------------------------------------------
   const std::vector<Plot>& Plots() const { return plots_; }

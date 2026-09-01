@@ -1,7 +1,9 @@
 #include "mathprogram.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
@@ -40,6 +42,94 @@ std::string Prologue() {
       "int main(int argc, char** argv) {\n";
 }
 
+// The same job as the C++ prologue, for the other language. A fragment shader
+// wants the interface raylib gives it, one uniform per knob, and a main to put
+// the user's lines in -- so the boilerplate goes on at both ends.
+std::string ShaderPrologue(const std::vector<Variable>& variables, int* lines) {
+  std::string out = std::string("#version 330\n") + "in vec2 " + kShaderInput +
+                    ";\n"
+                    "in vec4 fragColor;\n"
+                    "out vec4 finalColor;\n"
+                    "uniform sampler2D texture0;\n"
+                    "uniform vec4 colDiffuse;\n";
+  // A free real reaches a program through argv and a shader through a uniform.
+  // Either way the knob on its number line is what moves it.
+  for (const Variable& variable : variables) {
+    if (variable.free && variable.kind == Kind::Real) {
+      out += "uniform float " + variable.name + ";\n";
+    }
+  }
+  out += "void main() {\n";
+  *lines = static_cast<int>(std::count(out.begin(), out.end(), '\n'));
+  return out;
+}
+
+// A shader *can* hand a value back: render the value instead of the picture,
+// into a target one pixel per variable, and read the pixels. What it cannot do
+// is hand back a value that does not depend on where you look -- inside a
+// fragment shader a variable is a field, not a number -- so the point to read
+// at is a uniform, and choosing it is the caller's problem.
+//
+// This is the same body over again with different ends: the varying replaced by
+// that point, and the user's own write to finalColor overwritten by ours.
+std::string ProbePrologue(const std::vector<Variable>& variables) {
+  std::string out =
+      "#version 330\n"
+      "in vec4 fragColor;\n"
+      "out vec4 finalColor;\n"
+      "uniform sampler2D texture0;\n"
+      "uniform vec4 colDiffuse;\n"
+      "uniform vec2 sbProbe;\n";
+  for (const Variable& variable : variables) {
+    if (variable.free && variable.kind == Kind::Real) {
+      out += "uniform float " + variable.name + ";\n";
+    }
+  }
+  out += "void main() {\n";
+  // Not the interpolated varying: the one point being asked about.
+  out += std::string("  vec2 ") + kShaderInput + " = sbProbe;\n";
+  return out;
+}
+
+std::string ProbeEpilogue(const std::vector<std::string>& probed) {
+  std::string out = "  float sbValue = 0.0;\n  int sbIndex = int(gl_FragCoord.x);\n";
+  for (std::size_t i = 0; i < probed.size(); ++i) {
+    out += "  if (sbIndex == " + std::to_string(i) + ") sbValue = " + probed[i] + ";\n";
+  }
+  // Exact, not scaled: the four bytes of the pixel are the four bytes of the
+  // float, so nothing is lost on the way back.
+  out +=
+      "  uint sbBits = floatBitsToUint(sbValue);\n"
+      "  finalColor = vec4(float((sbBits >> 24) & 255u), float((sbBits >> 16) & 255u),\n"
+      "                    float((sbBits >> 8) & 255u), float(sbBits & 255u)) / 255.0;\n"
+      "}\n";
+  return out;
+}
+
+// Words only GLSL has. Used to decide which failure to report when the box
+// compiles as neither language: whichever one the text was trying to be.
+bool MentionsShaderWord(const std::string& text) {
+  static const char* const kWords[] = {
+      "vec2", "vec3", "vec4", "ivec2", "ivec3", "ivec4", "bvec2", "bvec3", "bvec4",
+      "mat2", "mat3", "mat4", "sampler2D", "fragTexCoord", "fragColor", "finalColor",
+      "gl_FragCoord", "gl_Position", "gl_FragColor",
+  };
+  auto isWordChar = [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+  };
+  for (const char* word : kWords) {
+    const std::string needle = word;
+    for (std::size_t at = text.find(needle); at != std::string::npos;
+         at = text.find(needle, at + 1)) {
+      const bool beforeOk = (at == 0) || !isWordChar(text[at - 1]);
+      const std::size_t end = at + needle.size();
+      const bool afterOk = (end >= text.size()) || !isWordChar(text[end]);
+      if (beforeOk && afterOk) return true;
+    }
+  }
+  return false;
+}
+
 std::string FormatFloat(float value) {
   char buffer[64];
   std::snprintf(buffer, sizeof(buffer), "%.6g", static_cast<double>(value));
@@ -73,6 +163,9 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
 
   std::vector<Variable> variables;
   std::string body;
+  // The same lines assembled for the other language, kept in step line for line
+  // with the C++ so a diagnostic from either lands on the same row of the box.
+  std::string shaderBody;
   int freeIndex = 0;
 
   for (const std::string& raw : lines) {
@@ -93,6 +186,7 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
         variables.push_back(variable);
         body += "  " + line.type + " " + line.name + " = " +
                 types::ExampleRealFunction(line.name) + ";\n";
+        shaderBody += "\n";   // functions are not a shader's business
         continue;
       }
 
@@ -112,6 +206,9 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
 
       body += "  " + line.type + " " + line.name + " = sb_input(argc, argv, " +
               std::to_string(freeIndex) + ", 0.0f);\n";
+      // Its uniform is declared above main, so the line itself goes blank --
+      // blank rather than absent, to keep the line numbering honest.
+      shaderBody += "\n";
       ++freeIndex;
       continue;
     }
@@ -128,6 +225,7 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
     // Anything else is passed through verbatim: it is already valid C++, or it
     // is the user's mistake to see reported.
     body += "  " + raw + "\n";
+    shaderBody += "  " + raw + "\n";
   }
 
   if (variables.empty()) {
@@ -148,6 +246,22 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
   }
   body += "  return 0;\n}\n";
 
+  // Assembled now, alongside the C++, and used only if the C++ is refused.
+  int prologueLines = 0;
+  glsl_ = ShaderPrologue(variables, &prologueLines) + shaderBody + "}\n";
+  glslOffset_ = prologueLines;
+  looksLikeGlsl_ = MentionsShaderWord(shaderBody);
+
+  // A free real is already known -- its knob is what set it. The derived ones
+  // are what have to be asked for.
+  probed_.clear();
+  for (const Variable& variable : variables) {
+    if (!variable.free && variable.kind == Kind::Real) probed_.push_back(variable.name);
+  }
+  glslProbe_ = probed_.empty()
+                   ? std::string()
+                   : (ProbePrologue(variables) + shaderBody + ProbeEpilogue(probed_));
+
   variables_ = std::move(variables);
   state_ = State::Building;
   error_ = {};
@@ -159,6 +273,37 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
   const int offset = LineOffset();
   build_ = std::async(std::launch::async,
                       [source, offset] { return compiler::Compile(source, offset); });
+}
+
+void Program::ShaderCompiled(bool ok, const std::string& log) {
+  if (state_ != State::Shading) return;
+  if (ok) {
+    state_ = State::ShaderReady;
+    error_ = {};
+    return;
+  }
+
+  // Neither language would take it. Report the failure from whichever one the
+  // text was trying to be, and C++ if it does not look like either.
+  state_ = State::Failed;
+  const compiler::Diagnostic shaderError = compiler::ParseGlslLog(log, glslOffset_);
+  error_ = (looksLikeGlsl_ && shaderError.present) ? shaderError : cppError_;
+}
+
+void Program::SetProbedValues(const std::vector<float>& values) {
+  if (state_ != State::ShaderReady) return;
+  // Walked in the same order probed_ was built in, so the n-th pixel is the
+  // n-th derived real.
+  std::size_t index = 0;
+  for (Variable& variable : variables_) {
+    if (variable.free || variable.kind != Kind::Real) continue;
+    if (index >= values.size()) break;
+    if (std::isfinite(values[index])) {
+      variable.value = values[index];
+      variable.known = true;
+    }
+    ++index;
+  }
 }
 
 void Program::Restore(std::vector<std::pair<std::string, float>> values) {
@@ -235,8 +380,11 @@ void Program::Poll() {
       state_ = State::NoCompiler;
       detail_ = build.detail;
     } else if (!build.ok) {
-      state_ = State::Failed;
-      error_ = build.error;
+      // C++ would not have it. The same lines might still be a shader, but
+      // compiling one means talking to the graphics context, which is not ours
+      // to talk to: hand the source over and wait to be told what happened.
+      cppError_ = build.error;
+      state_ = State::Shading;
     } else {
       compiler::Discard(exePath_);
       exePath_ = build.exePath;

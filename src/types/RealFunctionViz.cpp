@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "grid.h"
+#include "selection.h"
 #include "types/examples.h"
 #include "tex/tex.h"
 #include "text.h"
@@ -131,6 +132,8 @@ bool PlotPanel::Sync(const Blocks& blocks) {
   for (const std::unique_ptr<CodeBlock>& block : blocks) {
     for (const mathprogram::Variable& variable : block->Variables()) {
       if (variable.kind != mathprogram::Kind::Function) continue;
+      // A plot thrown away stays thrown away.
+      if (block->IsHidden(variable.name)) continue;
 
       bool present = false;
       for (const Plot& plot : plots_) {
@@ -181,6 +184,68 @@ Rectangle PlotPanel::RectFor(std::size_t index, const Viewport& viewport,
   }
   const float y = top + (kGap + static_cast<float>(slot) * (kPlotSide + kGap)) * zoom;
   return {anchor.x, y, width, kPlotSide * zoom};
+}
+
+
+// ------------------------------------------------------------------ selection
+void PlotPanel::SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
+                             FontStore& fonts) {
+  for (std::size_t i = 0; i < plots_.size(); ++i) {
+    plots_[i].selected = LassoCatches(lasso, RectFor(i, viewport, fonts));
+  }
+}
+
+void PlotPanel::ClearSelection() {
+  for (Plot& plot : plots_) plot.selected = false;
+}
+
+bool PlotPanel::AnySelected() const {
+  for (const Plot& plot : plots_) {
+    if (plot.selected) return true;
+  }
+  return false;
+}
+
+bool PlotPanel::SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const {
+  for (std::size_t i = 0; i < plots_.size(); ++i) {
+    if (!plots_[i].selected) continue;
+    if (PointOnRim(RectFor(i, viewport, fonts), point)) return true;
+  }
+  return false;
+}
+
+void PlotPanel::BeginSelectionDrag() {
+  for (Plot& plot : plots_) plot.dragFrom = plot.worldPos;
+}
+
+void PlotPanel::MoveSelection(Vector2 worldDelta) {
+  for (Plot& plot : plots_) {
+    // A docked row has no position of its own: it follows its box, and moves
+    // when the box does.
+    if (!plot.selected || plot.docked) continue;
+    plot.worldPos = {plot.dragFrom.x + worldDelta.x, plot.dragFrom.y + worldDelta.y};
+  }
+}
+
+void PlotPanel::DeleteSelection() {
+  for (Plot& plot : plots_) {
+    if (!plot.selected) continue;
+    // A plot only ever showed you something, so there is nothing to save.
+    for (const CurveRef& ref : plot.refs) {
+      if (ref.block != nullptr) ref.block->Hide(ref.name);
+    }
+  }
+  plots_.erase(std::remove_if(plots_.begin(), plots_.end(),
+                              [](const Plot& plot) { return plot.selected; }),
+               plots_.end());
+  drag_ = Drag::None;
+}
+
+void PlotPanel::DrawSelectionRims(const Viewport& viewport, FontStore& fonts) const {
+  for (std::size_t i = 0; i < plots_.size(); ++i) {
+    if (!plots_[i].selected) continue;
+    DrawRim(RectFor(i, viewport, fonts), viewport.Zoom(), true);
+  }
 }
 
 void PlotPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
@@ -301,6 +366,15 @@ bool PlotPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
           merged = true;
           break;
         }
+        if (!merged && OverDropTarget(pointer)) {
+          // A plot only ever showed you something; closing it takes nothing
+          // away but the view.
+          for (const CurveRef& ref : plots_[dragPlot_].refs) {
+            if (ref.block != nullptr) ref.block->Hide(ref.name);
+          }
+          plots_.erase(plots_.begin() + static_cast<std::ptrdiff_t>(dragPlot_));
+          merged = true;
+        }
         if (!merged) {
           plots_[dragPlot_].docked = false;
           plots_[dragPlot_].worldPos =
@@ -353,6 +427,10 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
 
   for (std::size_t i = 0; i < plots_.size(); ++i) {
     const Plot& plot = plots_[i];
+    const bool carried = (drag_ == Drag::Move && dragMoved_ && i == dragPlot_);
+    if (carried && OverDropTarget(GetMousePosition())) continue;
+    if (plot.docked && plot.dock != nullptr && plot.dock->Absorbed()) continue;
+
     const Rectangle rect = RectFor(i, viewport, fonts);
     const float scale = rect.height / kPlotSide;
     const float unit = rect.height / std::max(plot.span, kMinSpan);   // pixels per unit
@@ -369,7 +447,6 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     DrawRectangleRounded(rect, 0.06f, 8, kAxisBg);
     DrawRectangleRoundedLinesEx(rect, 0.06f, 8, 1.0f, kAxisBorder);
 
-    const bool carried = (drag_ == Drag::Move && dragMoved_ && i == dragPlot_);
     if (carried || PointOnRim(rect, GetMousePosition())) DrawRim(rect, zoom, carried);
 
     // Nothing spills out of the card, so a steep curve does not scribble over

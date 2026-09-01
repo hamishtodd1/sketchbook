@@ -76,4 +76,13 @@ Run Execute(const std::string& exePath, const std::vector<std::string>& argument
 // Deletes a built executable.
 void Discard(const std::string& exePath);
 
+// ---------------------------------------------------------------------------
+// GLSL diagnostics.
+//
+// A shader is compiled by the driver, not by this toolchain, and every vendor
+// words its log differently. The two shapes in the wild are `0(12) : error ...`
+// and `ERROR: 0:12: ...`; both are read here so a shader's mistake lands in the
+// same balloon as a C++ one. `lineOffset` is the boilerplate to subtract.
+Diagnostic ParseGlslLog(const std::string& log, int lineOffset);
+
 }  // namespace sb::compiler

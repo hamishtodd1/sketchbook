@@ -3,11 +3,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string_view>
 #include <utility>
 
 #include "highlight.h"
+#include "rlgl.h"
 #include "text.h"
 #include "theme.h"
 #include "types/examples.h"
@@ -26,18 +30,19 @@ constexpr int kMinColumns = 14;
 // The result square, to the right of the card.
 constexpr float kSquareSide = 56.0f;
 constexpr float kSquareGap = 20.0f;
+// A shader preview goes in the same place, but a shader deserves more room.
+constexpr float kShaderSide = 220.0f;
 
 // The error balloon.
 constexpr float kErrorEmScale = 0.75f;   // of the code size, as specified
 constexpr float kErrorMaxWidth = 330.0f; // world units
 constexpr float kErrorPad = 10.0f;
 
-// The buttons above a focused box.
+// The button above a focused box.
 constexpr float kChromeHeight = 22.0f;
 constexpr float kChromeGap = 7.0f;
 constexpr float kChromeEm = 14.0f;
 constexpr float kToggleWidth = 58.0f;
-constexpr float kCloseWidth = 24.0f;
 
 // Monospaced cells kept clear for an injected initialiser, so the box does not
 // resize as the value changes width.
@@ -98,6 +103,37 @@ std::string FormatInjected(float value) {
   char buffer[64];
   std::snprintf(buffer, sizeof(buffer), "%.4g", static_cast<double>(value));
   return buffer;
+}
+
+// raylib reports a shader's compile errors through TraceLog and nowhere else,
+// so the log is caught here for the length of the call. Not re-entrant, and
+// does not need to be: shaders are compiled one at a time, on the main thread.
+std::string* g_shaderLog = nullptr;
+
+void CaptureTraceLog(int level, const char* text, va_list args) {
+  if (g_shaderLog == nullptr || level < LOG_WARNING) return;
+  char buffer[2048];
+  std::vsnprintf(buffer, sizeof(buffer), text, args);
+  *g_shaderLog += buffer;
+  *g_shaderLog += '\n';
+}
+
+bool CompileFragmentShader(const std::string& source, Shader* shader, std::string* log) {
+  log->clear();
+  g_shaderLog = log;
+  SetTraceLogCallback(CaptureTraceLog);
+  // A null vertex shader means raylib's own, which is what supplies
+  // fragTexCoord and fragColor.
+  const Shader compiled = LoadShaderFromMemory(nullptr, source.c_str());
+  SetTraceLogCallback(nullptr);
+  g_shaderLog = nullptr;
+
+  if (IsShaderValid(compiled)) {
+    *shader = compiled;
+    return true;
+  }
+  UnloadShader(compiled);
+  return false;
 }
 
 void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float borderWidth) {
@@ -209,11 +245,66 @@ Color CodeBlock::VariableColor(const std::string& name) const {
   for (std::size_t i = 0; i < variables.size(); ++i) {
     if (variables[i].name == name) return sb::VariableColor(static_cast<int>(i));
   }
-  return kCodeFg;
+  // Something the box mentions but does not declare -- a shader's input, which
+  // the pointer stands for. It takes the next colour along, so it is as
+  // distinct from the box's own variables as they are from each other.
+  return sb::VariableColor(static_cast<int>(variables.size()));
 }
 
 void CodeBlock::SetHighlights(std::vector<std::string> names) {
   highlights_ = std::move(names);
+}
+
+void CodeBlock::Hide(const std::string& name) {
+  if (IsHidden(name)) return;
+  hidden_.push_back(name);
+}
+
+void CodeBlock::Unhide(const std::string& name) {
+  hidden_.erase(std::remove(hidden_.begin(), hidden_.end(), name), hidden_.end());
+}
+
+bool CodeBlock::IsHidden(const std::string& name) const {
+  return std::find(hidden_.begin(), hidden_.end(), name) != hidden_.end();
+}
+
+bool CodeBlock::BakeVariable(const std::string& name) {
+  const mathprogram::Variable* variable = FindVariable(name);
+  if (variable == nullptr || !variable->free) return false;
+
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    const mathline::Line parsed = mathline::Parse(lines_[i]);
+    if (parsed.kind != mathline::Kind::Declaration || parsed.hasInitialiser) continue;
+    if (parsed.name != name) continue;
+
+    // The value that was only ever injected becomes the user's own text. It was
+    // theirs to choose and they have chosen it.
+    PushUndo(EditKind::Structural);
+    lines_[i] = parsed.type + " " + parsed.name + " = " + FormatInjected(variable->value) + ";";
+    TouchEdit();
+    dirty_ = true;
+    RequestCompile();
+    return true;
+  }
+  return false;
+}
+
+void CodeBlock::DrawShaderInto(Rectangle rect) const {
+  if (!haveShader_ || !havePreviewSurface_) return;
+
+  for (const auto& [name, location] : uniforms_) {
+    if (location < 0) continue;
+    const mathprogram::Variable* variable = FindVariable(name);
+    if (variable == nullptr) continue;
+    const float value = variable->value;
+    SetShaderValue(shader_, location, &value, SHADER_UNIFORM_FLOAT);
+  }
+
+  BeginShaderMode(shader_);
+  // One white pixel stretched over the square: the source rectangle covers the
+  // whole texture, so fragTexCoord runs 0..1 across it.
+  DrawTexturePro(previewSurface_, {0.0f, 0.0f, 1.0f, 1.0f}, rect, {0.0f, 0.0f}, 0.0f, WHITE);
+  EndShaderMode();
 }
 
 std::vector<Rectangle> CodeBlock::MentionRects(std::size_t line, const std::string& name,
@@ -358,12 +449,12 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
 CodeBlock::Chrome CodeBlock::ChromeRects(const Geometry& g) const {
   const float height = kChromeHeight * g.zoom;
   const float y = g.rect.y - height - kChromeGap * g.zoom;
-  const float closeWidth = kCloseWidth * g.zoom;
   const float toggleWidth = kToggleWidth * g.zoom;
 
   Chrome chrome;
-  chrome.close = {g.rect.x + g.rect.width - closeWidth, y, closeWidth, height};
-  chrome.toggle = {chrome.close.x - toggleWidth - 5.0f * g.zoom, y, toggleWidth, height};
+  // The cross that used to sit here is gone: a box is thrown away the same way
+  // every other window is, by carrying it onto the drop target.
+  chrome.toggle = {g.rect.x + g.rect.width - toggleWidth, y, toggleWidth, height};
   return chrome;
 }
 
@@ -666,13 +757,9 @@ bool CodeBlock::HandleChrome(const Viewport& viewport, FontStore& fonts) {
   const Vector2 pointer = GetMousePosition();
 
   const bool overToggle = CheckCollisionPointRec(pointer, chrome.toggle);
-  const bool overClose = CheckCollisionPointRec(pointer, chrome.close);
-  if (!overToggle && !overClose) return false;
+  if (!overToggle) return false;
 
-  if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-    if (overClose) closeRequested_ = true;
-    else showMath_ = !showMath_;
-  }
+  if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) showMath_ = !showMath_;
   return true;   // claim the hover too, so a click never falls through
 }
 
@@ -693,8 +780,158 @@ void CodeBlock::RequestCompile() {
                         [source = Text()] { return compiler::BuildAndRun(source); });
 }
 
+void CodeBlock::ReleaseGpu() {
+  if (haveShader_) {
+    UnloadShader(shader_);
+    haveShader_ = false;
+  }
+  if (haveProbe_) {
+    UnloadShader(probeShader_);
+    haveProbe_ = false;
+  }
+  if (haveProbeTarget_) {
+    UnloadRenderTexture(probeTarget_);
+    haveProbeTarget_ = false;
+  }
+  if (havePreviewSurface_) {
+    UnloadTexture(previewSurface_);
+    havePreviewSurface_ = false;
+  }
+  uniforms_.clear();
+  probeUniforms_.clear();
+  probeSignature_.clear();
+}
+
+void CodeBlock::ProbeIfNeeded() {
+  if (!haveProbe_ || !haveProbeTarget_ || !havePreviewSurface_) return;
+
+  // Nothing has moved, so the answer is the one already on screen.
+  std::vector<float> signature;
+  signature.reserve(probeUniforms_.size() + 2);
+  signature.push_back(probePoint_.x);
+  signature.push_back(probePoint_.y);
+  for (const auto& [name, location] : probeUniforms_) {
+    const mathprogram::Variable* variable = FindVariable(name);
+    signature.push_back(variable == nullptr ? 0.0f : variable->value);
+  }
+  if (signature == probeSignature_) return;
+  probeSignature_ = signature;
+
+  for (const auto& [name, location] : probeUniforms_) {
+    if (location < 0) continue;
+    const mathprogram::Variable* variable = FindVariable(name);
+    if (variable == nullptr) continue;
+    const float value = variable->value;
+    SetShaderValue(probeShader_, location, &value, SHADER_UNIFORM_FLOAT);
+  }
+  if (probePointLocation_ >= 0) {
+    const float point[2] = {probePoint_.x, probePoint_.y};
+    SetShaderValue(probeShader_, probePointLocation_, point, SHADER_UNIFORM_VEC2);
+  }
+
+  const float width = static_cast<float>(probeTarget_.texture.width);
+  BeginTextureMode(probeTarget_);
+  // The pixels are data, not a picture: blending them with what was there
+  // before would corrupt every byte.
+  rlDisableColorBlend();
+  BeginShaderMode(probeShader_);
+  DrawTexturePro(previewSurface_, {0.0f, 0.0f, 1.0f, 1.0f}, {0.0f, 0.0f, width, 1.0f},
+                 {0.0f, 0.0f}, 0.0f, WHITE);
+  EndShaderMode();
+  rlEnableColorBlend();
+  EndTextureMode();
+
+  const Image pixels = LoadImageFromTexture(probeTarget_.texture);
+  if (pixels.data != nullptr) {
+    const unsigned char* bytes = static_cast<const unsigned char*>(pixels.data);
+    const std::vector<std::string>& names = program_.probedNames();
+    std::vector<float> values;
+    values.reserve(names.size());
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      const std::uint32_t bits = (static_cast<std::uint32_t>(bytes[i * 4 + 0]) << 24) |
+                                 (static_cast<std::uint32_t>(bytes[i * 4 + 1]) << 16) |
+                                 (static_cast<std::uint32_t>(bytes[i * 4 + 2]) << 8) |
+                                 static_cast<std::uint32_t>(bytes[i * 4 + 3]);
+      float value = 0.0f;
+      std::memcpy(&value, &bits, sizeof(value));
+      values.push_back(value);
+    }
+    program_.SetProbedValues(values);
+  }
+  UnloadImage(pixels);
+}
+
+void CodeBlock::CompileShader() {
+  if (haveShader_) {
+    UnloadShader(shader_);
+    haveShader_ = false;
+  }
+  uniforms_.clear();
+
+  std::string log;
+  const bool ok = CompileFragmentShader(program_.glslSource(), &shader_, &log);
+  haveShader_ = ok;
+
+  if (ok) {
+    // The knobs drive uniforms. Their slots are looked up once here rather than
+    // every frame: each one is a round trip to the driver.
+    for (const mathprogram::Variable& variable : program_.variables()) {
+      if (!variable.free || variable.kind != mathprogram::Kind::Real) continue;
+      uniforms_.emplace_back(variable.name,
+                             GetShaderLocation(shader_, variable.name.c_str()));
+    }
+    if (!havePreviewSurface_) {
+      // Something for the shader to cover. One white pixel stretched over the
+      // preview is what makes fragTexCoord run 0..1 across it.
+      Image white = GenImageColor(1, 1, WHITE);
+      previewSurface_ = LoadTextureFromImage(white);
+      UnloadImage(white);
+      havePreviewSurface_ = true;
+    }
+
+    // And the shader that answers rather than draws, with one pixel of target
+    // for each derived variable it has to report.
+    const std::vector<std::string>& probed = program_.probedNames();
+    if (!probed.empty()) {
+      std::string probeLog;
+      haveProbe_ = CompileFragmentShader(program_.glslProbeSource(), &probeShader_, &probeLog);
+      if (haveProbe_) {
+        for (const mathprogram::Variable& variable : program_.variables()) {
+          if (!variable.free || variable.kind != mathprogram::Kind::Real) continue;
+          probeUniforms_.emplace_back(variable.name,
+                                      GetShaderLocation(probeShader_, variable.name.c_str()));
+        }
+        probePointLocation_ = GetShaderLocation(probeShader_, "sbProbe");
+        probeTarget_ = LoadRenderTexture(static_cast<int>(probed.size()), 1);
+        haveProbeTarget_ = true;
+        probeSignature_.clear();
+      }
+    }
+  }
+
+  program_.ShaderCompiled(ok, log);
+}
+
 void CodeBlock::Poll() {
   program_.Poll();
+
+  // The C++ compile runs on a worker thread, but a shader has to be compiled on
+  // the thread holding the graphics context. So this half happens here.
+  const mathprogram::State state = program_.state();
+  if (state == mathprogram::State::Shading) CompileShader();
+
+  // A box edited back into valid C++ should stop drawing the picture it used to
+  // be. While a rebuild is in flight the old one stays up, the way the knobs
+  // keep their old values.
+  if (haveShader_ && state != mathprogram::State::ShaderReady &&
+      state != mathprogram::State::Building && state != mathprogram::State::Shading) {
+    ReleaseGpu();
+  }
+
+  // Ask the shader what its derived variables came to, so the number lines have
+  // something to show. The point they are read at was settled while drawing the
+  // last frame, which is close enough to be imperceptible.
+  ProbeIfNeeded();
 
   if (!pending_.valid()) return;
   if (pending_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
@@ -716,6 +953,10 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
   }
 
   const Geometry& g = Measure(viewport, fonts);
+  // Absorbed by the drop target: the box is not on the canvas at the moment,
+  // and letting go here is what throws it away.
+  if (absorbed_) return;
+
   const Color border = focused_ ? kAccent : Fade(kCodeFg, 0.22f);
   DrawCard(g.rect, g.zoom, kCodeBg, border, focused_ ? 2.0f : 1.0f);
 
@@ -793,21 +1034,11 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
                {chrome.toggle.x + (chrome.toggle.width - labelWidth) * 0.5f,
                 chrome.toggle.y + chrome.toggle.height * 0.5f + em * 0.34f},
                em, kChromeText);
-
-    const bool overClose = CheckCollisionPointRec(pointer, chrome.close);
-    DrawRectangleRounded(chrome.close, 0.35f, 8, overClose ? kChromeHover : kChromeBg);
-    const float inset = chrome.close.width * 0.3f;
-    const float thickness = std::max(1.0f, 1.6f * g.zoom);
-    const Color cross = overClose ? kChromeClose : kChromeText;
-    DrawLineEx({chrome.close.x + inset, chrome.close.y + inset},
-               {chrome.close.x + chrome.close.width - inset,
-                chrome.close.y + chrome.close.height - inset}, thickness, cross);
-    DrawLineEx({chrome.close.x + chrome.close.width - inset, chrome.close.y + inset},
-               {chrome.close.x + inset, chrome.close.y + chrome.close.height - inset},
-               thickness, cross);
   }
 
-  if (rimHot_ || dragging_) DrawRim(g.rect, g.zoom, dragging_);
+  if (rimHot_ || dragging_ || selected_) {
+    DrawRim(g.rect, g.zoom, dragging_ || selected_);
+  }
 
   // The legacy result square, only for a box that has no variables of its own.
   if (outcome_.status != compiler::Status::NotRun) {
@@ -829,6 +1060,40 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
 }
 
 void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
+  // A line from the pointer to every place the thing under it is written. The
+  // box round the name says *that* it is the same thing; the curve says which
+  // pointer it is the same thing as, which matters once two windows are open.
+  //
+  // Drawn in the overlay pass so it runs over every window, including the one
+  // being pointed at -- a curve chopped in half by a card would say nothing.
+  if (!highlights_.empty() && !absorbed_) {
+    const Geometry& g = Measure(viewport, fonts);
+    if (g.emPx >= 0.4f) {
+      const Vector2 pointer = GetMousePosition();
+      const float thickness = std::max(1.4f, 1.8f * g.zoom);
+      for (const std::string& name : highlights_) {
+        const Color tint = VariableColor(name);
+        for (std::size_t i = 0; i < g.rows.size(); ++i) {
+          for (const Rectangle& box : MentionRects(i, name, g, fonts)) {
+            // It lands on whichever side the pointer is already on, so the
+            // curve never crosses the name it is pointing at.
+            const bool fromLeft = pointer.x < box.x + box.width * 0.5f;
+            const Vector2 target = {fromLeft ? box.x : box.x + box.width,
+                                    box.y + box.height * 0.5f};
+            // Tangents leave both ends horizontally, which is what makes it
+            // read as a cable rather than as a stray line.
+            const float reach =
+                std::clamp(std::abs(target.x - pointer.x) * 0.45f, 24.0f, 190.0f);
+            const float direction = fromLeft ? 1.0f : -1.0f;
+            DrawSplineSegmentBezierCubic(pointer, {pointer.x + reach * direction, pointer.y},
+                                         {target.x - reach * direction, target.y}, target,
+                                         thickness, Fade(tint, 0.8f));
+          }
+        }
+      }
+    }
+  }
+
   // Whichever half of the machinery reported a problem, it is shown the same
   // way: against the character the compiler pointed at.
   bool        failed = false;

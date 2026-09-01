@@ -38,6 +38,8 @@ struct NumberLine {
   Vector2              worldPos{};    // only meaningful once undocked
   // Which box a docked line stacks under. Stays put when lines merge.
   CodeBlock*           dock = nullptr;
+  bool                 selected = false;
+  Vector2              dragFrom{};   // where it was when a selection drag began
 };
 
 class AxisPanel {
@@ -73,6 +75,25 @@ class AxisPanel {
   // pointer before anything else, or letting go over another window's rim would
   // leave the row stuck to the cursor.
   bool Dragging() const { return drag_ != Drag::None; }
+  // True while a row is actually being carried by its rim, which is what brings
+  // up the drop target. A press that has not moved is not carrying anything.
+  bool Carrying() const { return drag_ == Drag::Move && dragMoved_; }
+
+  // --- selection ----------------------------------------------------------
+  // The lasso catches windows by their middle. A selected one wears its rim,
+  // moves with the rest of the selection, and goes with it.
+  void SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
+                    FontStore& fonts);
+  void ClearSelection();
+  bool AnySelected() const;
+  bool SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const;
+  // Remembers where everything selected is, so a drag can place it relative to
+  // there rather than accumulating a delta frame by frame.
+  void BeginSelectionDrag();
+  void MoveSelection(Vector2 worldDelta);
+  void DeleteSelection();
+  void DrawSelectionRims(const Viewport& viewport, FontStore& fonts) const;
+
 
   // --- persistence --------------------------------------------------------
   const std::vector<NumberLine>& Lines() const { return lines_; }
