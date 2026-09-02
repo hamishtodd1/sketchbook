@@ -24,15 +24,30 @@ namespace sb {
 class CodeBlock {
  public:
   CodeBlock(Vector2 worldTopLeft, float worldEm, std::vector<std::string> lines);
+  ~CodeBlock();
 
   // --- geometry -----------------------------------------------------------
   // Rows vary in height: a fraction needs more room than a line of code, so the
   // box expands and contracts as lines flip between the two readings.
+  // One row *as drawn*, which is not the same as one line of source: prose
+  // wraps, so a long line becomes several rows. A code box always has exactly
+  // one row per line.
   struct Row {
     float y = 0.0f;        // top, screen space
     float height = 0.0f;
     float baseline = 0.0f; // where text sits within the row
+    // Where this row's content starts, and how wide it is. Code always starts
+    // at the left; prose starts wherever its justification puts it.
+    float x = 0.0f;
+    float width = 0.0f;
     bool  asLatex = false;
+    // Which line this row came from, and which slice of it. The slices of a
+    // line partition it, so every byte -- and so every caret position -- is in
+    // exactly one row.
+    int         line = 0;
+    int         piece = 0;
+    std::size_t begin = 0;
+    std::size_t end = 0;
   };
   struct Geometry {
     float            zoom = 1.0f;
@@ -40,6 +55,7 @@ class CodeBlock {
     float            advance = 0.0f;   // one monospaced cell
     float            lineHeight = 0.0f;
     float            ascent = 0.0f;
+    float            measure = 0.0f;   // how far prose runs before it wraps, px
     Rectangle        rect{};
     Vector2          textLeftTop{};
     std::vector<Row> rows;
@@ -54,6 +70,39 @@ class CodeBlock {
   // Bottom-left of the card, where this box's number lines dock.
   Vector2 DockAnchor(const Viewport& viewport, FontStore& fonts) const;
   float   DockWidth(const Viewport& viewport, FontStore& fonts) const;
+
+  // --- prose ---------------------------------------------------------------
+  //
+  // A box whose first line begins with 	ext is not code: it is words, and it
+  // is set as words -- upright roman on the bare canvas, with no card behind
+  // it, because a caption on a slide is ink rather than a window. Writing the
+  // sigil is what turns a code box into one, and deleting it turns it back, so
+  // there is one gesture and it is reversible.
+  //
+  // Boldness, italics and justification are the box's own, not the text's:
+  // there is no markup to learn and nothing to get half-applied.
+  enum class Justify : int { Left = 0, Centre = 1, Right = 2 };
+  bool    IsText() const;
+  // The measure: how wide the words are allowed to run before they wrap, in
+  // world units. Prose needs a chosen width -- a paragraph is a shape, not a
+  // list of lines -- and it is the one dimension the wheel does not decide.
+  float   TextWidth() const { return textWidth_; }
+  void    SetTextWidth(float value) { textWidth_ = value; }
+  bool    Bold() const { return bold_; }
+  bool    Italic() const { return italic_; }
+  Justify Justification() const { return justify_; }
+  void    SetBold(bool value) { bold_ = value; }
+  void    SetItalic(bool value) { italic_ = value; }
+  void    SetJustification(Justify value) { justify_ = value; }
+
+  // --- resizing --------------------------------------------------------------
+  // The wheel resizes a box uniformly, which for a box of type means the type
+  // gets bigger. `anchorWorld` is the corner that must not move.
+  Rectangle WorldBounds(const Viewport& viewport, FontStore& fonts) const;
+  void      Scale(float factor, Vector2 anchorWorld);
+  // The padding either side of the words, in world units, at a given type size.
+  // A caller fitting a measure into a space has to allow for it.
+  static float PaddingX(float em);
 
   // --- editing ------------------------------------------------------------
   void SetFocused(bool focused);
@@ -133,6 +182,8 @@ class CodeBlock {
   float   Em() const { return em_; }
   bool    ShowMath() const { return showMath_; }
   void    SetShowMath(bool value) { showMath_ = value; }
+  bool    ShowSource() const { return showSource_; }
+  void    SetShowSource(bool value) { showSource_ = value; }
   void    SetWorldPosition(Vector2 position) { origin_ = position; }
 
   // --- drawing ------------------------------------------------------------
@@ -145,9 +196,21 @@ class CodeBlock {
   struct LineCache {
     std::string    source;
     mathline::Line parsed;
+    // What is actually typeset: mathline's reading of the code, or, in a text
+    // box, the line's own words wrapped in \text.
+    std::string    latex;
+    unsigned       styleSig = 0;   // bold/italic, which change the words' face
     tex::Parsed    tex;
     float          emPx = -1.0f;
     tex::Layout    layout;
+
+    // Prose only: the line broken to the measure. The pieces partition the
+    // line, so `begin` plus the piece's length is the next piece's `begin` and
+    // every caret position lands in exactly one of them.
+    float                    wrapWidth = -1.0f;
+    std::vector<std::size_t> pieceBegin;
+    std::vector<std::size_t> pieceEnd;
+    std::vector<tex::Layout> pieceLayout;
   };
 
   struct Snapshot {
@@ -160,14 +223,21 @@ class CodeBlock {
   // the same kind collapse into one undo step.
   enum class EditKind { None, Insert, Delete, Structural };
 
+  // The strip of controls above a box. A code box gets the one button that
+  // flips it between readings; a text box gets the ones that decide how its
+  // words are set.
   struct Chrome {
+    bool      forText = false;
     Rectangle toggle{};
+    Rectangle bold{};
+    Rectangle italic{};
+    Rectangle justify[3]{};
   };
 
-  void   EnsureCache(FontStore& fonts, float emPx) const;
-  // Where `name` is written on this line, in whichever reading is showing. One
-  // rectangle per mention: a variable can appear more than once.
-  std::vector<Rectangle> MentionRects(std::size_t line, const std::string& name,
+  void   EnsureCache(FontStore& fonts, float emPx, float measurePx) const;
+  // Where `name` is written in this row, in whichever reading it is showing.
+  // One rectangle per mention: a variable can appear more than once.
+  std::vector<Rectangle> MentionRects(std::size_t rowIndex, const std::string& name,
                                       const Geometry& g, FontStore& fonts) const;
   int    RowAt(Vector2 screenPoint, const Viewport& viewport, FontStore& fonts) const;
   bool   ShowsCode(int line) const;
@@ -175,6 +245,29 @@ class CodeBlock {
   int    ErrorLine() const;
   std::string Injection(int line) const;
   Chrome ChromeRects(const Geometry& g) const;
+  // The bar just inside the right edge that sets the measure. Only a text box
+  // has one; it is inset clear of the rim's grab band, like a picture's crop
+  // corners, so the two gestures never want the same pixel.
+  Rectangle MarginHandle(const Geometry& g) const;
+  // A code box shows its chrome only while it has the caret. A text box shows
+  // its controls whenever you go looking for them, the way a rim appears.
+  bool   ChromeVisible(const Geometry& g, Vector2 pointer) const;
+  // How many bytes at the front of a line are the \text sigil rather than
+  // words. Non-zero only on the first line. The caret may not go before it: it
+  // is not part of what you are writing.
+  std::size_t ProseOffset(std::size_t line) const;
+  // The words on a line, with the sigil taken off, and the LaTeX that sets a
+  // piece of them.
+  std::string Prose(std::size_t line) const;
+  std::string TextLatex(std::string_view words) const;
+  // The face those words are set in, which is what measures them.
+  Face        ProseFace() const;
+  // The row the caret is in, or -1.
+  int         CaretRow(const Geometry& g) const;
+  // How far into a row a byte offset sits, and the offset nearest an x. Read
+  // off the cached layout, so the arrow keys can use them without a font store.
+  float       RowOffsetX(const Row& row, std::size_t col) const;
+  std::size_t RowColAt(const Row& row, float x) const;
 
   // Compiles the GLSL the program assembled. Must be called on the thread that
   // owns the graphics context, which is why the program cannot do it itself.
@@ -200,6 +293,19 @@ class CodeBlock {
   std::vector<std::string> lines_;
 
   bool   focused_ = false;
+  // How the words of a text box are set. Ignored by a code box.
+  bool    bold_ = false;
+  bool    italic_ = false;
+  Justify justify_ = Justify::Left;
+  float   textWidth_ = 0.0f;   // world units; 0 means "pick one from the size"
+  // A text box is edited as words, not as source. This is the toggle that shows
+  // the source anyway -- which is the only way to see the sigil, and so the
+  // only way to take it back out. It stays where it is put: a box can be left
+  // reading as its own source, and it is only the *button* that goes when the
+  // box stops being pointed at.
+  bool    showSource_ = false;
+  // Dragging the measure.
+  bool    marginDrag_ = false;
   // When focused, the box shows all code. The toggle flips it back to reading
   // as mathematics while still being editable line by line.
   bool   showMath_ = false;

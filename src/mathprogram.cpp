@@ -146,8 +146,14 @@ int Program::LineOffset() {
 }
 
 Program::~Program() {
-  // Wait for anything in flight before the futures go out of scope.
-  if (build_.valid()) build_.wait();
+  // Wait for anything in flight before the futures go out of scope -- and
+  // *take* the build's result rather than only waiting for it. A compile that
+  // finished after nobody wanted it any more still wrote an executable, and
+  // dropping the result unread would leave that file behind for good.
+  if (build_.valid()) {
+    const compiler::Build build = build_.get();
+    compiler::Discard(build.exePath);
+  }
   if (run_.valid()) run_.wait();
   compiler::Discard(exePath_);
 }
@@ -233,6 +239,10 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
     state_ = State::Empty;
     compiler::Discard(exePath_);
     exePath_.clear();
+    // A box with nothing in it should be holding nothing.
+    glsl_.clear();
+    glslProbe_.clear();
+    probed_.clear();
     return;
   }
 
@@ -389,6 +399,11 @@ void Program::Poll() {
       compiler::Discard(exePath_);
       exePath_ = build.exePath;
       state_ = State::Ready;
+      // C++ took it, so the shader it might have been is not wanted. It is
+      // reassembled from scratch if a later edit needs it.
+      glsl_.clear();
+      glslProbe_.clear();
+      probed_.clear();
       Launch();  // first run, to fill in the derived values
     }
   }

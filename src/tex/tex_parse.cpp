@@ -191,8 +191,9 @@ class Parser {
     return ParseUnit();
   }
 
-  // Turns literal text into upright roman glyphs.
-  NodePtr TextRow(const std::string& text, Atom atom) {
+  // Turns literal text into upright roman glyphs -- or into the bold or italic
+  // cut of the same face, which is what a text box's controls select.
+  NodePtr TextRow(const std::string& text, Atom atom, Face face = Face::MainRegular) {
     NodePtr row = MakeRow();
     row->atom = atom;
     std::size_t i = 0;
@@ -208,7 +209,7 @@ class Parser {
         cp = (cp << 6) | (static_cast<unsigned char>(text[i]) & 0x3F);
         ++i;
       }
-      SymbolDef def{cp, Face::MainRegular, Atom::Ord};
+      SymbolDef def{cp, face, Atom::Ord};
       row->kids.push_back(MakeSymbol(def));
     }
     return row;
@@ -318,6 +319,12 @@ class Parser {
     // ---- text --------------------------------------------------------------
     if (name == "text" || name == "textrm" || name == "mbox") {
       return TextRow(ReadBracedText(), Atom::Ord);
+    }
+    // Prose, set bold or italic. There is no bold-italic cut of Computer
+    // Modern in the KaTeX set, so asking for both gives bold.
+    if (name == "textbf") return TextRow(ReadBracedText(), Atom::Ord, Face::MainBold);
+    if (name == "textit" || name == "emph") {
+      return TextRow(ReadBracedText(), Atom::Ord, Face::MainItalic);
     }
     if (name == "operatorname") return TextRow(ReadBracedText(), Atom::Op);
 

@@ -97,7 +97,7 @@ class AxisPanel {
 
   // --- persistence --------------------------------------------------------
   const std::vector<NumberLine>& Lines() const { return lines_; }
-  void Clear() { lines_.clear(); drag_ = Drag::None; }
+  void Clear() { lines_.clear(); drag_ = Drag::None; dragRef_ = {}; }
   void Adopt(std::vector<NumberLine> lines) { lines_ = std::move(lines); }
 
  private:

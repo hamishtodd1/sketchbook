@@ -52,6 +52,51 @@ What already protects it, and should not be undone:
 The rule for new work: keep the cost proportional to what is *on screen*, not to
 what is on the canvas, and never redo work whose inputs have not changed.
 
+### Deleting leaves nothing behind
+
+Things are made and thrown away constantly here -- boxes, number lines, plots,
+pictures, whole canvases at a time -- so **a deleted thing has to stop costing
+anything**. Not almost nothing: nothing. Five rules, each learnt from something
+that was getting it wrong:
+
+- **A destructor cannot free what is on the GPU.** Releasing a shader or a
+  texture needs the graphics context, and destructors run after the window has
+  gone. So whoever destroys a box releases it first, by hand
+  (`CodeBlock::ReleaseGpu`), and `~CodeBlock` complains rather than leaking in
+  silence if they forgot. Loading a canvas is one of those places, and was
+  quietly leaking every shader on the old canvas until this was written down.
+
+- **Every pointer into the blocks stops pointing before the blocks stop
+  existing.** The panels hold raw `CodeBlock*` -- that is the point of `Forget`
+  -- and so do `focus_`, `dragBlock_` and the selection drag. A gesture in
+  flight is the dangerous case: Ctrl+X while a selection is being carried would
+  free the very boxes the drag is holding, which is why the keys that delete
+  stand down while a drag is on.
+
+- **Work in flight still owns things.** A compile that finishes after nobody
+  wants it any more has already written an executable, so `~Program` *takes*
+  the build's result rather than only waiting for it -- dropping the future
+  unread left that file on disk for good. Opening a canvas from the command
+  line did exactly that, every time, because it throws away the starting box
+  while its first compile is still running.
+
+- **Anything that grows with use needs a bound.** The undo stack keeps 200
+  steps and drops the oldest; the font atlases are an LRU on a size ladder; a
+  video decodes at most a handful of frames ahead of the one being shown, and
+  the thread filling that queue blocks rather than running on. A thing that
+  grows with how long the app has been open is a leak with extra steps.
+
+- **A child process is a thing that has to stop.** A video window holds an
+  `ffmpeg` reading down a pipe, and closing the window has to end it -- not when
+  the file runs out, and not at exit. So the decoder goes when the window does,
+  and the check is the same shape as the one for the disk: open a canvas with a
+  video on it, throw the video away, and no `ffmpeg` should be running.
+
+"No trace" includes the disk. A box that compiles leaves a temporary executable
+behind it, and it goes when the box stops needing it rather than at exit -- so
+the check is easy to run: open a canvas, close it, and the working directory
+should be empty.
+
 The known soft spots, in the order they will start to hurt: `CodeBlock::Measure`
 runs several times per frame per box, and placement leans on it again while a
 box is being dragged; `highlight::Cpp` re-tokenises every
@@ -66,14 +111,16 @@ keep it extractable.
 
 It is already out of the way in the half of the program that matters most: the
 mathematics and the toolchain do not know it exists. `mathline.*`,
-`mathprogram.*`, `compiler.*`, `process.*`, `filedialog.*` and a type's own file
-(`types/RealFunction.*`, `types/examples.h`) include no raylib header and use no
-raylib type. The Win32 files additionally *cannot* include it,
+`mathprogram.*`, `compiler.*`, `process.*`, `filedialog.*`, `video.*` and a
+type's own file (`types/RealFunction.*`, `types/examples.h`) include no raylib
+header and use no raylib type. `video.*` is the newest of them and was written
+to the rule: it hands back frames as bytes, and `media.cpp` is where those bytes
+become a texture. The Win32 files additionally *cannot* include it,
 since `<windows.h>` and raylib both declare `Rectangle`, `CloseWindow` and
 `ShowCursor`.
 
 What is coupled is rendering and input: roughly a hundred raylib calls across
-`blocks.cpp`, `app.cpp`, `ui.cpp`, `types/RealViz.cpp`,
+`blocks.cpp`, `app.cpp`, `ui.cpp`, `media.cpp`, `types/RealViz.cpp`,
 `types/RealFunctionViz.cpp`, `viewport.cpp`, `grid.cpp`, `text.cpp`,
 `tex/tex_layout.cpp` and `fontstore.cpp`, plus `Vector2`,
 `Rectangle` and `Color` used as vocabulary types throughout the render layer.
@@ -168,17 +215,35 @@ back to reading as mathematics, with only the caret's line left as code.
 
 **Every window sits on the grid, and boxes never overlap.** A window's top-left
 corner snaps to the nearest dot of the grid *as drawn*, so placement gets finer
-as you zoom in. That holds for boxes, number lines and plots alike
-(`SnapToGrid`, in `grid.*`, next to the code that draws the dots). Boxes
+as you zoom in. That holds for boxes, number lines, plots and
+pictures alike (`SnapToGrid`, in `grid.*`, next to the code that draws the
+dots). Boxes
 additionally never overlap: one put down on top of another steps clear along
 whichever edge is nearest, a whole dot at a time, and the number lines and plots
 docked under a box count as part of it. Every box placement goes through one
 function (`App::PlaceBlock`), so dragging, typing a new box and loading a file
 cannot disagree about the rules.
 
+**The pointer says what the canvas is doing.** While the right button is down
+and the canvas is being dragged, the cursor becomes a **closed hand**: the
+gesture is holding the paper and moving it, and an arrow does not say that. It
+is drawn rather than chosen, because there is no grabbing-hand cursor in the set
+the window system offers -- GLFW's "hand" is the pointing one -- so the system
+cursor is hidden and ours takes its place, in two passes so it reads on the pale
+canvas and on a dark card alike. Losing the window counts as letting go, so the
+cursor can never be left hidden underneath somebody else's app.
+
 **A drag in flight owns the pointer.** Hovering a rim claims the pointer, so
 without this rule letting go of one window over another window's rim would never
 deliver the release, and the dragged window would stay stuck to the cursor.
+
+A **lasso** is the case this is easiest to get wrong, because a lasso is meant
+to sweep across other windows: without the rule, a loop drawn round a box was
+cancelled the instant it crossed that box's edge, and the stroke simply stopped
+being drawn. Reaching for a *selected* window's rim belongs here too -- the rim
+would otherwise claim the press and carry that one window, when a selection is
+supposed to move as one. Only the menu opening abandons a gesture; something
+else taking the pointer never does.
 
 ### Showing that two things are the same object
 
@@ -233,11 +298,73 @@ produced. So the renderer can ask "where did the third identifier end up?" and
 get an answer in pixels, without the typesetter knowing anything about
 variables.
 
+### Slides
+
+A slide is not a document that lives somewhere else. It is a **region of this
+canvas with a permanent rim round it** -- a piece of the same infinite space,
+declared worth looking at on its own. Clicking that rim glides the camera until
+the slide fills the window, so **presenting is navigating**: the same canvas,
+framed. Nothing is exported, nothing is a copy, and a live plot on a slide is
+the same live plot it was before.
+
+A slide's size comes from the camera's own default. Its height is one screenful
+at zoom 1, and its width that times the aspect the deck is being made for, so a
+slide seen at its own scale is exactly a screenful. Arriving at one **covers**
+the window rather than fitting inside it, which is what puts the rim just off
+screen; if the window is not the deck's shape, the sides are what get lost.
+
+The **new slide button lives on the canvas**, not in a toolbar. Clicking it
+leaves a slide where the button was and glides the button down past it, so the
+next click lands the next slide underneath. A deck is therefore a column you can
+scroll through and zoom out of, rather than a list beside the work -- and the
+button is always at the end of it.
+
+**A slide owns nothing but its rim.** Its title and its body are ordinary text
+boxes, put on the canvas where the slide would have drawn them and thereafter
+belonging to the canvas: they move, they are edited, they resize, they are
+thrown away on the drop target, exactly like every other window. That is the
+whole of what a slide is -- a frame declaring a region worth looking at -- and
+it is why nothing has to be exported: what is on the slide is what was already
+there.
+
+**And a slide does not move.** It is not a container and it does not travel: it
+is a *place*, fixed in the canvas, and the deck is the column of places the
+button walked down. Clicking one does the only thing it does, which is take the
+camera there. Nothing on a slide belongs to it, so there is nothing for a slide
+to carry -- and a thing that stays still is a thing you can navigate by.
+
+**A slide's text is put where the slide says, and everything else moves.** This
+is the one placement on the canvas that does not step aside: a title that moved
+to clear a box would no longer be on its slide, and since the body runs the full
+width of the slide, the nearest way clear of a box in the middle of the canvas
+is straight up off the top of it. So the words go where they belong and whatever
+was already there is what steps clear. The body is put under the title by the
+height the title actually turned out to be, rather than by a guess, since
+snapping can move either of them by half a dot.
+
+**Throwing a slide away.** Pointing at a slide's rim brings up a small cross
+beside the pointer -- the same cross the drop target wears, because it means the
+same thing. It rides along the rim under the pointer and freezes the moment the
+pointer leaves the rim for it, which is what makes it reachable: a button that
+ran away from the click meant to press it would be no button at all.
+
+Clicking it takes the slide **and everything on it**. What counts as "on it" is
+decided by each window's middle, which is exactly how the lasso decides what it
+caught -- so a caption half over an edge belongs to whichever slide holds its
+middle, and there is one answer to that question rather than two. The deck then
+**closes the gap**: every slide below comes up by one slide and one gap, and so
+does everything standing on them, and so does the new-slide button. A deck is a
+column, and a column has no holes in it.
+
+The aspect is a deck-wide setting, chosen from the Escape menu as one of the
+three shapes a deck is ever made for.
+
 ### Windows, and closing them
 
-Everything on the canvas is a **window**: a code box, a number line, a plot, a
-shader's picture. All of them are carried by the rim around their edge, all land
-on the grid, and all are thrown away the same way.
+Everything on the canvas is a **window**: a code box, a box of prose, a number
+line, a plot, a shader's picture, a photograph, a video. All of them are carried
+by the rim around their edge, all land on the grid, all are resized by the
+wheel, and all are thrown away the same way.
 
 **Carrying a window brings up a cross at the foot of the app window.** Drag onto
 it and the window is *absorbed* -- it stops being drawn, and the cross swells to
@@ -250,6 +377,22 @@ whose middle it went round is selected -- the middle rather than any overlap, so
 what is caught is exactly what was circled. Selection is shown by the rim, the
 same rim that appears when a window is pointed at: there is no second visual
 language for "this one".
+
+**A left click anywhere puts the selection down.** On a window, on a picture,
+on the bare canvas -- it makes no difference, because a click is a new intent
+and whatever was selected is not it. There are exactly two exceptions: the press
+that picks the selection up to carry it, and a gesture already under way. The
+rule lives in one place rather than each kind of window having an opinion about
+it.
+
+**The loop closes with a curve, not a chord.** The gap between where the pointer
+is and where the stroke began is bridged by a cubic Bezier, and the four points
+that shape it are the four the stroke itself gives: the last two samples say
+which way it is heading, the first two say which way it left. So the closure
+continues the gesture instead of cutting across it, and a lasso drawn as a hook
+or a spiral encloses what it looks like it encloses. The closed loop -- samples
+plus curve -- is the shape that both the drawing and the hit test use, so what
+is caught is exactly what you watched yourself circle.
 
 A selection then behaves as **one window**. It moves together, by a whole number
 of grid steps applied to the group as one vector, so the arrangement inside it
@@ -286,6 +429,138 @@ Nothing else has that consequence. A plot, a shader's picture and a derived
 variable's marker are all views: closing one takes away the view and nothing
 else. The rule is worth stating plainly -- **a window that controls something
 bakes what it controlled; a window that only shows something does not.**
+
+### Words
+
+Not everything on this canvas is mathematics. A slide has a title; a diagram
+has a caption; a page has a sentence saying what it is for. So a box can be
+**prose** instead of code, and the switch is one thing you write:
+
+**`\text` at the start of a box makes it a text box.** That sigil is the whole
+mechanism. It is not a mode, a menu or a second kind of object -- it is a
+character sequence in the box's own first line, so deleting it turns the box
+back into code. The rule that already governs everything else here governs this
+too: what you can do you can undo by editing the same text back.
+
+The prose is set the way `\text` is always set -- upright roman, spaced as words
+rather than as a product of letters -- and it wears **no card**. A caption is
+ink on the canvas, not a window sitting on it, which is exactly what a slide's
+text already looked like before it became a window.
+
+**A text box is written in as words.** Not as its source: clicking one puts the
+caret between two letters of the typeset line, typing puts characters there, and
+nothing about the box changes appearance. What you are writing is what it is
+going to be, which is the whole reason to have prose on this canvas at all --
+and it is the one place the "editing a box shows you its code" rule is set
+aside, because here the code *is* the words.
+
+That leaves the sigil with nowhere to be seen, so the strip carries the same
+control a code box carries: **a toggle that shows the source**. Pressing it
+gives the raw line, sigil and all, which is how a text box stops being one. It
+sits with the rest of the strip rather than at the box's right edge, because
+showing an unwrapped paragraph makes the box very wide and a toggle that leaves
+the screen when pressed cannot be pressed again.
+
+**It stays where it is put.** A box can be left reading as its own source, and
+it goes on doing so after the caret has gone elsewhere -- it is saved with the
+canvas like any other property of the box. What disappears when the box stops
+being pointed at is the *button*, not the state it set. That is the general
+shape of chrome here: the control comes and goes, what it chose does not.
+
+The caret is a byte offset in the source either way, so it survives the toggle:
+switch to the source and it is still between the same two letters.
+
+**Boldness, italics and justification belong to the box, not to the text.**
+There is no markup to learn, nothing to get half-applied to a phrase, and
+nothing to escape. The controls sit in a strip **above** the box, and they
+appear when you go looking for them -- on the box, on its rim, or in the strip
+itself -- which is how a rim appears too.
+
+**A paragraph has a measure.** Prose is a shape, not a list of lines, so a text
+box is given a width and the words wrap to it: one line of source becomes as
+many rows as it takes. The measure is set by a bar just inside the right edge --
+it *is* the right margin -- inset clear of the rim's grab band, so setting it
+and carrying the box never want the same pixel. A box that has never been given
+one takes twenty ems, which is about sixty characters, which is the width prose
+has been set at for five hundred years.
+
+The measure is what the box is as wide as, whether or not any row reaches it.
+Sizing a paragraph to its unwrapped source instead would make a box thousands of
+units wide to hold four lines of words.
+
+Two things follow, and both are worth stating. Wrapping means **a row is not a
+line**: the box's geometry is a list of rows, each naming the line and the slice
+of it that it draws, and the slices of a line partition it so every caret
+position is in exactly one row. And the arrow keys move by **row**, not by line,
+since a wrapped paragraph is one line and many rows.
+
+Known edge: the KaTeX cut of Computer Modern has no bold-italic face, so asking
+for both gives bold.
+
+### Resizing
+
+The wheel over a window resizes it, **uniformly**: one number applied to both
+dimensions, so nothing is ever stretched out of shape. For a box of type or
+prose that number is the size of the type; for a picture it is how big the
+picture is. A trackpad pinch arrives as a wheel, so it does the same.
+
+Two rules make it a handle rather than a slider:
+
+**The nearest corner stays where it is.** Whichever corner you are pointing at
+is the one that does not move, so the window grows away from your hand rather
+than out from under it. A paragraph's measure scales with its type, or resizing
+it would reflow the words instead of making them bigger.
+
+**It snaps to its neighbours.** Every nearby window offers two candidate sizes,
+its height and its width, and if one of them is close to what the wheel asked
+for it is taken exactly. Because the resize is uniform, matching either
+dimension fixes the scale -- so "as tall as that one" and "as wide as that one"
+are the same question asked twice, and one rule answers both. It is how two
+pictures come to be exactly the same height, and nothing else on this canvas
+can say that.
+
+Code boxes resize but do not snap: "the same size as that one" says something
+about two pictures side by side and nothing at all about two programs. They are
+still offered as targets, so a caption can match the box it sits under.
+
+### Pictures and video
+
+Neither is mathematics, so neither lives in `types/` -- an image is furniture,
+something to point at while explaining. But both are **windows**, and that is
+nearly the whole design: carried by the rim, landing on the grid, caught by the
+lasso, thrown away on the drop target, resized by the wheel. Files arrive by
+being dropped on the window, or from the Escape menu for a tablet with nothing
+to drop with. A `.sketch` dropped the same way opens.
+
+Two things are theirs alone:
+
+**A corner crops.** Dragging a corner handle moves that corner of the frame and
+leaves the picture where it is, so what changes is how much of it you can see --
+not how big it is. Resizing is the wheel's job and cropping is the corner's, and
+keeping the two apart is what makes either predictable. The handles sit just
+inside the corners, clear of the rim's grab band, so the two gestures never
+compete for the same pixel -- and clear of a video's transport, since a handle
+you cannot reach is not a handle.
+
+**A video has a transport**: play, a bar, and two markers saying where the clip
+starts and stops, each carrying its exact time as a string you can double-click
+and type into. "About there" is not good enough when the point of a clip is one
+particular second of it. Playback loops between the markers, because a clip
+chosen for one moment should keep showing that moment rather than stopping on a
+black frame.
+
+**There is no decoder here and there is not going to be one.** ffmpeg already
+answers "what formats does this open", and the app already knows how to run a
+child process and read what it says -- that is how a code box is compiled. A
+video is the same arrangement with far more output: `ffmpeg` is asked for raw
+frames and they are read off a pipe as they arrive, on a worker thread, into a
+**bounded** queue. Nothing is decoded to disk first and nothing is held in
+memory but the few frames not yet shown. Seeking restarts the child, which is
+why scrubbing is a little coarse and playing straight through is not, and why a
+scrub asks for a seek every so often rather than once a frame.
+
+Like the rest of the toolchain layer, `video.*` knows nothing about raylib: it
+hands back bytes, and whoever wants a texture out of them owns the GPU.
 
 ### Number lines
 
@@ -551,18 +826,37 @@ stays code because it has no mathematical reading, and the lines around it still
 read as equations. Its derived variables are read back off the GPU, at the point
 in the picture the pointer is over.
 
+Prose works: a box whose first line starts with `\text` sets its lines as words
+on the bare canvas, with a strip of bold / italic / justification controls above
+it and a toggle that shows the source. It is written in **as words** -- the
+caret goes between two letters of the typeset line -- and the words wrap to a
+measure set by a bar on the right margin. Slides make two of these, a bold title
+and a body, sized to the slide, and own nothing else at all. An older canvas
+that kept its slide text on the slide record is turned into the same pair of
+boxes on the way in.
+
+Pictures and video are windows. Dropping a file on the app window puts one where
+the pointer is; the Escape menu does the same for a tablet. A corner crops, the
+rim carries, and a video has a play button, a bar and two typed-in trim times,
+with the frames pulled off an `ffmpeg` pipe on a worker thread. The wheel
+resizes any window uniformly about the corner nearest the pointer, and prose and
+pictures snap to the width or height of what is near them.
+
 The canvas pans on the **right button** and zooms on the wheel; one finger pans
 and two pinch. The left button belongs to the contents of the canvas -- a click
 places the caret, a rim drag moves a window, a handle drag chooses a value --
 and never moves the canvas itself. Nothing on the canvas uses the right button,
 so panning works wherever the pointer happens to be, even over a window that has
-claimed the wheel for its own scale.
+claimed the wheel for its own scale. The wheel now belongs to whatever window it
+is over, since that is what resizes it.
 
 Key files: `mathline.*` (C++ subset -> LaTeX), `mathprogram.*` (assemble /
 compile / re-run, and the scaffolding a fragment is wrapped in), `types/` (one
 directory per supported type: what it is, how to make an example of it, how to
-draw it), `blocks.*` (per-line rendering and editing), `highlight.*` (Monokai),
-`filedialog_win32.*` (open/save dialogs).
+draw it), `blocks.*` (per-line rendering and editing, code and prose alike),
+`media.*` (pictures and video as windows), `video.*` (the ffmpeg pipe, raylib
+free), `resize.*` (the wheel-resize rule and its snapping), `highlight.*`
+(Monokai), `filedialog_win32.*` (open/save dialogs).
 
 `bool testFunc()` with its red/blue square still works, but only as a fallback
 for a box that declares no variables. It is scaffolding from before this
@@ -572,6 +866,20 @@ direction existed and can go whenever it stops being useful.
 
 Kept here so they are not lost between sessions. Answered ones move up into the
 sections above.
+- Nothing yet says which slide comes after which, beyond where they sit. A deck
+  is currently a column because the button walks down it, not because an order
+  is recorded anywhere.
+
+- A paragraph wraps to a measure, but nothing yet lets one **flow into the
+  next** -- a body that outgrows its slide simply runs off the bottom of it.
+  Nothing warns, either.
+
+- **Video has no sound.** Nothing plays audio, and a clip chosen for what
+  someone says in it is not much use silent.
+
+- A picture is not part of the no-overlap rule -- boxes push each other apart,
+  pictures do not. A caption sitting on a photograph is normal, so this seems
+  right, but it means the two kinds of window follow different placement rules.
 
 - **What is a knob for a function?** A real has a slider because its value goes
   down argv. A function's example is compiled in, so today there is nothing to

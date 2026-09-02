@@ -13,4 +13,9 @@ namespace sb::filedialog {
 std::string Save(const std::string& suggestedName);
 std::string Open();
 
+// The same dialog, filtered for the things that can become a window on the
+// canvas. Dropping a file on the window does this too, but a tablet has
+// nothing to drop with.
+std::string OpenMedia();
+
 }  // namespace sb::filedialog

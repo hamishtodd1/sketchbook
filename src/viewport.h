@@ -22,12 +22,22 @@ class Viewport {
   // canvas then keeps the right-button pan but gives up the wheel and touch.
   void Update(bool interactive, bool pointerFree);
 
+  // Glides to a view rather than jumping to it -- eased in and out, and with
+  // the zoom moving geometrically, since doubling and halving are what a zoom
+  // does evenly. Any gesture cancels it: the canvas is never taken away from
+  // whoever is using it.
+  void GlideTo(Vector2 worldCentre, float zoom, float seconds);
+  bool Gliding() const { return gliding_; }
+
   Vector2 ToScreen(Vector2 world) const;
   Vector2 ToWorld(Vector2 screen) const;
 
   float   Zoom() const { return zoom_; }
   Vector2 Centre() const { return target_; }
   bool    Panning() const { return mouseDragging_ || touchCount_ > 0; }
+  // Panning with the mouse in particular: a finger moving the canvas has no
+  // cursor to turn into a hand.
+  bool    PanningWithMouse() const { return mouseDragging_; }
 
  private:
   void PanByScreenDelta(Vector2 delta);
@@ -48,6 +58,15 @@ class Viewport {
   // Touch also emits legacy mouse events; this keeps the mouse path quiet for
   // a few frames after the last finger lifts so a pan does not double-apply.
   int          touchCooldown_ = 0;
+
+  // A glide in flight.
+  bool    gliding_ = false;
+  Vector2 glideFromCentre_{};
+  Vector2 glideToCentre_{};
+  float   glideFromZoom_ = 1.0f;
+  float   glideToZoom_ = 1.0f;
+  float   glideElapsed_ = 0.0f;
+  float   glideSeconds_ = 0.0f;
 };
 
 }  // namespace sb

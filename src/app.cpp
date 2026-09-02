@@ -9,6 +9,7 @@
 #include "compiler.h"
 #include "filedialog.h"
 #include "grid.h"
+#include "resize.h"
 #include "text.h"
 #include "theme.h"
 
@@ -21,7 +22,7 @@ constexpr float kClickSlop = 6.0f;
 constexpr float kDefaultBlockEm = 26.0f;
 
 // Bumped whenever the on-disk shape changes.
-constexpr int kFileVersion = 2;
+constexpr int kFileVersion = 3;
 
 }  // namespace
 
@@ -54,6 +55,14 @@ void App::Shutdown() {
   // The blocks go first, and by hand: a shader has to be released while the
   // graphics context still exists, and destructors run after it is gone.
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->ReleaseGpu();
+  // Pictures hold a texture each and a video holds a decoder with a child
+  // process behind it. Both have to go while there is still a context to hand
+  // them back to.
+  media_.ReleaseGpu();
+  if (cursorHidden_) {
+    ShowCursor();
+    cursorHidden_ = false;
+  }
   fonts_.Unload();
 }
 
@@ -205,7 +214,6 @@ bool App::HandleBlockDrag() {
     dragBlock_ = hit;
     dragBlockMoved_ = false;
     hit->SetDragging(true);
-    if (!hit->Selected()) ClearSelection();
   }
   // Hovering the rim is enough to claim the pointer: a click there is a grab,
   // never a pan or a caret placement.
@@ -275,13 +283,15 @@ void App::ClearSelection() {
   axes_.ClearSelection();
   plots_.ClearSelection();
   shaders_.ClearSelection();
+  media_.ClearSelection();
 }
 
 bool App::AnySelected() const {
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     if (block->Selected()) return true;
   }
-  return axes_.AnySelected() || plots_.AnySelected() || shaders_.AnySelected();
+  return axes_.AnySelected() || plots_.AnySelected() || shaders_.AnySelected() ||
+         media_.AnySelected();
 }
 
 bool App::SelectedRimAt(Vector2 point) {
@@ -290,13 +300,15 @@ bool App::SelectedRimAt(Vector2 point) {
   }
   return axes_.SelectedRimAt(point, viewport_, fonts_) ||
          plots_.SelectedRimAt(point, viewport_, fonts_) ||
-         shaders_.SelectedRimAt(point, viewport_, fonts_);
+         shaders_.SelectedRimAt(point, viewport_, fonts_) ||
+         media_.SelectedRimAt(point, viewport_);
 }
 
 void App::DeleteSelection() {
   axes_.DeleteSelection();
   plots_.DeleteSelection();
   shaders_.DeleteSelection();
+  media_.DeleteSelection();
 
   // Boxes last: removing one takes its windows with it, and the panels have
   // already had their say about the ones that were selected in their own right.
@@ -328,6 +340,11 @@ void App::CopySelection(bool cut) {
     clip.lines = block->Lines();
     clip.em = block->Em();
     clip.showMath = block->ShowMath();
+    clip.bold = block->Bold();
+    clip.italic = block->Italic();
+    clip.justify = static_cast<int>(block->Justification());
+    clip.textWidth = block->TextWidth();
+    clip.showSource = block->ShowSource();
     const Vector2 origin = block->WorldPosition();
     clip.offset = {origin.x - corner.x, origin.y - corner.y};
     // The knobs come along: a copy that started from zero would not be a copy.
@@ -353,6 +370,11 @@ void App::PasteClipboard() {
     auto block = std::make_unique<CodeBlock>(
         Vector2{anchor.x + clip.offset.x, anchor.y + clip.offset.y}, clip.em, clip.lines);
     block->SetShowMath(clip.showMath);
+    block->SetBold(clip.bold);
+    block->SetItalic(clip.italic);
+    block->SetJustification(static_cast<CodeBlock::Justify>(clip.justify));
+    block->SetTextWidth(clip.textWidth);
+    block->SetShowSource(clip.showSource);
     block->RestoreValues(clip.values);
     block->RequestCompile();
     // Selected as they arrive, so the paste can be moved straight where it is
@@ -380,10 +402,12 @@ void App::HandleSelection() {
       block->SetAbsorbed(absorbing);
       if (!absorbing) block->SetWorldPosition({from.x + delta.x, from.y + delta.y});
     }
+    media_.SetSelectionAbsorbed(absorbing);
     if (!absorbing) {
       axes_.MoveSelection(delta);
       plots_.MoveSelection(delta);
       shaders_.MoveSelection(delta);
+      media_.MoveSelection(delta);
     }
 
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
@@ -414,6 +438,7 @@ void App::HandleSelection() {
     axes_.BeginSelectionDrag();
     plots_.BeginSelectionDrag();
     shaders_.BeginSelectionDrag();
+    media_.BeginSelectionDrag();
     return;
   }
 
@@ -424,11 +449,33 @@ void App::HandleSelection() {
       lasso_.push_back(pointer);
     }
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-      axes_.SelectWithin(lasso_, viewport_, fonts_);
-      plots_.SelectWithin(lasso_, viewport_, fonts_);
-      shaders_.SelectWithin(lasso_, viewport_, fonts_);
-      for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
-        block->SetSelected(LassoCatches(lasso_, block->Measure(viewport_, fonts_).rect));
+      // A loop that never went anywhere is a click on the background, not a
+      // selection: it puts the caret down rather than picking anything up. The
+      // press started this lasso, so HandlePointer never saw it and this is
+      // where that click has to be answered.
+      //
+      // How far it *got*, not where it ended: a lasso that comes back to its
+      // own start is the ordinary case, and would otherwise read as a click.
+      float reach = 0.0f;
+      for (const Vector2& point : lasso_) {
+        reach = std::max(reach,
+                         std::hypot(point.x - lasso_.front().x, point.y - lasso_.front().y));
+      }
+      const bool wentNowhere = lasso_.size() <= 1 || reach <= kClickSlop;
+      if (wentNowhere) {
+        SetFocus(nullptr);
+      } else {
+        // The loop as it was drawn *and closed*: the curve that bridged the gap
+        // is part of the shape, so what is caught is what you watched yourself
+        // circle rather than what a chord would have caught.
+        const std::vector<Vector2> loop = ClosedLasso(lasso_);
+        axes_.SelectWithin(loop, viewport_, fonts_);
+        plots_.SelectWithin(loop, viewport_, fonts_);
+        shaders_.SelectWithin(loop, viewport_, fonts_);
+        media_.SelectWithin(loop, viewport_);
+        for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+          block->SetSelected(LassoCatches(loop, block->Measure(viewport_, fonts_).rect));
+        }
       }
       lassoActive_ = false;
       lasso_.clear();
@@ -436,12 +483,186 @@ void App::HandleSelection() {
     return;
   }
 
-  if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && BlockAt(pointer) == nullptr) {
+  if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && BlockAt(pointer) == nullptr &&
+      media_.ItemAt(pointer, viewport_) < 0) {
     // The background, and nothing else, is what the lasso is drawn on.
     lassoActive_ = true;
     lasso_.clear();
     lasso_.push_back(pointer);
   }
+}
+
+bool App::HandleResize() {
+  const float wheel = GetMouseWheelMoveV().y;
+  if (wheel == 0.0f) return false;
+
+  const Vector2 pointer = GetMousePosition();
+  // Pictures are drawn over the boxes, so they are asked first.
+  const int  item = media_.ItemAt(pointer, viewport_);
+  CodeBlock* block = (item >= 0) ? nullptr : BlockAt(pointer);
+  if (item < 0 && block == nullptr) return false;
+
+  const Rectangle mine =
+      (item >= 0) ? media_.WorldBounds(item) : block->WorldBounds(viewport_, fonts_);
+  const float   asked = std::pow(kResizeStep, wheel);
+  const Vector2 anchor = NearestCorner(mine, viewport_.ToWorld(pointer));
+
+  // A picture or a piece of prose snaps to the size of what is near it. A code
+  // box does not: "the same size as that one" says something about two pictures
+  // side by side and nothing at all about two programs.
+  float scale = asked;
+  if (item >= 0 || block->IsText()) {
+    std::vector<Rectangle> neighbours;
+    for (int i = 0; i < static_cast<int>(media_.Items().size()); ++i) {
+      if (i != item) neighbours.push_back(media_.WorldBounds(i));
+    }
+    for (const std::unique_ptr<CodeBlock>& other : codeBlocks_) {
+      if (other.get() != block) neighbours.push_back(other->WorldBounds(viewport_, fonts_));
+    }
+    scale = SnapResizeScale(mine, asked, neighbours);
+  }
+
+  if (item >= 0) {
+    media_.Scale(item, scale, anchor);
+  } else {
+    block->Scale(scale, anchor);
+    // A box that just grew may be sitting on its neighbour, and boxes do not
+    // overlap however they came to.
+    ResolveOverlaps(block);
+  }
+  return true;
+}
+
+void App::HandleDroppedFiles() {
+  if (!IsFileDropped()) return;
+  const FilePathList dropped = LoadDroppedFiles();
+
+  const Vector2 at = viewport_.ToWorld(GetMousePosition());
+  float         offset = 0.0f;
+  for (unsigned int i = 0; i < dropped.count; ++i) {
+    const std::string path = dropped.paths[i];
+    if (ClassifyMedia(path, nullptr)) {
+      // Where you dropped it is where it lands, on the grid like everything
+      // else. Several at once are stepped apart rather than stacked.
+      const Vector2 corner =
+          sb::SnapToGrid({at.x + offset, at.y + offset}, viewport_.Zoom());
+      if (media_.Add(path, corner)) offset += 48.0f;
+      continue;
+    }
+    // A canvas dropped on a canvas opens it, which is the obvious reading.
+    if (path.size() > 7 && path.compare(path.size() - 7, 7, ".sketch") == 0) {
+      if (!LoadCanvas(path)) TraceLog(LOG_WARNING, "CANVAS: could not load %s", path.c_str());
+      break;   // the canvas underneath us has just been replaced
+    }
+  }
+  UnloadDroppedFiles(dropped);
+}
+
+void App::FurnishSlide(Vector2 centre, const std::string& title,
+                       const std::vector<std::string>& body) {
+  const float aspect = options_.slideAspect;
+  const float em = SlidePanel::TextEm();
+
+  // The sigil is what makes a box prose rather than code. It goes on the first
+  // line only, and deleting it is how a box goes back to being code.
+  auto prose = [](const std::vector<std::string>& lines) {
+    std::vector<std::string> out = lines;
+    if (out.empty()) out.emplace_back();
+    out[0] = "\\text " + out[0];
+    return out;
+  };
+
+  // The words run the width of the slide, less its padding and the card's own.
+  // A slide is a shape, and its text is set to that shape.
+  const float measure = SlidePanel::ContentWidth(aspect) - 2.0f * CodeBlock::PaddingX(em);
+
+  const float zoom = viewport_.Zoom();
+  const float step = GridStep(zoom);
+  const float margin = 2.0f * kRimThickness / std::max(zoom, 1e-6f);
+
+  auto make = [&](Vector2 where, std::vector<std::string> lines, bool bold) {
+    codeBlocks_.push_back(std::make_unique<CodeBlock>(where, em, std::move(lines)));
+    CodeBlock* block = codeBlocks_.back().get();
+    block->SetBold(bold);
+    block->SetTextWidth(measure);
+    // Placed, not *put*: slide text goes where the slide says and does not step
+    // aside for anything. A title that moved to clear a box would no longer be
+    // on its slide -- and because the body runs the full width of the slide,
+    // the nearest way clear of a box in the middle of the canvas is upwards,
+    // straight off the top of it. Whatever was already there is what moves,
+    // which is what the pass at the end of this function does.
+    block->SetWorldPosition(sb::SnapToGrid(where, zoom));
+    return block;
+  };
+
+  const Vector2 titleAt = SlidePanel::TitleAnchor(centre, aspect);
+  CodeBlock*    titleBox = make(titleAt, prose({title}), /*bold=*/true);
+
+  // The body sits under the title by however tall the title turned out to be,
+  // rather than by a guess: the two must not land on each other, and snapping
+  // can move either of them by up to half a dot.
+  const Rectangle above = titleBox->WorldBounds(viewport_, fonts_);
+  CodeBlock*      bodyBox =
+      make({titleAt.x, above.y + above.height + em * 0.6f}, prose(body), /*bold=*/false);
+  for (int guard = 0; guard < 8; ++guard) {
+    const Vector2 at = bodyBox->WorldPosition();
+    if (at.y >= above.y + above.height + margin) break;
+    bodyBox->SetWorldPosition({at.x, at.y + step});
+  }
+
+  // Now everything that was already on the canvas steps clear of the words.
+  for (const std::unique_ptr<CodeBlock>& other : codeBlocks_) {
+    if (other.get() != titleBox && other.get() != bodyBox) ResolveOverlaps(other.get());
+  }
+}
+
+void App::SelectWithinWorld(Rectangle worldRect) {
+  const Vector2 topLeft = viewport_.ToScreen({worldRect.x, worldRect.y});
+  const Vector2 bottomRight =
+      viewport_.ToScreen({worldRect.x + worldRect.width, worldRect.y + worldRect.height});
+  // A rectangle is a loop like any other, so this goes through the lasso's own
+  // machinery rather than growing a second way of asking the same question.
+  const std::vector<Vector2> loop = {topLeft, {bottomRight.x, topLeft.y}, bottomRight,
+                                     {topLeft.x, bottomRight.y}};
+  axes_.SelectWithin(loop, viewport_, fonts_);
+  plots_.SelectWithin(loop, viewport_, fonts_);
+  shaders_.SelectWithin(loop, viewport_, fonts_);
+  media_.SelectWithin(loop, viewport_);
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    block->SetSelected(LassoCatches(loop, block->Measure(viewport_, fonts_).rect));
+  }
+}
+
+void App::ThrowAwaySlide(Rectangle bounds, float shift) {
+  // What is on the slide goes with it. "On the slide" means the same thing here
+  // as "circled" does for the lasso -- the window's middle is inside -- so a
+  // caption half over the edge belongs to whichever slide holds its middle.
+  ClearSelection();
+  SelectWithinWorld(bounds);
+  DeleteSelection();
+
+  // The deck is a column, so what was below comes up to fill the gap: the
+  // slides have already moved themselves, and this is everything on them.
+  if (shift > 0.0f) {
+    constexpr float kFarBelow = 1.0e6f;
+    ClearSelection();
+    SelectWithinWorld({bounds.x, bounds.y + bounds.height, bounds.width, kFarBelow});
+    for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+      if (!block->Selected()) continue;
+      const Vector2 at = block->WorldPosition();
+      block->SetWorldPosition({at.x, at.y - shift});
+    }
+    axes_.BeginSelectionDrag();
+    plots_.BeginSelectionDrag();
+    shaders_.BeginSelectionDrag();
+    media_.BeginSelectionDrag();
+    axes_.MoveSelection({0.0f, -shift});
+    plots_.MoveSelection({0.0f, -shift});
+    shaders_.MoveSelection({0.0f, -shift});
+    media_.MoveSelection({0.0f, -shift});
+  }
+  ClearSelection();
+  SettleBlocks();
 }
 
 void App::HandlePointer() {
@@ -458,8 +679,6 @@ void App::HandlePointer() {
   if (moved > kClickSlop) return;  // that was a pan, not a click
 
   CodeBlock* hit = BlockAt(release);
-  // Clicking anywhere is a new intent: whatever was selected is not it.
-  ClearSelection();
   SetFocus(hit);
   if (hit != nullptr) hit->PlaceCaret(release, viewport_, fonts_);
 }
@@ -501,7 +720,9 @@ void App::Update() {
     }
   }
 
-  if (IsKeyPressed(KEY_ESCAPE)) {
+  // Escape belongs to whatever is being typed into first: cancelling an edit is
+  // not a request for the canvas menu.
+  if (IsKeyPressed(KEY_ESCAPE) && !media_.Editing()) {
     menu_.Toggle();
     // Opening the menu ends editing, so no caret is left blinking behind it.
     if (menu_.Visible()) SetFocus(nullptr);
@@ -523,6 +744,20 @@ void App::Update() {
       }
       break;
     }
+    case MenuAction::Insert: {
+      const std::string path = filedialog::OpenMedia();
+      if (!path.empty()) {
+        // Into the middle of the view, which is where you are looking.
+        const Vector2 middle = viewport_.ToWorld({static_cast<float>(GetScreenWidth()) * 0.5f,
+                                                  static_cast<float>(GetScreenHeight()) * 0.5f});
+        if (media_.Add(path, sb::SnapToGrid(middle, viewport_.Zoom()))) {
+          menu_.Close();
+        } else {
+          TraceLog(LOG_WARNING, "MEDIA: nothing here can show %s", path.c_str());
+        }
+      }
+      break;
+    }
     case MenuAction::None:
       break;
   }
@@ -533,7 +768,36 @@ void App::Update() {
   // up. Without this a window let go over another window's rim would never see
   // the release, and would stay stuck to the cursor.
   bool consumed = false;
-  if (canvasActive && dragBlock_ != nullptr) consumed = HandleBlockDrag();
+  if (canvasActive) HandleDroppedFiles();
+
+  // A lasso being drawn, or a selection being carried, owns the pointer for the
+  // same reason a dragged window does -- and it is the easier one to get wrong,
+  // because a lasso is *meant* to sweep across other windows. Hovering a rim
+  // claims the pointer, so without this a loop drawn round a box would be
+  // cancelled the moment it crossed that box's edge.
+  //
+  // Reaching for a selected window's rim goes here too, and for the same
+  // reason: the rim would otherwise claim the press and carry that one window,
+  // when a selection is supposed to move as one.
+  const bool selectionInFlight = lassoActive_ || selectionDrag_;
+  const bool grabbingSelection = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && AnySelected() &&
+                                 SelectedRimAt(GetMousePosition());
+  if (canvasActive && (selectionInFlight || grabbingSelection)) {
+    HandleSelection();
+    consumed = true;
+  }
+
+  // A left click **anywhere** is a new intent, so it puts down whatever was
+  // selected -- on a window, on a picture, on the bare canvas, it makes no
+  // difference. The two exceptions are the press that picks the selection up to
+  // carry it, and a gesture already under way. One rule in one place: the
+  // windows do not each get an opinion about it.
+  if (canvasActive && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !selectionInFlight &&
+      !grabbingSelection) {
+    ClearSelection();
+  }
+  if (canvasActive && !consumed && dragBlock_ != nullptr) consumed = HandleBlockDrag();
+  if (canvasActive && !consumed && media_.Busy()) consumed = media_.HandleInput(viewport_);
   if (canvasActive && !consumed && axes_.Dragging()) {
     consumed = axes_.HandleInput(viewport_, fonts_, codeBlocks_);
   }
@@ -544,40 +808,66 @@ void App::Update() {
     consumed = shaders_.HandleInput(viewport_, fonts_);
   }
 
-  // Otherwise input goes to the innermost thing first: a focused box's buttons,
-  // then the windows, then the canvas.
-  if (canvasActive && !consumed && focus_ != nullptr) {
-    consumed = focus_->HandleChrome(viewport_, fonts_);
+  // The wheel resizes whatever it is over. It is asked early, before the rims
+  // start claiming the pointer, because a wheel event is never ambiguous: no
+  // drag can be in flight while one arrives.
+  if (canvasActive && !consumed) consumed = HandleResize();
+
+  // Otherwise input goes to the innermost thing first: a box's buttons -- the
+  // ones on a focused code box, and the ones a text box shows whenever you
+  // reach for them -- then the windows, then the canvas.
+  if (canvasActive && !consumed) {
+    for (auto it = codeBlocks_.rbegin(); it != codeBlocks_.rend() && !consumed; ++it) {
+      consumed = (*it)->HandleChrome(viewport_, fonts_);
+    }
   }
+  if (canvasActive && !consumed) consumed = media_.HandleInput(viewport_);
   if (canvasActive && !consumed) consumed = HandleBlockDrag();
   if (canvasActive && !consumed) consumed = axes_.HandleInput(viewport_, fonts_, codeBlocks_);
   if (canvasActive && !consumed) consumed = plots_.HandleInput(viewport_, fonts_);
   if (canvasActive && !consumed) consumed = shaders_.HandleInput(viewport_, fonts_);
+  if (canvasActive && !consumed) {
+    consumed = slides_.HandleInput(viewport_, fonts_, options_.slideAspect, &viewport_);
+  }
 
   if (canvasActive && !consumed) {
-    // The lasso and the group it caught come first: a press on a selected
-    // window's rim moves the whole selection, not just that one.
+    // Starting one: a press on a selected window's rim moves the whole
+    // selection, and a press on the background begins a loop.
     HandleSelection();
     if (!lassoActive_ && !selectionDrag_) {
       HandlePointer();
       HandleTyping();
     }
-  } else {
+  } else if (!canvasActive) {
+    // Only the menu opening abandons a gesture. Something else taking the
+    // pointer does not: that is what the in-flight pass above is for.
     pressActive_ = false;
     lassoActive_ = false;
   }
 
   // Keys that act on the selection, and only while no box is being typed into.
-  if (canvasActive && focus_ == nullptr && AnySelected() &&
-      IsKeyPressed(KEY_DELETE)) {
+  // Not while a selection is being carried: the drag is holding raw pointers to
+  // the very boxes these would destroy.
+  const bool keysActOnSelection = canvasActive && focus_ == nullptr && !selectionDrag_;
+  if (keysActOnSelection && AnySelected() && IsKeyPressed(KEY_DELETE)) {
     DeleteSelection();
   }
-  if (canvasActive && focus_ == nullptr && ctrl) {
+  if (keysActOnSelection && ctrl) {
     if (IsKeyPressed(KEY_C)) CopySelection(/*cut=*/false);
     if (IsKeyPressed(KEY_X)) CopySelection(/*cut=*/true);
     if (IsKeyPressed(KEY_V)) PasteClipboard();
   }
 
+  slides_.Advance(GetFrameTime());
+  // A slide that has just appeared gets its title and its body, as two windows
+  // of the canvas rather than as text the slide owns.
+  if (const NewSlide fresh = slides_.TakeNewSlide(); fresh.made) {
+    FurnishSlide(fresh.centre, "Title", {"Lorem ipsum", "dolor sit amet"});
+  }
+  if (const SlideRemoval gone = slides_.TakeRemoval(); gone.asked) {
+    ThrowAwaySlide(gone.bounds, gone.shift);
+  }
+  media_.Advance(GetFrameTime());
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->Poll();
 
   // A box that has just gained (or lost) number lines is a different size than
@@ -608,6 +898,20 @@ void App::Update() {
   // The canvas pans on the right button wherever the pointer is; the wheel and
   // touch belong to whatever window is under it.
   viewport_.Update(canvasActive, !consumed);
+
+  // While the canvas is being dragged the pointer is a closed hand. The system
+  // cursor goes away and ours is drawn in its place, since there is no
+  // grabbing-hand cursor to ask the window system for. Losing the window counts
+  // as letting go, so the cursor can never be left hidden under another app.
+  const bool grabbing = viewport_.PanningWithMouse() && IsWindowFocused();
+  if (grabbing != cursorHidden_) {
+    if (grabbing) {
+      HideCursor();
+    } else {
+      ShowCursor();
+    }
+    cursorHidden_ = grabbing;
+  }
 }
 
 void App::Draw() {
@@ -615,12 +919,17 @@ void App::Draw() {
 
   if (options_.showGridDots) DrawDotGrid(viewport_);
 
+  // Under everything else: a slide is a region of the canvas, and whatever is
+  // on it stands on top of it.
+  slides_.Draw(viewport_, fonts_, options_.slideAspect);
+
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->Draw(viewport_, fonts_);
   for (const MathBlock& block : mathBlocks_) block.Draw(viewport_, fonts_);
 
   axes_.Draw(viewport_, fonts_);
   plots_.Draw(viewport_, fonts_);
   shaders_.Draw(viewport_, fonts_);
+  media_.Draw(viewport_, fonts_);
 
   // Error balloons last, so they are never buried under a neighbouring card.
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
@@ -631,16 +940,20 @@ void App::Draw() {
   axes_.DrawSelectionRims(viewport_, fonts_);
   plots_.DrawSelectionRims(viewport_, fonts_);
   shaders_.DrawSelectionRims(viewport_, fonts_);
+  media_.DrawSelectionRims(viewport_);
 
   if (lassoActive_) DrawLasso(lasso_);
 
   // Carrying a window brings up the one place it can be thrown away.
   if (dragBlockMoved_ || selectionMoved_ || axes_.Carrying() || plots_.Carrying() ||
-      shaders_.Carrying()) {
+      shaders_.Carrying() || media_.Carrying()) {
     DrawDropTarget(OverDropTarget(GetMousePosition()));
   }
 
   menu_.Draw(fonts_, options_);
+
+  // Over everything, the menu included: it is the pointer.
+  if (cursorHidden_) DrawGrabCursor(GetMousePosition());
 }
 
 // ---------------------------------------------------------------- persistence
@@ -657,11 +970,21 @@ bool App::SaveCanvas(const std::string& path) {
   const Vector2 centre = viewport_.Centre();
   file << "view " << centre.x << " " << centre.y << " " << viewport_.Zoom() << "\n";
   file << "grid " << (options_.showGridDots ? 1 : 0) << "\n";
+  file << "aspect " << options_.slideAspect << "\n";
+  const Vector2 newSlide = slides_.ButtonPosition();
+  file << "newslide " << newSlide.x << " " << newSlide.y << "\n";
+  // A slide is only its rim now: its title and its body are text boxes, and so
+  // they are saved as boxes along with every other window.
+  for (const Slide& slide : slides_.Slides()) {
+    file << "slide " << slide.centre.x << " " << slide.centre.y << "\n";
+  }
 
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     const Vector2 position = block->WorldPosition();
     file << "block " << position.x << " " << position.y << " " << block->Em() << " "
-         << (block->ShowMath() ? 1 : 0) << "\n";
+         << (block->ShowMath() ? 1 : 0) << " " << (block->Bold() ? 1 : 0) << " "
+         << (block->Italic() ? 1 : 0) << " " << static_cast<int>(block->Justification())
+         << " " << block->TextWidth() << " " << (block->ShowSource() ? 1 : 0) << "\n";
     for (const std::string& line : block->Lines()) file << "> " << line << "\n";
     for (const mathprogram::Variable& variable : block->Variables()) {
       // Only a real has a value worth keeping. A free function's choice lives in
@@ -695,6 +1018,15 @@ bool App::SaveCanvas(const std::string& path) {
          << view.worldPos.y << " " << indexOf(view.block) << "\n";
   }
 
+  // Pictures and video. The path goes last and takes the rest of the line,
+  // since a path can have spaces in it and the format stays one-record-a-line.
+  for (const std::unique_ptr<MediaItem>& item : media_.Items()) {
+    file << "media " << static_cast<int>(item->kind) << " " << item->worldPos.x << " "
+         << item->worldPos.y << " " << item->worldWidth << " " << item->crop.x << " "
+         << item->crop.y << " " << item->crop.width << " " << item->crop.height << " "
+         << item->trimStart << " " << item->trimEnd << " " << item->path << "\n";
+  }
+
   for (const Plot& plot : plots_.Plots()) {
     file << "plot " << (plot.docked ? 1 : 0) << " " << plot.worldPos.x << " " << plot.worldPos.y
          << " " << plot.centre.x << " " << plot.centre.y << " " << plot.span << " "
@@ -725,10 +1057,33 @@ bool App::LoadCanvas(const std::string& path) {
     Vector2                                   position{};
     float                                     em = kDefaultBlockEm;
     bool                                      showMath = false;
+    bool                                      bold = false;
+    bool                                      italic = false;
+    int                                       justify = 0;
+    float                                     textWidth = 0.0f;
+    bool                                      showSource = false;
     std::vector<std::string>                  lines;
     std::vector<std::pair<std::string, float>> values;
     std::vector<std::string>                   hidden;
     bool                                       shaderHidden = false;
+  };
+  struct LoadedMedia {
+    int         kind = 0;
+    Vector2     position{};
+    float       width = 360.0f;
+    Rectangle   crop{0.0f, 0.0f, 1.0f, 1.0f};
+    double      trimStart = 0.0;
+    double      trimEnd = 0.0;
+    std::string path;
+  };
+  // A canvas written before slides had windows carries its text on the slide
+  // record. It is turned into a pair of text boxes on the way in, so an old
+  // deck opens as a new one rather than losing its words.
+  struct LegacySlideText {
+    Vector2                  centre{};
+    std::string              title;
+    std::vector<std::string> body;
+    bool                     any = false;
   };
   struct LoadedShader {
     bool    docked = true;
@@ -752,14 +1107,19 @@ bool App::LoadCanvas(const std::string& path) {
     std::vector<std::pair<int, std::string>> refs;
   };
 
-  std::vector<LoadedBlock> blocks;
-  std::vector<LoadedAxis>  axes;
-  std::vector<LoadedPlot>  plots;
+  std::vector<LoadedBlock>  blocks;
+  std::vector<LoadedAxis>   axes;
+  std::vector<LoadedPlot>   plots;
   std::vector<LoadedShader> shaderViews;
+  std::vector<LoadedMedia>  media;
+  std::vector<LegacySlideText> legacy;
   Vector2 centre{0.0f, 0.0f};
   float   zoom = 1.0f;
   bool    grid = true;
   bool    inBlock = false;
+  float   aspect = 16.0f / 9.0f;
+  Vector2 newSlide = SlidePanel::DefaultButtonPosition();
+  std::vector<Slide> slides;
 
   std::string raw;
   while (std::getline(file, raw)) {
@@ -790,8 +1150,19 @@ bool App::LoadCanvas(const std::string& path) {
     } else if (keyword == "block") {
       LoadedBlock block;
       int showMath = 0;
+      int bold = 0;
+      int italic = 0;
+      int justify = 0;
       stream >> block.position.x >> block.position.y >> block.em >> showMath;
+      // A file written before text boxes existed simply stops here, and the
+      // stream leaves the rest at its defaults.
+      int showSource = 0;
+      stream >> bold >> italic >> justify >> block.textWidth >> showSource;
+      block.showSource = (showSource != 0);
       block.showMath = (showMath != 0);
+      block.bold = (bold != 0);
+      block.italic = (italic != 0);
+      block.justify = std::clamp(justify, 0, 2);
       blocks.push_back(std::move(block));
       inBlock = true;
     } else if (keyword == "val" && inBlock) {
@@ -799,6 +1170,32 @@ bool App::LoadCanvas(const std::string& path) {
       float value = 0.0f;
       stream >> name >> value;
       blocks.back().values.emplace_back(name, value);
+    } else if (keyword == "aspect") {
+      stream >> aspect;
+    } else if (keyword == "newslide") {
+      stream >> newSlide.x >> newSlide.y;
+    } else if (keyword == "slide") {
+      Slide slide;
+      stream >> slide.centre.x >> slide.centre.y;
+      legacy.push_back({slide.centre, {}, {}, false});
+      slides.push_back(std::move(slide));
+      inBlock = false;
+    } else if (keyword == "stitle" && !legacy.empty()) {
+      // The rest of the line, verbatim: slide text is prose and has spaces in.
+      legacy.back().title = (raw.size() > 7) ? raw.substr(7) : std::string();
+      legacy.back().any = true;
+    } else if (keyword == "sbody" && !legacy.empty()) {
+      legacy.back().body.push_back((raw.size() > 6) ? raw.substr(6) : std::string());
+      legacy.back().any = true;
+    } else if (keyword == "media") {
+      LoadedMedia item;
+      stream >> item.kind >> item.position.x >> item.position.y >> item.width >> item.crop.x >>
+          item.crop.y >> item.crop.width >> item.crop.height >> item.trimStart >> item.trimEnd;
+      // Everything left on the line is the path, spaces and all.
+      std::getline(stream, item.path);
+      while (!item.path.empty() && item.path.front() == ' ') item.path.erase(0, 1);
+      if (!item.path.empty()) media.push_back(std::move(item));
+      inBlock = false;
     } else if (keyword == "hide" && inBlock) {
       std::string name;
       stream >> name;
@@ -840,17 +1237,39 @@ bool App::LoadCanvas(const std::string& path) {
     }
   }
 
-  // Commit.
+  // Commit. Everything the old canvas held goes first, and by hand where a
+  // destructor cannot be trusted to do it: shaders and textures have to be
+  // handed back while the graphics context is still there, and every pointer
+  // into the blocks has to stop pointing before the blocks stop existing.
   focus_ = nullptr;
+  dragBlock_ = nullptr;
+  dragBlockMoved_ = false;
+  selectionDrag_ = false;
+  selectionMoved_ = false;
+  selectionFrom_.clear();
+  lassoActive_ = false;
+  lasso_.clear();
+  pressActive_ = false;
+
+  slides_.Reset();
   axes_.Clear();
   plots_.Clear();
   shaders_.Clear();
+  // Every picture's texture and every video's decoder, by hand and while the
+  // graphics context is still here.
+  media_.Clear();
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->ReleaseGpu();
   codeBlocks_.clear();
   mathBlocks_.clear();
 
   for (LoadedBlock& loaded : blocks) {
     auto block = std::make_unique<CodeBlock>(loaded.position, loaded.em, std::move(loaded.lines));
     block->SetShowMath(loaded.showMath);
+    block->SetBold(loaded.bold);
+    block->SetItalic(loaded.italic);
+    block->SetJustification(static_cast<CodeBlock::Justify>(loaded.justify));
+    block->SetTextWidth(loaded.textWidth);
+    block->SetShowSource(loaded.showSource);
     block->RestoreHidden(std::move(loaded.hidden));
     block->SetShaderHidden(loaded.shaderHidden);
     block->RestoreValues(std::move(loaded.values));
@@ -905,8 +1324,29 @@ bool App::LoadCanvas(const std::string& path) {
   }
   shaders_.Adopt(std::move(views));
 
+  for (const LoadedMedia& loaded : media) {
+    media_.Add(loaded.path, loaded.position, loaded.width);
+    if (media_.Items().empty()) continue;
+    MediaItem& item = *media_.Items().back();
+    item.crop = loaded.crop;
+    if (loaded.trimEnd > loaded.trimStart) {
+      item.trimStart = loaded.trimStart;
+      item.trimEnd = loaded.trimEnd;
+    }
+  }
+
   options_.showGridDots = grid;
+  options_.slideAspect = (aspect > 0.05f) ? aspect : (16.0f / 9.0f);
+  slides_.Adopt(std::move(slides), newSlide);
   viewport_.Reset(centre, zoom);
+
+  // An older canvas kept its slide text on the slide. Give it the two windows
+  // it would have if it were made today. After the viewport, because placement
+  // is on the grid as drawn.
+  for (const LegacySlideText& old : legacy) {
+    if (!old.any) continue;
+    FurnishSlide(old.centre, old.title.empty() ? "Title" : old.title, old.body);
+  }
 
   // Hold a loaded canvas to the same two rules as a live one. A file saved
   // under them reloads exactly as it was; an older one is tidied on the way in.

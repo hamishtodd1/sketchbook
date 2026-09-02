@@ -12,6 +12,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <vector>
 
 namespace sb::proc {
@@ -117,6 +118,88 @@ Result Run(const std::string& commandLine, int timeoutMs) {
   return result;
 }
 
+// ------------------------------------------------------------------- Pipe
+
+Pipe::~Pipe() { Stop(); }
+
+bool Pipe::Start(const std::string& commandLine) {
+  Stop();
+
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+
+  HANDLE readEnd = nullptr;
+  HANDLE writeEnd = nullptr;
+  if (!CreatePipe(&readEnd, &writeEnd, &sa, 1 << 20)) return false;
+  SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
+
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = writeEnd;
+  // Diagnostics are not wanted here: they would land in the middle of the
+  // frames. A decoder that fails simply stops writing, and a short read says so.
+  si.hStdError = nullptr;
+  si.hStdInput = nullptr;
+
+  PROCESS_INFORMATION pi{};
+  std::wstring wide = Widen(commandLine);
+  wide.push_back(L'\0');
+
+  const BOOL ok = CreateProcessW(nullptr, wide.data(), nullptr, nullptr, TRUE,
+                                 CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+  CloseHandle(writeEnd);
+  if (!ok) {
+    CloseHandle(readEnd);
+    return false;
+  }
+  CloseHandle(pi.hThread);
+  process_ = pi.hProcess;
+  readEnd_ = readEnd;
+  return true;
+}
+
+std::size_t Pipe::Read(unsigned char* into, std::size_t bytes,
+                       const std::function<bool()>& abort) {
+  if (readEnd_ == nullptr) return 0;
+  std::size_t got = 0;
+  while (got < bytes) {
+    if (abort && abort()) return got;
+
+    DWORD available = 0;
+    if (!PeekNamedPipe(readEnd_, nullptr, 0, nullptr, &available, nullptr)) {
+      // The child closed its end: the stream is over.
+      return got;
+    }
+    if (available == 0) {
+      Sleep(2);
+      continue;
+    }
+    const DWORD want =
+        static_cast<DWORD>(std::min<std::size_t>(bytes - got, static_cast<std::size_t>(available)));
+    DWORD read = 0;
+    if (!ReadFile(readEnd_, into + got, want, &read, nullptr) || read == 0) return got;
+    got += read;
+  }
+  return got;
+}
+
+void Pipe::Stop() {
+  if (process_ != nullptr) {
+    // The child is a decoder with nothing to save; it is told to stop rather
+    // than waited for, or seeking would cost as long as decoding.
+    TerminateProcess(process_, 1);
+    WaitForSingleObject(process_, 2000);
+    CloseHandle(process_);
+    process_ = nullptr;
+  }
+  if (readEnd_ != nullptr) {
+    CloseHandle(readEnd_);
+    readEnd_ = nullptr;
+  }
+}
+
 }  // namespace sb::proc
 
 #else  // ----------------------------------------------------------- fallback
@@ -140,6 +223,34 @@ Result Run(const std::string& commandLine, int /*timeoutMs*/) {
   const int status = pclose(pipe);
   result.exitCode = (status == -1) ? -1 : (status / 256);
   return result;
+}
+
+Pipe::~Pipe() { Stop(); }
+
+bool Pipe::Start(const std::string& commandLine) {
+  Stop();
+  process_ = popen(commandLine.c_str(), "r");
+  return process_ != nullptr;
+}
+
+std::size_t Pipe::Read(unsigned char* into, std::size_t bytes,
+                       const std::function<bool()>& abort) {
+  if (process_ == nullptr) return 0;
+  std::size_t got = 0;
+  while (got < bytes) {
+    if (abort && abort()) return got;
+    const std::size_t read =
+        std::fread(into + got, 1, bytes - got, static_cast<FILE*>(process_));
+    if (read == 0) return got;
+    got += read;
+  }
+  return got;
+}
+
+void Pipe::Stop() {
+  if (process_ == nullptr) return;
+  pclose(static_cast<FILE*>(process_));
+  process_ = nullptr;
 }
 
 }  // namespace sb::proc

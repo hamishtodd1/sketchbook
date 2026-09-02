@@ -9,7 +9,9 @@
 #include "blocks.h"
 #include "fontstore.h"
 #include "types/RealFunctionViz.h"
+#include "media.h"
 #include "selection.h"
+#include "slides.h"
 #include "shaderwindow.h"
 #include "ui.h"
 #include "viewport.h"
@@ -52,6 +54,27 @@ class App {
   // widen with no one having moved anything. Run when that happens.
   void      SettleBlocks();
 
+  // The wheel over a window resizes it uniformly. It lives here rather than in
+  // any one panel because the snapping rule has to see every kind of window at
+  // once: a picture matching the height of the picture beside it, or a caption
+  // matching the width of what it is under.
+  bool HandleResize();
+
+  // Files dropped on the window: a picture or a video becomes a window where
+  // the pointer is, and a .sketch opens.
+  void HandleDroppedFiles();
+
+  // A new slide's title and body, which are ordinary text boxes.
+  void FurnishSlide(Vector2 centre, const std::string& title,
+                    const std::vector<std::string>& body);
+  // A slide thrown away takes what is on it with it, and the deck below closes
+  // the gap. Which windows those are is decided exactly as the lasso decides:
+  // by their middles.
+  void ThrowAwaySlide(Rectangle bounds, float shift);
+  // Selects every window whose middle is inside a world rectangle, by handing
+  // the rectangle to the lasso's own machinery.
+  void SelectWithinWorld(Rectangle worldRect);
+
   // --- selection ----------------------------------------------------------
   //
   // Dragging the background draws a lasso; what it catches behaves as one
@@ -79,6 +102,12 @@ class App {
   AxisPanel                               axes_;
   PlotPanel                               plots_;
   ShaderPanel                             shaders_;
+  // Pictures and video. Not mathematics, so not in types/ -- but windows, and
+  // so subject to every rule the others are.
+  MediaPanel                              media_;
+  // Slides: regions of the canvas worth looking at on their own, and the button
+  // that makes them.
+  SlidePanel                              slides_;
 
   // Where this canvas came from, so Ctrl+S can save straight back to it.
   std::string currentPath_;
@@ -89,6 +118,9 @@ class App {
   bool       dragBlockMoved_ = false;
   bool       pressActive_ = false;
   Vector2    pressOrigin_{};
+  // True while the system cursor is hidden because a hand is being drawn in its
+  // place. Kept so the two can never get out of step.
+  bool       cursorHidden_ = false;
 
   // The loop being drawn, in screen points, while the background is dragged.
   std::vector<Vector2> lasso_;
@@ -107,6 +139,12 @@ class App {
     std::vector<std::string>                   lines;
     float                                      em = 26.0f;
     bool                                       showMath = false;
+    // How a text box is set. A copy that lost its formatting would not be one.
+    bool                                       bold = false;
+    bool                                       italic = false;
+    int                                        justify = 0;
+    float                                      textWidth = 0.0f;
+    bool                                       showSource = false;
     std::vector<std::pair<std::string, float>> values;
     Vector2                                    offset{};   // from the group's corner
   };

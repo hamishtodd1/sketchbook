@@ -24,6 +24,12 @@ namespace {
 const wchar_t kFilter[] =
     L"Sketchbook canvas (*.sketch)\0*.sketch\0All files (*.*)\0*.*\0\0";
 
+const wchar_t kMediaFilter[] =
+    L"Pictures and video\0"
+    L"*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.gif;*.qoi;*.psd;*.hdr;*.pic;"
+    L"*.mp4;*.mov;*.mkv;*.avi;*.webm;*.m4v;*.wmv;*.mpg;*.mpeg\0"
+    L"All files (*.*)\0*.*\0\0";
+
 std::wstring Widen(const std::string& utf8) {
   if (utf8.empty()) return {};
   const int needed =
@@ -77,6 +83,16 @@ std::string Open() {
   return Narrow(buffer.data());
 }
 
+std::string OpenMedia() {
+  std::vector<wchar_t> buffer(1024, L'\0');
+  OPENFILENAMEW ofn = Prepare(&buffer);
+  ofn.lpstrFilter = kMediaFilter;
+  ofn.lpstrDefExt = nullptr;
+  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+  if (GetOpenFileNameW(&ofn) == 0) return {};
+  return Narrow(buffer.data());
+}
+
 }  // namespace sb::filedialog
 
 #else  // ----------------------------------------------------------- fallback
@@ -84,6 +100,7 @@ std::string Open() {
 namespace sb::filedialog {
 std::string Save(const std::string&) { return {}; }
 std::string Open() { return {}; }
+std::string OpenMedia() { return {}; }
 }  // namespace sb::filedialog
 
 #endif

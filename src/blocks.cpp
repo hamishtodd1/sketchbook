@@ -23,6 +23,10 @@ namespace {
 constexpr float kPadX = 18.0f;
 constexpr float kPadY = 14.0f;
 constexpr float kRadius = 8.0f;
+// The type size those numbers were chosen against. Padding is kept in
+// proportion to it so that resizing a box is genuinely uniform: at the default
+// size nothing has moved, and at any other size the whole card has scaled.
+constexpr float kBaseEm = 26.0f;
 
 // An empty box still needs to be big enough to see and click.
 constexpr int kMinColumns = 14;
@@ -43,6 +47,17 @@ constexpr float kChromeHeight = 22.0f;
 constexpr float kChromeGap = 7.0f;
 constexpr float kChromeEm = 14.0f;
 constexpr float kToggleWidth = 58.0f;
+// The gap between one control and the next in a text box's strip.
+constexpr float kChromeSpacing = 4.0f;
+
+// A text box with no measure chosen yet gets one this many ems wide. About
+// sixty characters, which is the width prose has been set at for five hundred
+// years and is still about right.
+constexpr float kMeasureEms = 20.0f;
+
+// The bar just inside the right edge that sets the measure.
+constexpr float kMarginBar = 4.0f;      // screen pixels wide
+constexpr float kMarginGrab = 14.0f;    // and this much of a target
 
 // Monospaced cells kept clear for an injected initialiser, so the box does not
 // resize as the value changes width.
@@ -157,6 +172,53 @@ void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float border
   DrawRectangleRoundedLinesEx(rect, roundness, segments, borderWidth, border);
 }
 
+// Breaks a run of prose to a width, as byte ranges that **partition** it. The
+// pieces meet exactly -- a trailing space stays with the piece it ends -- so
+// every byte of the line, and therefore every position the caret can take, is
+// in exactly one row.
+void WrapProse(FontStore& fonts, Face face, const std::string& line, std::size_t from,
+               float emPx, float maxWidth, std::vector<std::size_t>* begins,
+               std::vector<std::size_t>* ends) {
+  begins->clear();
+  ends->clear();
+
+  // Cumulative width at every character boundary, measured once.
+  std::vector<std::size_t> at{from};
+  std::vector<float>       cum{0.0f};
+  for (std::size_t i = from; i < line.size();) {
+    std::size_t next = i + 1;
+    while (next < line.size() && (static_cast<unsigned char>(line[next]) & 0xC0) == 0x80) ++next;
+    cum.push_back(cum.back() +
+                  text::Measure(fonts, face, std::string_view(line).substr(i, next - i), emPx));
+    at.push_back(next);
+    i = next;
+  }
+
+  std::size_t start = 0;   // index into `at`
+  while (start + 1 < at.size()) {
+    if (cum.back() - cum[start] <= maxWidth) {
+      begins->push_back(at[start]);
+      ends->push_back(line.size());
+      return;
+    }
+    // The furthest boundary that still fits.
+    std::size_t fit = start + 1;
+    while (fit + 1 < at.size() && cum[fit + 1] - cum[start] <= maxWidth) ++fit;
+    // Back up to the last space, so words are not cut in half. A single word
+    // too long for the measure is broken rather than allowed to overflow.
+    std::size_t cut = fit;
+    while (cut > start + 1 && line[at[cut] - 1] != ' ') --cut;
+    if (cut <= start) cut = fit;
+    begins->push_back(at[start]);
+    ends->push_back(at[cut]);
+    start = cut;
+  }
+  if (begins->empty()) {
+    begins->push_back(from);
+    ends->push_back(line.size());
+  }
+}
+
 // Draws part of a line with its syntax colours. Returns the width drawn.
 float DrawSpans(FontStore& fonts, std::string_view line,
                 const std::vector<highlight::Span>& spans, std::size_t from, std::size_t to,
@@ -181,23 +243,109 @@ CodeBlock::CodeBlock(Vector2 worldTopLeft, float worldEm, std::vector<std::strin
   if (lines_.empty()) lines_.emplace_back();
 }
 
-void CodeBlock::EnsureCache(FontStore& fonts, float emPx) const {
+CodeBlock::~CodeBlock() {
+  // Nothing is freed here on purpose: releasing a shader needs the graphics
+  // context, and a destructor can run after the window has gone. Whoever
+  // destroys a box has to have released it first. Say so if they did not,
+  // rather than leaking in silence.
+  if (haveShader_ || haveProbe_ || havePreviewSurface_ || haveProbeTarget_) {
+    TraceLog(LOG_WARNING, "BLOCKS: a box was destroyed still holding GPU memory");
+  }
+}
+
+void CodeBlock::EnsureCache(FontStore& fonts, float emPx, float measurePx) const {
+  const bool prose = IsText();
+  // Bold and italic change which face the words are set in, so they invalidate
+  // a line as surely as editing it does.
+  const unsigned styleSig = (bold_ ? 1u : 0u) | (italic_ ? 2u : 0u) | (prose ? 4u : 0u);
+
   cache_.resize(lines_.size());
   for (std::size_t i = 0; i < lines_.size(); ++i) {
     LineCache& entry = cache_[i];
-    if (entry.source != lines_[i]) {
+    if (entry.source != lines_[i] || entry.styleSig != styleSig) {
       entry.source = lines_[i];
-      entry.parsed = mathline::Parse(lines_[i]);
-      entry.tex = entry.parsed.latex.empty() ? tex::Parsed{} : tex::Parse(entry.parsed.latex);
+      entry.styleSig = styleSig;
+      // A text box has no mathematical reading and is not looked for one: its
+      // lines are words, and words are not code that failed to parse.
+      entry.parsed = prose ? mathline::Line{} : mathline::Parse(lines_[i]);
+      entry.latex = prose ? std::string() : entry.parsed.latex;
+      entry.tex = entry.latex.empty() ? tex::Parsed{} : tex::Parse(entry.latex);
       entry.emPx = -1.0f;
+      entry.wrapWidth = -1.0f;
     }
-    if (entry.parsed.latex.empty()) continue;
+
+    if (prose) {
+      // Rebuilt when the words, the face, the size or the measure change -- and
+      // not otherwise, since this lays out every row of the paragraph.
+      if (entry.emPx == emPx && entry.wrapWidth == measurePx) continue;
+      entry.emPx = emPx;
+      entry.wrapWidth = measurePx;
+      WrapProse(fonts, ProseFace(), lines_[i], ProseOffset(i), emPx, measurePx,
+                &entry.pieceBegin, &entry.pieceEnd);
+      entry.pieceLayout.assign(entry.pieceBegin.size(), tex::Layout{});
+      for (std::size_t k = 0; k < entry.pieceBegin.size(); ++k) {
+        const std::string_view words = std::string_view(lines_[i]).substr(
+            entry.pieceBegin[k], entry.pieceEnd[k] - entry.pieceBegin[k]);
+        entry.pieceLayout[k] = tex::Render(TextLatex(words), fonts, emPx, /*display=*/false);
+      }
+      continue;
+    }
+
+    if (entry.latex.empty()) continue;
     if (entry.emPx != emPx) {
       entry.emPx = emPx;
       // Text style, not display: these sit inline in a box, not on their own.
       entry.layout = tex::BuildLayout(entry.tex, fonts, emPx, /*display=*/false);
     }
   }
+}
+
+// ------------------------------------------------------------------- prose
+
+bool CodeBlock::IsText() const {
+  if (lines_.empty()) return false;
+  const std::string& first = lines_[0];
+  std::size_t i = 0;
+  while (i < first.size() && first[i] == ' ') ++i;
+  return first.size() - i >= 5 && first.compare(i, 5, "\\text") == 0;
+}
+
+std::size_t CodeBlock::ProseOffset(std::size_t line) const {
+  if (line != 0 || lines_.empty()) return 0;
+  const std::string& first = lines_[0];
+  std::size_t i = 0;
+  while (i < first.size() && first[i] == ' ') ++i;
+  if (first.size() - i < 5 || first.compare(i, 5, "\\text") != 0) return 0;
+  i += 5;
+  // One space after the sigil is punctuation, not a word.
+  if (i < first.size() && first[i] == ' ') ++i;
+  return i;
+}
+
+std::string CodeBlock::Prose(std::size_t line) const {
+  if (line >= lines_.size()) return {};
+  return lines_[line].substr(ProseOffset(line));
+}
+
+Face CodeBlock::ProseFace() const {
+  // There is no bold-italic cut of Computer Modern in the KaTeX set, so asking
+  // for both gives bold.
+  if (bold_) return Face::MainBold;
+  if (italic_) return Face::MainItalic;
+  return Face::MainRegular;
+}
+
+std::string CodeBlock::TextLatex(std::string_view words) const {
+  // \text takes its contents raw, so everything reaches the page as itself and
+  // one character stays one glyph -- which is what lets the caret be placed in
+  // the words rather than in the source. Only the braces have to go, since they
+  // are what tells the parser where the argument ends.
+  std::string escaped;
+  for (char c : words) escaped += (c == '{' || c == '}') ? ' ' : c;
+  while (!escaped.empty() && escaped.back() == ' ') escaped.pop_back();
+  if (escaped.empty()) return {};
+  const char* command = bold_ ? "\\textbf" : (italic_ ? "\\textit" : "\\text");
+  return std::string(command) + "{" + escaped + "}";
 }
 
 int CodeBlock::ErrorLine() const {
@@ -212,7 +360,12 @@ int CodeBlock::ErrorLine() const {
 
 bool CodeBlock::ShowsCode(int line) const {
   if (line < 0 || line >= static_cast<int>(cache_.size())) return true;
-  if (cache_[static_cast<std::size_t>(line)].parsed.latex.empty()) return true;
+  // A text box is words all the way through, and stays words while it is being
+  // edited: what you are writing is what you can see. The one way to get at the
+  // source -- and so at the sigil, which is how a text box stops being one --
+  // is the toggle on its own strip.
+  if (IsText()) return showSource_;
+  if (cache_[static_cast<std::size_t>(line)].latex.empty()) return true;
   // A line the compiler complained about shows its code, so the red caret has
   // real characters to point at -- and so you can see what to fix.
   if (line + 1 == ErrorLine()) return true;
@@ -307,11 +460,15 @@ void CodeBlock::DrawShaderInto(Rectangle rect) const {
   EndShaderMode();
 }
 
-std::vector<Rectangle> CodeBlock::MentionRects(std::size_t line, const std::string& name,
+std::vector<Rectangle> CodeBlock::MentionRects(std::size_t rowIndex, const std::string& name,
                                                const Geometry& g, FontStore& fonts) const {
   std::vector<Rectangle> rects;
-  if (line >= g.rows.size() || line >= cache_.size() || name.empty()) return rects;
-  const Row& row = g.rows[line];
+  if (rowIndex >= g.rows.size() || name.empty()) return rects;
+  const Row&        row = g.rows[rowIndex];
+  const std::size_t line = static_cast<std::size_t>(row.line);
+  if (line >= cache_.size()) return rects;
+  // Prose declares nothing, so nothing in it is a mention.
+  if (IsText()) return rects;
 
   // A box a little taller than the letters, so it reads as a highlight rather
   // than as something touching the glyphs.
@@ -359,7 +516,7 @@ std::vector<Rectangle> CodeBlock::MentionRects(std::size_t line, const std::stri
       if (!any) continue;
 
       // Item coordinates are relative to the formula's left edge and baseline.
-      const float originX = g.textLeftTop.x;
+      const float originX = row.x;
       rects.push_back({originX + left - g.emPx * 0.05f, row.baseline + top,
                        (right - left) + g.emPx * 0.10f, bottom - top});
     }
@@ -373,12 +530,13 @@ std::vector<Rectangle> CodeBlock::MentionRects(std::size_t line, const std::stri
   };
   for (std::size_t at = source.find(name); at != std::string::npos;
        at = source.find(name, at + 1)) {
+    if (at < row.begin || at >= row.end) continue;
     const bool beforeOk = (at == 0) || !isWordChar(source[at - 1]);
     const std::size_t end = at + name.size();
     const bool afterOk = (end >= source.size()) || !isWordChar(source[end]);
     if (!beforeOk || !afterOk) continue;   // part of a longer name
 
-    const float left = g.textLeftTop.x + g.advance * static_cast<float>(at);
+    const float left = row.x + g.advance * static_cast<float>(at);
     const float right = left + g.advance * static_cast<float>(name.size());
     rects.push_back(boxAround(left, right, row.baseline, g.emPx));
   }
@@ -393,69 +551,204 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
   g.lineHeight = text::LineHeight(fonts, Face::Mono, g.emPx);
   g.ascent = text::Ascent(fonts, Face::Mono, g.emPx);
 
-  EnsureCache(fonts, g.emPx);
+  // The measure, in pixels: how far the words run before they wrap. A box that
+  // has never been given one takes a sensible measure from its own type size.
+  g.measure = (textWidth_ > 0.0f ? textWidth_ : em_ * kMeasureEms) * g.zoom;
+  EnsureCache(fonts, g.emPx, g.measure);
+
+  // Padding is in proportion to the type, so growing a box grows the whole
+  // card and not just what is written in it.
+  const float padScale = em_ / kBaseEm;
+  const float padX = kPadX * padScale * g.zoom;
+  const float padY = kPadY * padScale * g.zoom;
 
   const Vector2 topLeft = viewport.ToScreen(origin_);
-  float y = topLeft.y + kPadY * g.zoom;
+  float y = topLeft.y + padY;
 
-  g.rows.assign(lines_.size(), Row{});
+  g.rows.clear();
+  g.rows.reserve(lines_.size());
   float contentWidth = g.advance * static_cast<float>(kMinColumns);
 
-  for (std::size_t i = 0; i < lines_.size(); ++i) {
-    Row& row = g.rows[i];
-    row.asLatex = !ShowsCode(static_cast<int>(i));
-    row.y = y;
-
-    // The box is sized for the worst case across *both* readings, so it never
-    // changes shape when a line flips between them or a value changes width.
-    float codeWidth = text::Measure(fonts, Face::Mono, lines_[i], g.emPx);
-    const std::string injection = Injection(static_cast<int>(i));
-    if (!injection.empty()) {
-      // A real's injection is a number that changes width as its knob moves, so
-      // it gets a fixed slot rather than the width of the moment -- otherwise
-      // the box would breathe in and out as you drag. A function's never
-      // changes, so it gets exactly the room it needs.
-      codeWidth += std::max(g.advance * kInjectionColumns,
-                            text::Measure(fonts, Face::Mono, injection, g.emPx));
+  // A paragraph is exactly as wide as its measure -- whether or not any row
+  // reaches it, and regardless of how long the source line behind it is. A
+  // paragraph is a shape, and sizing it to its unwrapped source would make a
+  // box thousands of units wide to hold four lines of words.
+  //
+  // Everything else is sized for the worst case across *both* readings, so it
+  // never changes shape when a line flips or a value changes width.
+  const bool showingWords = IsText() && !showSource_;
+  if (showingWords) {
+    contentWidth = std::max(contentWidth, g.measure);
+  } else {
+    for (std::size_t i = 0; i < lines_.size(); ++i) {
+      float codeWidth = text::Measure(fonts, Face::Mono, lines_[i], g.emPx);
+      const std::string injection = Injection(static_cast<int>(i));
+      if (!injection.empty()) {
+        // A real's injection is a number that changes width as its knob moves,
+        // so it gets a fixed slot rather than the width of the moment --
+        // otherwise the box would breathe in and out as you drag. A function's
+        // never changes, so it gets exactly the room it needs.
+        codeWidth += std::max(g.advance * kInjectionColumns,
+                              text::Measure(fonts, Face::Mono, injection, g.emPx));
+      }
+      contentWidth = std::max(contentWidth, codeWidth);
     }
-
-    float latexWidth = 0.0f;
-    float latexExtent = 0.0f;
-    if (!cache_[i].parsed.latex.empty()) {
-      const tex::Layout& layout = cache_[i].layout;
-      latexWidth = layout.width;
-      latexExtent = layout.height + layout.depth + 6.0f * g.zoom;
-    }
-
-    contentWidth = std::max(contentWidth, std::max(codeWidth, latexWidth));
-    row.height = std::max(g.lineHeight, latexExtent);
-
-    if (row.asLatex) {
-      const tex::Layout& layout = cache_[i].layout;
-      row.baseline = row.y + (row.height - (layout.height + layout.depth)) * 0.5f + layout.height;
-    } else {
-      row.baseline = row.y + (row.height - g.lineHeight) * 0.5f + g.ascent;
-    }
-    y += row.height;
   }
 
-  const float contentHeight = y - (topLeft.y + kPadY * g.zoom);
-  g.rect = {topLeft.x, topLeft.y, contentWidth + 2.0f * kPadX * g.zoom,
-            contentHeight + 2.0f * kPadY * g.zoom};
-  g.textLeftTop = {topLeft.x + kPadX * g.zoom, topLeft.y + kPadY * g.zoom};
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    const bool asLatex = !ShowsCode(static_cast<int>(i));
+    const bool wrapped = asLatex && IsText();
+
+    // Prose wraps, so one line becomes as many rows as it takes.
+    const std::size_t pieces =
+        wrapped ? std::max<std::size_t>(cache_[i].pieceBegin.size(), 1) : 1;
+
+    for (std::size_t k = 0; k < pieces; ++k) {
+      Row row;
+      row.asLatex = asLatex;
+      row.line = static_cast<int>(i);
+      row.piece = static_cast<int>(k);
+      row.y = y;
+
+      if (wrapped && k < cache_[i].pieceBegin.size()) {
+        row.begin = cache_[i].pieceBegin[k];
+        row.end = cache_[i].pieceEnd[k];
+      } else if (wrapped) {
+        row.begin = ProseOffset(i);
+        row.end = lines_[i].size();
+      } else {
+        row.begin = 0;
+        row.end = lines_[i].size();
+      }
+
+      const tex::Layout* layout = nullptr;
+      if (wrapped) {
+        if (k < cache_[i].pieceLayout.size()) layout = &cache_[i].pieceLayout[k];
+      } else if (asLatex && !cache_[i].latex.empty()) {
+        layout = &cache_[i].layout;
+      }
+
+      float latexExtent = 0.0f;
+      if (layout != nullptr) {
+        row.width = layout->width;
+        latexExtent = layout->height + layout->depth + 6.0f * g.zoom;
+        contentWidth = std::max(contentWidth, row.width);
+        row.baseline = 0.0f;
+      } else {
+        row.width = text::Measure(fonts, Face::Mono, lines_[i], g.emPx);
+      }
+
+      row.height = std::max(g.lineHeight, latexExtent);
+      if (layout != nullptr) {
+        row.baseline =
+            row.y + (row.height - (layout->height + layout->depth)) * 0.5f + layout->height;
+      } else {
+        row.baseline = row.y + (row.height - g.lineHeight) * 0.5f + g.ascent;
+      }
+      y += row.height;
+      g.rows.push_back(row);
+    }
+  }
+
+  const float contentHeight = y - (topLeft.y + padY);
+  g.rect = {topLeft.x, topLeft.y, contentWidth + 2.0f * padX, contentHeight + 2.0f * padY};
+  g.textLeftTop = {topLeft.x + padX, topLeft.y + padY};
+
+  // Justification is a second pass, because it is about where a row sits in the
+  // box and the box's width is not settled until every row has been measured.
+  // Code is always flush left: a column means something in code and nothing in
+  // prose.
+  for (Row& row : g.rows) {
+    const float slack = std::max(0.0f, contentWidth - row.width);
+    float offset = 0.0f;
+    if (row.asLatex && IsText() && justify_ == Justify::Centre) offset = slack * 0.5f;
+    if (row.asLatex && IsText() && justify_ == Justify::Right) offset = slack;
+    row.x = g.textLeftTop.x + offset;
+  }
   return g;
+}
+
+float CodeBlock::PaddingX(float em) { return kPadX * (em / kBaseEm); }
+
+Rectangle CodeBlock::WorldBounds(const Viewport& viewport, FontStore& fonts) const {
+  const Geometry& g = Measure(viewport, fonts);
+  const float     zoom = std::max(viewport.Zoom(), 1e-6f);
+  return {origin_.x, origin_.y, g.rect.width / zoom, g.rect.height / zoom};
+}
+
+void CodeBlock::Scale(float factor, Vector2 anchorWorld) {
+  const float wanted = std::clamp(em_ * factor, 3.0f, 800.0f);
+  const float applied = wanted / em_;
+  // The anchor is the corner the pointer is nearest, so the box grows away
+  // from the hand rather than out from under it.
+  origin_ = {anchorWorld.x + (origin_.x - anchorWorld.x) * applied,
+             anchorWorld.y + (origin_.y - anchorWorld.y) * applied};
+  em_ = wanted;
+  // The measure goes with the type, or the resize would reflow the paragraph
+  // instead of scaling it.
+  if (textWidth_ > 0.0f) textWidth_ *= applied;
 }
 
 CodeBlock::Chrome CodeBlock::ChromeRects(const Geometry& g) const {
   const float height = kChromeHeight * g.zoom;
   const float y = g.rect.y - height - kChromeGap * g.zoom;
-  const float toggleWidth = kToggleWidth * g.zoom;
 
   Chrome chrome;
+  if (IsText()) {
+    // Bold, italic, then the three justifications: squares of the strip's own
+    // height, so the strip is one row however many controls end up in it.
+    chrome.forText = true;
+    const float side = height;
+    const float gap = kChromeSpacing * g.zoom;
+    float       x = g.rect.x;
+    chrome.bold = {x, y, side, side};
+    x += side + gap;
+    chrome.italic = {x, y, side, side};
+    x += side + gap * 3.0f;   // a break, because the next three are one choice
+    for (int i = 0; i < 3; ++i) {
+      chrome.justify[i] = {x, y, side, side};
+      x += side + gap;
+    }
+    // Then the same control a code box has: show me what this really is. For
+    // prose that means the source, sigil and all -- which is the only way to
+    // take the sigil back out.
+    //
+    // It stays with the rest of the strip rather than going to the box's right
+    // edge, because showing the source makes a wrapped paragraph as wide as its
+    // longest unwrapped line, and a toggle that leaves the screen when pressed
+    // is a toggle you cannot press again.
+    chrome.toggle = {x + gap * 2.0f, y, kToggleWidth * g.zoom, height};
+    return chrome;
+  }
+
+  const float toggleWidth = kToggleWidth * g.zoom;
   // The cross that used to sit here is gone: a box is thrown away the same way
   // every other window is, by carrying it onto the drop target.
   chrome.toggle = {g.rect.x + g.rect.width - toggleWidth, y, toggleWidth, height};
   return chrome;
+}
+
+bool CodeBlock::ChromeVisible(const Geometry& g, Vector2 pointer) const {
+  if (focused_) return true;
+  // Only a text box shows controls without the caret: they are how its words
+  // are set, which is a thing you want to change without starting to type.
+  if (!IsText() || absorbed_) return false;
+  const float     height = kChromeHeight * g.zoom;
+  const float     lead = kChromeGap * g.zoom;
+  const Rectangle band = {g.rect.x, g.rect.y - height - lead * 2.0f,
+                          std::max(g.rect.width, height * 8.0f), height + lead * 2.0f};
+  return CheckCollisionPointRec(pointer, band) || CheckCollisionPointRec(pointer, g.rect) ||
+         PointOnRim(g.rect, pointer);
+}
+
+Rectangle CodeBlock::MarginHandle(const Geometry& g) const {
+  // A short bar just inside the right edge, at the middle: it *is* the right
+  // margin, which is what dragging it sets. Inset clear of the rim's grab band,
+  // so carrying the box and setting its measure never want the same pixel.
+  const float inset = kRimGrabInside;
+  const float height = std::min(g.rect.height * 0.4f, 34.0f);
+  return {g.rect.x + g.rect.width - inset - kMarginGrab,
+          g.rect.y + (g.rect.height - height) * 0.5f, kMarginGrab, height};
 }
 
 Vector2 CodeBlock::DockAnchor(const Viewport& viewport, FontStore& fonts) const {
@@ -487,32 +780,87 @@ int CodeBlock::RowAt(Vector2 point, const Viewport& viewport, FontStore& fonts) 
   return g.rows.empty() ? -1 : static_cast<int>(g.rows.size()) - 1;
 }
 
+int CodeBlock::CaretRow(const Geometry& g) const {
+  int fallback = -1;
+  for (std::size_t i = 0; i < g.rows.size(); ++i) {
+    const Row& row = g.rows[i];
+    if (row.line != caretLine_) continue;
+    if (fallback < 0) fallback = static_cast<int>(i);
+    // The first row that contains the offset wins, so a caret sitting exactly
+    // on a wrap point shows at the end of a line rather than the start of the
+    // next -- which is where you just typed.
+    if (static_cast<std::size_t>(caretCol_) >= row.begin &&
+        static_cast<std::size_t>(caretCol_) <= row.end) {
+      return static_cast<int>(i);
+    }
+    fallback = static_cast<int>(i);
+  }
+  return fallback;
+}
+
+// How far into a row a byte offset sits, and the reverse. Both are read off the
+// cached layout rather than measured, so that the arrow keys -- which are
+// handled where there is no font store -- can use them too.
+float CodeBlock::RowOffsetX(const Row& row, std::size_t col) const {
+  if (!row.asLatex || !IsText()) return 0.0f;
+  const LineCache& entry = cache_[static_cast<std::size_t>(row.line)];
+  if (static_cast<std::size_t>(row.piece) >= entry.pieceLayout.size()) return 0.0f;
+  const tex::Layout& layout = entry.pieceLayout[static_cast<std::size_t>(row.piece)];
+
+  const std::string& line = lines_[static_cast<std::size_t>(row.line)];
+  std::size_t        glyph = 0;
+  for (std::size_t i = row.begin; i < col && i < row.end; ++glyph) {
+    i = static_cast<std::size_t>(NextBoundary(line, static_cast<int>(i)));
+  }
+  if (glyph >= layout.items.size()) return layout.width;
+  return layout.items[glyph].pen.x;
+}
+
+std::size_t CodeBlock::RowColAt(const Row& row, float x) const {
+  const std::string& line = lines_[static_cast<std::size_t>(row.line)];
+  std::size_t        best = row.begin;
+  float              bestDistance = std::abs(x);
+  for (std::size_t i = row.begin; i <= row.end;) {
+    const float distance = std::abs(x - RowOffsetX(row, i));
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = i;
+    }
+    if (i >= row.end) break;
+    i = static_cast<std::size_t>(NextBoundary(line, static_cast<int>(i)));
+  }
+  return best;
+}
+
 void CodeBlock::PlaceCaret(Vector2 point, const Viewport& viewport, FontStore& fonts) {
   const Geometry& g = Measure(viewport, fonts);
-  const int row = RowAt(point, viewport, fonts);
-  caretLine_ = std::clamp(row < 0 ? 0 : row, 0, static_cast<int>(lines_.size()) - 1);
+  if (g.rows.empty()) return;
+  const int found = RowAt(point, viewport, fonts);
+  const Row& row = g.rows[static_cast<std::size_t>(
+      std::clamp(found < 0 ? 0 : found, 0, static_cast<int>(g.rows.size()) - 1))];
+  caretLine_ = row.line;
 
-  // Walk the line and take the character boundary nearest the click.
+  // Walk the row and take the character boundary nearest the click. Prose is
+  // measured in its own face; code in the monospaced one.
   const std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
-  const float target = point.x - g.textLeftTop.x;
-  int best = 0;
-  float bestDistance = std::abs(target);
-  int index = 0;
-  float x = 0.0f;
-  while (index < static_cast<int>(line.size())) {
-    const int next = NextBoundary(line, index);
-    x += text::Measure(fonts, Face::Mono,
-                       std::string_view(line).substr(static_cast<std::size_t>(index),
-                                                     static_cast<std::size_t>(next - index)),
-                       g.emPx);
+  const Face  face = row.asLatex ? ProseFace() : Face::Mono;
+  const float target = point.x - row.x;
+
+  std::size_t best = row.begin;
+  float       bestDistance = std::abs(target);
+  float       x = 0.0f;
+  for (std::size_t i = row.begin; i < row.end;) {
+    const std::size_t next = static_cast<std::size_t>(NextBoundary(line, static_cast<int>(i)));
+    x += text::Measure(fonts, face, std::string_view(line).substr(i, next - i), g.emPx);
     const float distance = std::abs(target - x);
     if (distance < bestDistance) {
       bestDistance = distance;
       best = next;
     }
-    index = next;
+    i = next;
   }
-  caretCol_ = best;
+  caretCol_ = static_cast<int>(best);
+  ClampCaret();
   blinkAnchor_ = GetTime();
 }
 
@@ -593,7 +941,12 @@ void CodeBlock::TouchEdit() {
 void CodeBlock::ClampCaret() {
   caretLine_ = std::clamp(caretLine_, 0, static_cast<int>(lines_.size()) - 1);
   std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
-  caretCol_ = std::clamp(caretCol_, 0, static_cast<int>(line.size()));
+  // While the words are what is showing, the sigil is not: the caret cannot go
+  // into something that is not on screen.
+  const int floorCol = (IsText() && !showSource_)
+                           ? static_cast<int>(ProseOffset(static_cast<std::size_t>(caretLine_)))
+                           : 0;
+  caretCol_ = std::clamp(caretCol_, floorCol, static_cast<int>(line.size()));
   while (caretCol_ > 0 && caretCol_ < static_cast<int>(line.size()) &&
          IsContinuation(line[static_cast<std::size_t>(caretCol_)])) {
     --caretCol_;
@@ -687,7 +1040,22 @@ void CodeBlock::MoveCaret(int dLine, int dChar) {
     }
   }
   if (dLine != 0) {
-    caretLine_ = std::clamp(caretLine_ + dLine, 0, static_cast<int>(lines_.size()) - 1);
+    // In prose a line is not a row: a wrapped paragraph is one line and many
+    // rows, and the arrow keys mean the rows. The geometry from the last frame
+    // is what says where those rows are; there is no font store out here.
+    const int from = (IsText() && !showSource_) ? CaretRow(geometry_) : -1;
+    if (from >= 0) {
+      const int to = std::clamp(from + dLine, 0, static_cast<int>(geometry_.rows.size()) - 1);
+      if (to != from) {
+        const Row& source = geometry_.rows[static_cast<std::size_t>(from)];
+        const Row& target = geometry_.rows[static_cast<std::size_t>(to)];
+        const float x = RowOffsetX(source, static_cast<std::size_t>(caretCol_));
+        caretLine_ = target.line;
+        caretCol_ = static_cast<int>(RowColAt(target, x));
+      }
+    } else {
+      caretLine_ = std::clamp(caretLine_ + dLine, 0, static_cast<int>(lines_.size()) - 1);
+    }
     ClampCaret();
   }
   blinkAnchor_ = GetTime();
@@ -752,19 +1120,68 @@ void CodeBlock::HandleInput() {
 }
 
 bool CodeBlock::HandleChrome(const Viewport& viewport, FontStore& fonts) {
-  if (!focused_) return false;
-  const Chrome chrome = ChromeRects(Measure(viewport, fonts));
-  const Vector2 pointer = GetMousePosition();
+  // Asked of every box on the canvas now that a text box shows its controls
+  // without the caret, so it has to say no before measuring anything: Measure
+  // already runs several times a frame per box and this must not add another.
+  if (!focused_ && !IsText() && !marginDrag_) return false;
+  const Geometry& g = Measure(viewport, fonts);
+  const Vector2   pointer = GetMousePosition();
+  const bool      pressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 
-  const bool overToggle = CheckCollisionPointRec(pointer, chrome.toggle);
-  if (!overToggle) return false;
+  // Setting the measure, once it has begun, owns the pointer until it is let
+  // go -- like every other drag on this canvas.
+  if (marginDrag_) {
+    const float zoom = std::max(g.zoom, 1e-6f);
+    const float padX = kPadX * (em_ / kBaseEm) * zoom;
+    const float wanted = (pointer.x + kRimGrabInside - g.rect.x - 2.0f * padX) / zoom;
+    textWidth_ = std::clamp(wanted, em_ * 3.0f, em_ * 400.0f);
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) marginDrag_ = false;
+    return true;
+  }
 
-  if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) showMath_ = !showMath_;
+  if (!ChromeVisible(g, pointer)) return false;
+  const Chrome chrome = ChromeRects(g);
+
+  if (chrome.forText) {
+    if (CheckCollisionPointRec(pointer, MarginHandle(g))) {
+      if (pressed) marginDrag_ = true;
+      return true;
+    }
+    if (CheckCollisionPointRec(pointer, chrome.bold)) {
+      if (pressed) bold_ = !bold_;
+      return true;
+    }
+    if (CheckCollisionPointRec(pointer, chrome.italic)) {
+      if (pressed) italic_ = !italic_;
+      return true;
+    }
+    for (int i = 0; i < 3; ++i) {
+      if (!CheckCollisionPointRec(pointer, chrome.justify[i])) continue;
+      if (pressed) justify_ = static_cast<Justify>(i);
+      return true;
+    }
+    if (CheckCollisionPointRec(pointer, chrome.toggle)) {
+      if (pressed) showSource_ = !showSource_;
+      return true;
+    }
+    return false;
+  }
+
+  if (!CheckCollisionPointRec(pointer, chrome.toggle)) return false;
+  if (pressed) showMath_ = !showMath_;
   return true;   // claim the hover too, so a click never falls through
 }
 
 void CodeBlock::RequestCompile() {
   dirty_ = false;
+
+  // A text box is not a program. Nothing about words compiles, and trying
+  // would put a diagnostic on a sentence.
+  if (IsText()) {
+    program_.Rebuild({});
+    outcome_ = {};
+    return;
+  }
 
   // The mathematical reading comes first. Only a box that declares nothing
   // falls back to the older `bool testFunc()` behaviour.
@@ -949,7 +1366,10 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
   rimHot_ = PointOnRim(probe.rect, pointer);
   // Reaching for the rim should not flip the line underneath it to code.
   if (!rimHot_ && CheckCollisionPointRec(pointer, probe.rect)) {
-    hoverLine_ = RowAt(pointer, viewport, fonts);
+    const int row = RowAt(pointer, viewport, fonts);
+    if (row >= 0 && row < static_cast<int>(probe.rows.size())) {
+      hoverLine_ = probe.rows[static_cast<std::size_t>(row)].line;
+    }
   }
 
   const Geometry& g = Measure(viewport, fonts);
@@ -957,24 +1377,38 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
   // and letting go here is what throws it away.
   if (absorbed_) return;
 
-  const Color border = focused_ ? kAccent : Fade(kCodeFg, 0.22f);
-  DrawCard(g.rect, g.zoom, kCodeBg, border, focused_ ? 2.0f : 1.0f);
+  // A text box wears no card: prose on a slide is ink on the canvas, not a
+  // window sitting on it -- and it keeps that look while it is being written
+  // in, because what you are typing is what it is going to be. The dark card
+  // comes back only when the source is what is showing, since then it really is
+  // code.
+  const bool prose = IsText();
+  const bool asWords = prose && !showSource_;
+  if (!asWords) {
+    const Color border = focused_ ? kAccent : Fade(kCodeFg, 0.22f);
+    DrawCard(g.rect, g.zoom, kCodeBg, border, focused_ ? 2.0f : 1.0f);
+  }
+  const Color ink = asWords ? kSlideInk : kCodeFg;
 
-  for (std::size_t i = 0; i < lines_.size(); ++i) {
-    const Row& row = g.rows[i];
+  for (std::size_t r = 0; r < g.rows.size(); ++r) {
+    const Row&        row = g.rows[r];
+    const std::size_t i = static_cast<std::size_t>(row.line);
 
     // A window being used elsewhere lights up every place its variable is
-    // written, in whichever reading this line happens to be showing.
+    // written, in whichever reading this row happens to be showing.
     for (const std::string& name : highlights_) {
       const Color tint = VariableColor(name);
-      for (const Rectangle& box : MentionRects(i, name, g, fonts)) {
+      for (const Rectangle& box : MentionRects(r, name, g, fonts)) {
         DrawRectangleRounded(box, 0.30f, 6, Fade(tint, kMentionFillAlpha));
         DrawRectangleRoundedLinesEx(box, 0.30f, 6, std::max(1.0f, 1.1f * g.zoom), tint);
       }
     }
 
     if (row.asLatex) {
-      tex::DrawLayout(cache_[i].layout, fonts, {g.textLeftTop.x, row.baseline}, kCodeFg);
+      const tex::Layout& layout =
+          prose ? cache_[i].pieceLayout[static_cast<std::size_t>(row.piece)] : cache_[i].layout;
+
+      tex::DrawLayout(layout, fonts, {row.x, row.baseline}, ink);
       continue;
     }
 
@@ -987,14 +1421,14 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
     const std::string injection = focused_ ? std::string() : Injection(static_cast<int>(i));
 
     if (injection.empty()) {
-      DrawSpans(fonts, source, spans, 0, source.size(), {g.textLeftTop.x, row.baseline}, g.emPx);
+      DrawSpans(fonts, source, spans, 0, source.size(), {row.x, row.baseline}, g.emPx);
       continue;
     }
 
     const std::size_t semicolon = source.rfind(';');
     const std::size_t split = (semicolon == std::string::npos) ? source.size() : semicolon;
 
-    float x = g.textLeftTop.x;
+    float x = row.x;
     x += DrawSpans(fonts, source, spans, 0, split, {x, row.baseline}, g.emPx);
     text::Draw(fonts, Face::Mono, injection, {x, row.baseline}, g.emPx, kInjected);
     x += text::Measure(fonts, Face::Mono, injection, g.emPx);
@@ -1003,41 +1437,104 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
 
   // Caret. Only while this box is actually being edited, and solid while
   // typing so it never distracts mid-edit.
-  if (focused_ && caretLine_ < static_cast<int>(g.rows.size())) {
+  const int caretRow = focused_ ? CaretRow(g) : -1;
+  if (caretRow >= 0) {
     const double phase = std::fmod(GetTime() - blinkAnchor_, 1.06);
     if (phase < 0.62) {
-      const std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
-      const float x = g.textLeftTop.x +
-                      text::Measure(fonts, Face::Mono,
-                                    std::string_view(line).substr(
-                                        0, static_cast<std::size_t>(caretCol_)),
-                                    g.emPx);
-      const Row& row = g.rows[static_cast<std::size_t>(caretLine_)];
+      const Row&         row = g.rows[static_cast<std::size_t>(caretRow)];
+      const std::string& line = lines_[static_cast<std::size_t>(row.line)];
+      const std::size_t  col =
+          std::clamp(static_cast<std::size_t>(caretCol_), row.begin, row.end);
+      const float x =
+          row.x + text::Measure(fonts, row.asLatex ? ProseFace() : Face::Mono,
+                                std::string_view(line).substr(row.begin, col - row.begin),
+                                g.emPx);
       DrawRectangleRec({x, row.y + row.height * 0.08f, std::max(1.0f, g.emPx * 0.07f),
                         row.height * 0.86f},
-                       kCaret);
+                       asWords ? kSlideInk : kCaret);
     }
   }
 
-  // Chrome: only on the box that has the caret.
-  if (focused_) {
+  // Chrome: the box with the caret, or a text box being looked at.
+  if (ChromeVisible(g, pointer)) {
     const Chrome chrome = ChromeRects(g);
-    const Vector2 pointer = GetMousePosition();
-    const float em = kChromeEm * g.zoom;
+    const float  em = kChromeEm * g.zoom;
 
-    const bool overToggle = CheckCollisionPointRec(pointer, chrome.toggle);
-    DrawRectangleRounded(chrome.toggle, 0.35f, 8, overToggle ? kChromeHover : kChromeBg);
-    // The label names what you will get, not what you have.
-    const char* label = showMath_ ? "code" : "math";
-    const float labelWidth = text::Measure(fonts, Face::MainRegular, label, em);
-    text::Draw(fonts, Face::MainRegular, label,
-               {chrome.toggle.x + (chrome.toggle.width - labelWidth) * 0.5f,
-                chrome.toggle.y + chrome.toggle.height * 0.5f + em * 0.34f},
-               em, kChromeText);
+    if (chrome.forText) {
+      // Each control shows its own effect: the B is bold, the I is italic, and
+      // the justification buttons are ragged on the side they leave ragged.
+      const auto button = [&](Rectangle rect, bool on) {
+        const bool hot = CheckCollisionPointRec(pointer, rect);
+        DrawRectangleRounded(rect, 0.32f, 8, on ? kAccent : (hot ? kChromeHover : kChromeBg));
+      };
+      const auto letter = [&](Rectangle rect, Face face, const char* glyph) {
+        if (em < 3.0f) return;
+        const float width = text::Measure(fonts, face, glyph, em);
+        text::Draw(fonts, face, glyph,
+                   {rect.x + (rect.width - width) * 0.5f, rect.y + rect.height * 0.5f + em * 0.34f},
+                   em, kChromeText);
+      };
+
+      button(chrome.bold, bold_);
+      letter(chrome.bold, Face::MainBold, "B");
+      button(chrome.italic, italic_);
+      letter(chrome.italic, Face::MainItalic, "I");
+
+      // Same control a code box has, in the same place, doing the same job.
+      {
+        const bool overToggle = CheckCollisionPointRec(pointer, chrome.toggle);
+        DrawRectangleRounded(chrome.toggle, 0.35f, 8,
+                             showSource_ ? kAccent : (overToggle ? kChromeHover : kChromeBg));
+        const char* label = showSource_ ? "text" : "code";
+        const float labelWidth = text::Measure(fonts, Face::MainRegular, label, em);
+        if (em >= 3.0f) {
+          text::Draw(fonts, Face::MainRegular, label,
+                     {chrome.toggle.x + (chrome.toggle.width - labelWidth) * 0.5f,
+                      chrome.toggle.y + chrome.toggle.height * 0.5f + em * 0.34f},
+                     em, kChromeText);
+        }
+      }
+
+      // The measure, as a bar sitting on the right margin it sets.
+      const Rectangle margin = MarginHandle(g);
+      const bool      overMargin = marginDrag_ || CheckCollisionPointRec(pointer, margin);
+      DrawRectangleRec({margin.x + margin.width - kMarginBar, margin.y, kMarginBar, margin.height},
+                       overMargin ? kAccent : Fade(kSlideInk, 0.35f));
+
+      for (int i = 0; i < 3; ++i) {
+        const Rectangle rect = chrome.justify[i];
+        button(rect, justify_ == static_cast<Justify>(i));
+        const float pad = rect.width * 0.22f;
+        const float full = rect.width - 2.0f * pad;
+        const float thickness = std::max(1.0f, rect.height * 0.075f);
+        const float gap = (rect.height - 2.0f * pad) / 3.0f;
+        for (int line = 0; line < 4; ++line) {
+          // Alternate lines are short, which is what makes one side look ragged
+          // and the other flush.
+          const float width = (line % 2 == 0) ? full : full * 0.62f;
+          float x = rect.x + pad;
+          if (i == 1) x = rect.x + (rect.width - width) * 0.5f;
+          if (i == 2) x = rect.x + rect.width - pad - width;
+          DrawRectangleRec({x, rect.y + pad + gap * static_cast<float>(line), width, thickness},
+                           kChromeText);
+        }
+      }
+    } else if (focused_) {
+      const bool overToggle = CheckCollisionPointRec(pointer, chrome.toggle);
+      DrawRectangleRounded(chrome.toggle, 0.35f, 8, overToggle ? kChromeHover : kChromeBg);
+      // The label names what you will get, not what you have.
+      const char* label = showMath_ ? "code" : "math";
+      const float labelWidth = text::Measure(fonts, Face::MainRegular, label, em);
+      text::Draw(fonts, Face::MainRegular, label,
+                 {chrome.toggle.x + (chrome.toggle.width - labelWidth) * 0.5f,
+                  chrome.toggle.y + chrome.toggle.height * 0.5f + em * 0.34f},
+                 em, kChromeText);
+    }
   }
 
-  if (rimHot_ || dragging_ || selected_) {
-    DrawRim(g.rect, g.zoom, dragging_ || selected_);
+  // A text box being written in has no card to say so, so its rim does.
+  if (rimHot_ || dragging_ || selected_ || (asWords && focused_)) {
+    DrawRim(g.rect, g.zoom, dragging_ || selected_ || focused_);
   }
 
   // The legacy result square, only for a box that has no variables of its own.

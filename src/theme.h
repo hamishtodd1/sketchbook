@@ -89,6 +89,43 @@ inline void DrawDropTarget(bool absorbing) {
              {rect.x + inset, rect.y + rect.height - inset}, thickness, kDropMark);
 }
 
+// ------------------------------------------------------------- the pointer
+// The canvas is dragged with the right button, and while it is being dragged
+// the pointer becomes a **closed hand**: the gesture is holding the paper and
+// moving it, and the cursor should say so rather than staying an arrow.
+//
+// It is drawn rather than chosen, because there is no closed-hand cursor in the
+// set the window system offers -- GLFW's "hand" is the pointing one. Drawn in
+// two passes, dark then light, so it reads against a pale canvas and a dark
+// card alike.
+inline constexpr Color kCursorFill = { 250, 250, 250, 255 };
+inline constexpr Color kCursorEdge = {  26,  26,  30, 235 };
+
+inline void DrawGrabCursor(Vector2 at) {
+  // A palm, four knuckles folded over the top of it, and a thumb across the
+  // side. The knuckles overlap slightly, which is what gives the scalloped top
+  // a fist has; the creases between them are what stop the whole thing reading
+  // as a lump at cursor size.
+  const auto hand = [&](float grow, Color tint) {
+    const Rectangle palm = {at.x - 11.0f - grow, at.y - 2.0f - grow, 22.0f + 2.0f * grow,
+                            17.0f + 2.0f * grow};
+    DrawRectangleRounded(palm, 0.45f, 10, tint);
+    for (int i = 0; i < 4; ++i) {
+      DrawCircleV({at.x - 7.5f + static_cast<float>(i) * 5.0f, at.y - 3.0f}, 4.3f + grow, tint);
+    }
+    DrawCircleV({at.x - 10.5f, at.y + 3.5f}, 5.4f + grow, tint);
+  };
+  hand(2.0f, kCursorEdge);
+  hand(0.0f, kCursorFill);
+
+  // The gaps between the fingers, and the line the thumb lies along.
+  for (int i = 0; i < 3; ++i) {
+    const float x = at.x - 5.0f + static_cast<float>(i) * 5.0f;
+    DrawLineEx({x, at.y - 6.6f}, {x, at.y + 1.0f}, 1.5f, kCursorEdge);
+  }
+  DrawLineEx({at.x - 6.0f, at.y + 5.0f}, {at.x + 4.0f, at.y + 3.0f}, 1.5f, kCursorEdge);
+}
+
 // ------------------------------------------------------------------ canvas
 inline constexpr Color kCanvasBg   = { 232, 232, 232, 255 };  // pure light gray
 inline constexpr Color kGridDot    = { 148, 148, 148, 255 };
@@ -141,6 +178,26 @@ inline constexpr Color kAxisTickLabel = { 130, 130, 140, 255 };
 inline constexpr Color kAxisLabel     = { 236, 236, 240, 255 };
 inline constexpr Color kAxisValue     = { 186, 186, 196, 255 };
 inline constexpr Color kAxisPending   = { 110, 110, 120, 255 };
+
+// -------------------------------------------------------------------- media
+// A picture is furniture: it wears no card and no background, so what you see
+// is the picture. Everything drawn over one is chrome, and appears on hover.
+inline constexpr Color kMediaBroken   = {  62,  62,  68, 255 };
+inline constexpr Color kTransportBg   = {  16,  16,  18, 190 };
+inline constexpr Color kTransportFg   = { 236, 236, 240, 255 };
+inline constexpr Color kBarTrack      = { 108, 108, 116, 210 };
+inline constexpr Color kBarClip       = { 238, 238, 244, 240 };
+inline constexpr Color kBarPlayed     = { 108, 158, 230, 255 };
+inline constexpr Color kTrimMark      = { 246, 208,  92, 255 };
+// The corner brackets that crop. Distinct from the rim, because they do a
+// different thing: the rim moves the window, a corner moves the frame.
+inline constexpr Color kCropHandle    = { 250, 250, 250, 200 };
+inline constexpr Color kCropHandleHot = { 108, 158, 230, 255 };
+
+// ------------------------------------------------------------------- slides
+// A slide is a region of the canvas rather than a card on it: nothing is
+// painted behind its text, so the text is ink on the canvas itself.
+inline constexpr Color kSlideInk = { 28, 28, 30, 255 };
 
 // ----------------------------------------------------------------- variables
 // Every variable has a colour of its own, and everything standing for that

@@ -35,6 +35,9 @@ add_executable(sketchbook
   src/types/RealViz.cpp
   src/types/RealFunctionViz.cpp
   src/shaderwindow.cpp
+  src/media.cpp
+  src/video.cpp
+  src/slides.cpp
   src/filedialog_win32.cpp
   src/highlight.cpp
   src/fontstore.cpp

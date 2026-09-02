@@ -26,10 +26,10 @@ it runs from anywhere.
 
 | Input | Action |
 | --- | --- |
-| Right-drag (or middle-drag) | Pan |
+| Right-drag (or middle-drag) | Pan; the pointer becomes a closed hand |
 | Drag one finger | Pan |
 | Two-finger pinch | Zoom about the midpoint of the fingers |
-| Wheel, or trackpad pinch | Zoom about the cursor |
+| Wheel, or trackpad pinch | Zoom about the cursor -- or resize the window under it |
 | Click a code box | Select it and put the caret where you clicked |
 | Click anywhere else | Deselect, and rebuild if the text changed |
 | Type with nothing selected | Start a new box in the middle of the view |
@@ -40,13 +40,20 @@ it runs from anywhere.
 | `Ctrl`+`S` / `Ctrl`+`O` | Save (back to the same file) / open a canvas |
 | Drag a number-line handle | Choose that variable's value |
 | Wheel over a number line or plot | Zoom that window only |
+| Wheel over a box or a picture | Resize it, about the corner nearest the pointer |
+| Drag a picture's corner | Crop it |
+| Drop a file on the window | A picture, a video, or a canvas to open |
 | Hover or drag a number line or plot | Box its variable wherever it is written |
 | Hover any window's edge | Its rim appears |
 | Drag a rim | Move that window; drop it on another of its kind to merge them |
 | Drag a window onto the cross | Close it |
+| Click a slide's rim | Glide the camera onto that slide |
+| Hover a slide's rim | A cross appears; click it to throw the slide away |
 | Drag the background | Lasso a selection |
+| Left-click anywhere | Put the selection down |
 | `Delete` | Throw the selection away |
 | `Ctrl`+`C` / `X` / `V` | Copy, cut, paste the selected boxes |
+| Double-click a video's trim time | Type an exact time |
 | `Esc` | Open/close the options menu |
 
 Editing keys are the usual ones: arrows, `Home`, `End`, `Backspace`, `Delete`,
@@ -60,25 +67,37 @@ its own scale. The left button belongs to the contents of the canvas: clicking
 places the caret, dragging a rim moves a window, dragging a handle chooses a
 value. A box left completely empty is discarded when you click away.
 
-Every window on the canvas -- code boxes, number lines and plots alike -- is moved by
-the **rim** around its edge, which appears when you hover there. Handles win
-over the rim, so grabbing a value never moves the row by accident. A rim is
-chrome rather than content, so it keeps the same thickness in screen pixels at
-every zoom level and stays equally easy to hit.
+Every window on the canvas -- code boxes, number lines, plots and pictures alike
+-- is moved by the **rim** around its edge, which appears when you hover there.
+Handles win over the rim, so grabbing a value never moves the row by accident. A
+picture's crop corners and a paragraph's margin bar sit just inside that band
+for the same reason. A rim is chrome rather than content, so it keeps the same
+thickness in screen pixels at every zoom level and stays equally easy to hit.
 
-A focused box grows one button above it: a **math/code toggle**.
+A focused box grows one button above it: a **math/code toggle**. A text box
+grows a strip instead -- bold, italic, the three justifications, and a toggle
+that shows its source -- and shows it whenever you reach for it rather than only
+while it has the caret.
 
 **Left-dragging the background draws a lasso**, and everything whose middle it
-went round is selected. Selected windows wear their rim. A selection then
-behaves as one window: it moves together, `Delete` throws it all away, and
-`Ctrl`+`C` / `Ctrl`+`X` / `Ctrl`+`V` copy, cut and paste the boxes in it -- at
-the pointer, arriving selected. Clicking anywhere clears it.
+went round is selected. The loop closes with a **curve** rather than a straight
+line: the gap between the pointer and where the stroke began is bridged by a
+Bezier shaped by the first two and last two points of the stroke, so the closure
+continues the gesture instead of cutting across it. What is caught is measured
+against that same closed shape.
 
-Everything on the canvas is a window -- a code box, a number line, a plot, a
-shader's picture -- and every one of them is carried by its rim and thrown away
-the same way. **Carrying a window brings up a cross at the foot of the app
-window**; drag onto it and the window is absorbed, pull off and nothing has
-happened, let go and it is gone.
+Selected windows wear their rim. A selection then behaves as one window: it
+moves together, `Delete` throws it all away, and `Ctrl`+`C` / `Ctrl`+`X` /
+`Ctrl`+`V` copy, cut and paste the boxes in it -- at the pointer, arriving
+selected. A left click anywhere puts it down again -- on a window, on a picture
+or on the bare canvas -- except the click that picks it up to carry it.
+
+Everything on the canvas is a window -- a code box, a box of prose, a number
+line, a plot, a shader's picture, a photograph, a video -- and every one of them
+is carried by its rim, resized by the wheel, and thrown away the same way.
+**Carrying a window brings up a cross at the foot of the app window**; drag onto
+it and the window is absorbed, pull off and nothing has happened, let go and it
+is gone.
 
 Closing a **control** writes its value into the code. A number line for a free
 variable is what chooses that value, so throwing it away has to leave the value
@@ -152,6 +171,79 @@ around every value now on it, so both are in view with room at the ends; seeing
 them together is the whole point of the gesture. The two need not come from the
 same box: an axis belongs to the canvas. Each axis zooms and pans on its own
 wheel, independently of the canvas.
+
+## Slides
+
+A slide is a **region of the canvas with a permanent rim** round it, not a
+separate document. Click the **New slide** button (on the canvas, just left of
+where the camera opens) and a slide appears where the button was, with a title
+and some body text; the button glides down below it, so clicking again puts the
+next slide underneath and a deck grows as a column.
+
+Click a slide's rim and the camera glides until that slide fills the window --
+presenting is navigating. Its inside is left alone, so everything on a slide
+stays usable. The deck's shape is set in the Escape menu: 16:9, 4:3 or 1:1.
+
+A slide owns nothing but its rim: the title and the body it arrives with are
+ordinary **text boxes** on the canvas, which you can move, edit, resize and
+throw away like anything else. A slide itself does not move -- it is a place,
+not a container -- so clicking one does the only thing it does, which is take
+the camera there.
+
+Point at a slide's rim and a small **cross** appears beside the pointer. Click
+it and the slide goes, taking everything whose middle is on it -- the same test
+the lasso uses. The deck then closes the gap: every slide below comes up by one
+slide, with its contents and with the **New slide** button.
+
+## Words, pictures and video
+
+A box whose first line starts with `\text` is **prose** rather than code. The
+sigil is the whole switch -- write it and the box sets its lines as words on the
+bare canvas, with no card behind them. Boldness, italics and justification
+belong to the box and are chosen from the strip of controls above it, so there
+is no markup to learn and nothing to get half-applied.
+
+A text box is **written in as words**: click between two letters of the typeset
+line and that is where the caret goes. The strip's last control shows the source
+instead, sigil and all, which is how a text box stops being one; the caret keeps
+its place across the switch. That toggle stays where it is put -- a box can be
+left reading as its own source, and it is saved that way. Only the *button* goes
+when the box stops being pointed at.
+
+Prose **wraps to a measure** -- the bar just inside the right edge is the right
+margin, and dragging it sets how far the words run. A box that has never been
+given one takes about sixty characters. The measure scales with the type when
+you resize the box, so resizing makes the words bigger rather than reflowing
+them, and the arrow keys move by row rather than by line.
+
+**Drop a picture or a video on the window** and it becomes a window where the
+pointer is; the Escape menu has *Insert picture or video* for when there is
+nothing to drop with. Dropping a `.sketch` opens it.
+
+Dragging a **corner** of a picture crops it: the frame moves and the picture
+stays where it is, so what changes is how much of it you can see. Resizing is
+the wheel's job, and the two never share a pixel -- the corner handles sit just
+inside the rim's grab band.
+
+A video gets a **transport**: play, a bar showing where it has got to, and two
+markers for where the clip starts and stops. Double-click a marker's time to
+type an exact one. Playback loops between them. Frames come from `ffmpeg`, read
+off a pipe on a worker thread as they arrive, so nothing is decoded to disk and
+nothing is held in memory but the next few frames; if `ffmpeg` is not on the
+path the window says so rather than showing nothing.
+
+## Resizing
+
+The **wheel over a window resizes it** uniformly -- one number for both
+dimensions, so nothing is stretched. For a box of code or prose that is the type
+size; for a picture it is how big the picture is. The corner nearest the pointer
+stays put, so the window grows away from your hand.
+
+Prose and pictures **snap to their neighbours**: every window near the one being
+resized offers its height and its width, and if either is close to the size
+being asked for it is taken exactly. That is how two pictures come to be exactly
+the same height, or a caption exactly as wide as the box above it. Code boxes
+resize without snapping, but are offered as targets.
 
 ## Two languages
 
@@ -347,7 +439,8 @@ src/
   viewport.*      pan/zoom camera and gesture handling
   touch.*         multi-touch front end
   touch_win32.*   WM_POINTER backend (no raylib.h in here)
-  process.*       child process + output capture (no raylib.h in here)
+  process.*       child process: run one, or read one as it goes (no raylib.h)
+  video.*         frames out of ffmpeg, on a worker thread (no raylib.h)
   compiler.*      toolchain discovery, build/run, diagnostic parsing
   mathline.*      the C++ subset: one line -> LaTeX + what it declares
   mathprogram.*   assemble a box into a program, build it, re-run it on values
@@ -359,7 +452,10 @@ src/
   highlight.*     Monokai colouring for a line of C++
   filedialog.*    native open/save dialogs (no raylib.h in here)
   grid.*          the dotted grid
-  blocks.*        the editable code card and the maths card
+  blocks.*        the editable card: code, its maths reading, and prose
+  media.*         pictures and video as windows: crop, transport, playback
+  resize.*        the wheel-resize rule and how it snaps to neighbours
+  selection.*     the lasso, and what it catches
   ui.*            the options menu
   fontstore.*     face registry, size-ladder atlas cache, TTF metrics
   text.*          plain-text measure/draw/wrap on top of FontStore

@@ -116,6 +116,8 @@ void AxisPanel::Forget(const CodeBlock* block) {
                               [](const NumberLine& line) { return line.refs.empty(); }),
                lines_.end());
   drag_ = Drag::None;
+  // The handle being dragged named a box that may be the one going away.
+  dragRef_ = {};
 }
 
 bool AxisPanel::Sync(const Blocks& blocks) {

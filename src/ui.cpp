@@ -10,7 +10,7 @@ namespace sb {
 namespace {
 
 constexpr float kPanelWidth = 420.0f;
-constexpr float kPanelHeight = 300.0f;
+constexpr float kPanelHeight = 420.0f;
 constexpr float kTitleEm = 27.0f;
 constexpr float kLabelEm = 19.0f;
 constexpr float kHintEm = 15.0f;
@@ -21,8 +21,10 @@ struct MenuLayout {
   Rectangle panel;
   Rectangle row;
   Rectangle box;
+  Rectangle aspect[kAspectCount];
   Rectangle save;
   Rectangle load;
+  Rectangle insert;
 };
 
 MenuLayout Compute() {
@@ -36,10 +38,21 @@ MenuLayout Compute() {
   const float boxSide = 24.0f;
   m.box = {m.row.x + 12.0f, m.row.y + (m.row.height - boxSide) * 0.5f, boxSide, boxSide};
 
+  // The slide shape, as the three it could sensibly be.
+  const float aspectY = m.row.y + m.row.height + 34.0f;
+  const float aspectWidth = (m.panel.width - 48.0f - 16.0f) / kAspectCount;
+  for (int i = 0; i < kAspectCount; ++i) {
+    m.aspect[i] = {m.panel.x + 24.0f + static_cast<float>(i) * (aspectWidth + 8.0f), aspectY,
+                   aspectWidth, 40.0f};
+  }
+
   const float buttonWidth = (m.panel.width - 56.0f) * 0.5f;
-  const float buttonY = m.row.y + m.row.height + 26.0f;
+  const float buttonY = aspectY + 40.0f + 30.0f;
   m.save = {m.panel.x + 24.0f, buttonY, buttonWidth, 44.0f};
   m.load = {m.save.x + buttonWidth + 8.0f, buttonY, buttonWidth, 44.0f};
+  // Dropping a file on the window does this too, but there is nothing to drop
+  // with on a tablet.
+  m.insert = {m.panel.x + 24.0f, buttonY + 52.0f, m.panel.width - 48.0f, 44.0f};
   return m;
 }
 
@@ -66,8 +79,15 @@ MenuAction OptionsMenu::Update(Options* options) {
     options->showGridDots = !options->showGridDots;
     return MenuAction::None;
   }
+  for (int i = 0; i < kAspectCount; ++i) {
+    if (CheckCollisionPointRec(mouse, m.aspect[i])) {
+      options->slideAspect = kAspects[i];
+      return MenuAction::None;
+    }
+  }
   if (CheckCollisionPointRec(mouse, m.save)) return MenuAction::Save;
   if (CheckCollisionPointRec(mouse, m.load)) return MenuAction::Load;
+  if (CheckCollisionPointRec(mouse, m.insert)) return MenuAction::Insert;
   return MenuAction::None;
 }
 
@@ -111,8 +131,26 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
   text::Draw(fonts, Face::MainRegular, "Show grid dots",
              {m.box.x + m.box.width + 14.0f, labelBaseline}, kLabelEm, kPanelText);
 
+  const float aspectLabelBaseline = m.aspect[0].y - 12.0f;
+  text::Draw(fonts, Face::MainRegular, "Slide shape", {m.panel.x + 24.0f, aspectLabelBaseline},
+             kHintEm, kPanelMuted);
+  for (int i = 0; i < kAspectCount; ++i) {
+    const bool chosen = std::abs(options.slideAspect - kAspects[i]) < 0.001f;
+    const bool over = CheckCollisionPointRec(mouse, m.aspect[i]);
+    DrawRectangleRounded(m.aspect[i], 0.25f, 8,
+                         chosen ? (over ? kAccentHover : kAccent) : kBoxIdle);
+    DrawRectangleRoundedLines(m.aspect[i], 0.25f, 8, chosen ? kAccent : kBoxBorder);
+    const float w = text::Measure(fonts, Face::MainRegular, kAspectNames[i], kLabelEm);
+    text::Draw(fonts, Face::MainRegular, kAspectNames[i],
+               {m.aspect[i].x + (m.aspect[i].width - w) * 0.5f,
+                m.aspect[i].y + m.aspect[i].height * 0.5f + kLabelEm * 0.34f},
+               kLabelEm, chosen ? RAYWHITE : kPanelText);
+  }
+
   DrawButton(fonts, m.save, "Save canvas", CheckCollisionPointRec(mouse, m.save));
   DrawButton(fonts, m.load, "Load canvas", CheckCollisionPointRec(mouse, m.load));
+  DrawButton(fonts, m.insert, "Insert picture or video",
+             CheckCollisionPointRec(mouse, m.insert));
 
   const float hintBaseline = m.panel.y + m.panel.height - 22.0f;
   text::Draw(fonts, Face::MainRegular, "Esc to close", {m.panel.x + 24.0f, hintBaseline}, kHintEm,

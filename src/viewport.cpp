@@ -123,7 +123,46 @@ void Viewport::UpdateMouse(bool wheelToCanvas) {
   if (wheelToCanvas && wheel != 0.0f) ZoomAbout(GetMousePosition(), std::pow(1.15f, wheel));
 }
 
+void Viewport::GlideTo(Vector2 worldCentre, float zoom, float seconds) {
+  glideFromCentre_ = target_;
+  glideToCentre_ = worldCentre;
+  glideFromZoom_ = zoom_;
+  glideToZoom_ = std::clamp(zoom, kMinZoom, kMaxZoom);
+  glideElapsed_ = 0.0f;
+  glideSeconds_ = std::max(seconds, 0.01f);
+  gliding_ = true;
+}
+
 void Viewport::Update(bool interactive, bool pointerFree) {
+  if (gliding_) {
+    // Moving the canvas yourself wins. Being carried somewhere you did not ask
+    // to go, with no way to stop, is the worst thing a camera can do.
+    //
+    // A *click* does not count, though: the click that asked for the glide is
+    // still down on the frame the glide begins, and would cancel it at once.
+    const Vector2 delta = GetMouseDelta();
+    const bool dragging = (IsMouseButtonDown(MOUSE_BUTTON_RIGHT) ||
+                           IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)) &&
+                          (delta.x != 0.0f || delta.y != 0.0f);
+    const bool interrupted =
+        dragging || GetMouseWheelMoveV().y != 0.0f || touch::Count() > 0;
+    if (interrupted) {
+      gliding_ = false;
+    } else {
+      glideElapsed_ += GetFrameTime();
+      const float t = std::clamp(glideElapsed_ / glideSeconds_, 0.0f, 1.0f);
+      // Smoothstep: a cubic that leaves and arrives at rest.
+      const float eased = t * t * (3.0f - 2.0f * t);
+      target_ = {glideFromCentre_.x + (glideToCentre_.x - glideFromCentre_.x) * eased,
+                 glideFromCentre_.y + (glideToCentre_.y - glideFromCentre_.y) * eased};
+      // Geometric, so the middle of the glide is the geometric mean rather than
+      // a lurch through the arithmetic one.
+      zoom_ = glideFromZoom_ * std::pow(glideToZoom_ / glideFromZoom_, eased);
+      if (t >= 1.0f) gliding_ = false;
+      return;
+    }
+  }
+
   if (!interactive) {
     mouseDragging_ = false;
     haveTouchBaseline_ = false;
