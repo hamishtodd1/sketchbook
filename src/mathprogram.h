@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include <map>
+
 #include "compiler.h"
 #include "types/RealFunction.h"
 
@@ -26,8 +28,15 @@ enum class Kind {
   Multivector,  // an element of a Clifford algebra: Bi, Even, ...
 };
 
+// How a canvas says its own types are drawn: the C++ lines of every viz box on
+// it, by the type it names. They are injected into every program that declares a
+// value of that type, once per value, with `value` bound to it -- because the
+// only place a function can be sampled is the program that made it.
+using VizSources = std::map<std::string, std::vector<std::string>>;
+
 struct Variable {
   std::string name;
+  std::string type;       // as the user spelled it, which is what a viz claims
   std::string latexName;
   Kind        kind = Kind::Real;
   bool        free = false;    // declared with no initialiser: yours to choose
@@ -37,6 +46,11 @@ struct Variable {
   // Function: what it evaluates to across the sample window below. A function
   // cannot be printed as a number, so this is how one gets back to the screen.
   std::vector<float> samples;
+  // What the canvas's viz for this type drew for this value: triangles and
+  // lines, x and y alternating, in the viz's own units. Empty unless the canvas
+  // defines one.
+  std::vector<float> mesh;
+  std::vector<float> lines;
 };
 
 // The point a fragment shader is being evaluated at. Worth a name out here
@@ -67,7 +81,7 @@ class Program {
 
   // Rebuilds from the box's lines. Values of variables that survive the edit
   // are carried over, so editing does not reset the knobs you have set.
-  void Rebuild(const std::vector<std::string>& lines);
+  void Rebuild(const std::vector<std::string>& lines, const VizSources* vizes = nullptr);
 
   // Collects finished builds and runs. Call every frame.
   void Poll();
@@ -79,6 +93,22 @@ class Program {
   // Values to adopt on the next rebuild, for a canvas loaded from disk. They
   // lose to anything already on screen, and are consumed once.
   void Restore(std::vector<std::pair<std::string, float>> values);
+
+  // --- a box that draws rather than computes -------------------------------
+  //
+  // `Viz(Real);` on a line of its own says this box is a **viz**: it says how a
+  // value of that type is drawn inside a display window, rather than declaring
+  // a value of its own. So it has no variables and grows no number lines.
+  //
+  // Two halves, one per box, paired by the type they name. The C++ half lays
+  // down a **mesh** -- calls to `vertex(x, y)`, three to a triangle, in the
+  // viz's own units -- and every vertex is printed back. The GLSL half is the
+  // **vertex shader** that places those vertices, given the value and the scale
+  // the window is drawn at. Which half a box is is decided the way it always
+  // is: C++ first, and GLSL if C++ will not have it.
+  const std::string&        vizType() const { return vizType_; }
+  const std::vector<float>& vizMesh() const { return vizMesh_; }
+  const std::vector<float>& vizLines() const { return vizLines_; }
 
   // --- the shader half ----------------------------------------------------
   //
@@ -123,6 +153,12 @@ class Program {
   std::vector<Variable> variables_;
   State                 state_ = State::Empty;
 
+  // The type this box draws, if it is a viz, and the mesh its C++ laid down --
+  // x, y, x, y, three vertices to a triangle.
+  std::string           vizType_;
+  std::vector<float>    vizMesh_;
+  std::vector<float>    vizLines_;
+
   // The shader the box would be, assembled alongside the C++ and only used if
   // the C++ is refused.
   std::string              glsl_;
@@ -142,6 +178,12 @@ class Program {
   std::future<compiler::Build> build_;
   std::future<RunOutput>       run_;
   bool                         runQueued_ = false;
+  // A rebuild asked for while one was already in flight. Dropping it would lose
+  // the ask entirely -- which is how a box that had not finished its first
+  // build would never learn that the canvas had said how to draw its type.
+  bool                         rebuildQueued_ = false;
+  std::vector<std::string>     queuedLines_;
+  const VizSources*            queuedVizes_ = nullptr;
 };
 
 }  // namespace sb::mathprogram

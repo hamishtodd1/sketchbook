@@ -19,7 +19,7 @@ inline constexpr Color kRim       = { 150, 172, 205, 235 };
 inline constexpr Color kRimActive = { 108, 158, 230, 255 };
 // raylib draws a rounded outline *outward* from the rectangle, so this is also
 // how far the visible rim extends past the edge.
-inline constexpr float kRimThickness = 5.1f;   // screen pixels
+inline constexpr float kRimThickness = 7.9f;   // screen pixels
 inline constexpr float kRimGrabInside = 10.0f;  // grab depth inside the edge
 
 inline bool PointOnRim(Rectangle rect, Vector2 point) {
@@ -45,6 +45,22 @@ inline void DrawRim(Rectangle rect, float zoom, bool active) {
   const float roundness = std::clamp(radius / (minSide * 0.5f), 0.02f, 1.0f);
   DrawRectangleRoundedLinesEx(rect, roundness, 10, kRimThickness,
                               active ? kRimActive : kRim);
+}
+
+// ------------------------------------------------------------------- blinking
+// A visualization being pointed at blinks white. Colour already says *which*
+// variable something stands for, so it cannot also say "this one, now" -- and
+// on a shared axis several markers wear colours from the same map. A blink is a
+// different channel, and the eye finds one without being told to look.
+//
+// A hard switch rather than a fade: a throb reads as decoration, a blink reads
+// as a signal. Half a second is the period the earlier version settled on.
+inline constexpr double kBlinkSeconds = 0.524;
+
+inline bool BlinkOn() { return std::fmod(GetTime(), kBlinkSeconds) < kBlinkSeconds * 0.5; }
+
+inline Color Blink(Color base, bool active) {
+  return (active && BlinkOn()) ? Color{255, 255, 255, base.a} : base;
 }
 
 // ----------------------------------------------------------- the drop target
@@ -132,6 +148,11 @@ inline constexpr Color kGridDot    = { 148, 148, 148, 255 };
 
 // World units between the finest grid dots at zoom 1.
 inline constexpr float kGridBaseStep = 40.0f;
+
+// Where the camera opens: one notch of the wheel in from unity, which is where
+// a box of the default type size is comfortable to read.
+inline constexpr float kZoomStep = 1.15f;
+inline constexpr float kDefaultZoom = kZoomStep;
 // The grid subdivides/coarsens to keep the on-screen dot spacing in this band.
 // The band spans exactly one doubling, and zoom 1 sits well inside it so the
 // intermediate dots read as a full grid rather than a faint half-grid.

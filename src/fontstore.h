@@ -71,6 +71,10 @@ class FontStore {
   bool Load(const std::string& fontDir, std::string* error);
   void Unload();
 
+  // Call once at the top of a frame. Everything used after it is off limits to
+  // the evictor until the next one -- see EvictIfNeeded.
+  void BeginFrame() { frameMark_ = clock_; }
+
   // True if the face's cmap actually covers `codepoint`. Cheap; no rasterising.
   bool HasGlyph(Face face, int codepoint) const;
 
@@ -108,6 +112,9 @@ class FontStore {
   FaceMetrics                                  metrics_[kFaceCount];
   std::unordered_map<std::uint64_t, Sized>     cache_;  // key: face<<32 | rung
   std::uint64_t                                clock_ = 0;
+  // The clock at the top of this frame. An atlas touched since then is in use
+  // by something already drawn or about to be, so it cannot be thrown away.
+  std::uint64_t                                frameMark_ = 0;
   std::size_t                                  texelsInUse_ = 0;
 };
 

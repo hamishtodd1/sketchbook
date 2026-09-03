@@ -119,6 +119,11 @@ class CodeBlock {
   // The padding either side of the words, in world units, at a given type size.
   // A caller fitting a measure into a space has to allow for it.
   static float PaddingX(float em);
+  // From the card's corner to the first character, in world units. It is the
+  // *text* that lands on the grid rather than the corner -- with a dot for
+  // every line, a box put down has its lines between the rows of dots -- and
+  // this is the difference between the two.
+  Vector2      TextOffset() const;
 
   // --- editing ------------------------------------------------------------
   void SetFocused(bool focused);
@@ -144,6 +149,11 @@ class CodeBlock {
   // The variable the selection lies inside, if this box declares one by that
   // name. Empty if the selection spans more than a name, or names nothing.
   std::string SelectedVariable() const;
+  // Every variable the highlight touches. Taking hold of a name in the text is
+  // the same statement as taking hold of its window, so it lights up the same
+  // things: the name wherever it is written, the wire, and the viz blinking at
+  // the other end. Empty when nothing is highlighted.
+  std::vector<std::string> HighlightedVariables() const;
   std::string Text() const;
   const std::vector<std::string>& Lines() const { return lines_; }
 
@@ -161,6 +171,20 @@ class CodeBlock {
   void SetSelected(bool selected) { selected_ = selected; }
   bool Selected() const { return selected_; }
 
+  // --- what is being talked about -----------------------------------------
+  //
+  // A variable is mutable unless it is const, so it can hold one value on one
+  // line and a different one further down. With no caret in this box its
+  // windows show what the program *ended* with -- every value is printed after
+  // the last of your lines, so the end of the block is what a window means.
+  //
+  // With a caret the box is being read a line at a time, and only the variables
+  // written on that line still have anything to say. Highlight a stretch and it
+  // is every variable the highlight touches instead. Everything else this box
+  // declares stands its windows down: they would be showing a number that has
+  // nothing to do with where you are looking.
+  bool InScope(const std::string& name) const;
+
   // --- closing ------------------------------------------------------------
   //
   // Closing a window is remembered, or the next Sync would put it straight
@@ -175,10 +199,50 @@ class CodeBlock {
   bool ShaderHidden() const { return shaderHidden_; }
   void SetShaderHidden(bool hidden) { shaderHidden_ = hidden; }
 
+  // --- making a variable from a number line --------------------------------
+  //
+  // A number line is where values live, so it is also where a new one is made.
+  // Pointing at the empty part of an axis is an offer to put a value in the box
+  // that axis belongs to, and this box answers by blinking a caret where the
+  // declaration would land. Clicking writes it.
+  //
+  // What is being pointed at is a *line* rather than a place between two
+  // characters, which is why a line reading as mathematics can carry the mark
+  // too: there the caret sits at the end of the typeset row.
+  void SetInsertCaret(bool value);
+  // Where a declaration would land: the line the caret was last left on, or the
+  // last line of the box if the caret has never been put anywhere.
+  int  InsertLine() const;
+  // Writes one there -- on that line if it is blank, on a new line just under
+  // it otherwise -- and leaves the caret after it.
+  void InsertDeclaration(const std::string& declaration);
+  // A name nothing in this box is using yet.
+  std::string FreshName() const;
+
   // Writes a free variable's present value into the source, so that it keeps
   // that value with no knob to hold it. Throwing away a control has to leave
   // the thing it controlled somewhere. Returns true if the text changed.
   bool BakeVariable(const std::string& name);
+
+  // --- a box that draws rather than computes -------------------------------
+  //
+  // `Viz(Real);` makes this box a **viz**: it says how a value of that type is
+  // drawn inside a display window rather than declaring a value of its own. Its
+  // C++ half lays down a mesh; its GLSL half is the vertex shader that places
+  // one. See viz.h for the vocabulary and for how the two halves are paired.
+  const std::string&        VizType() const { return program_.vizType(); }
+  const std::vector<float>& VizMesh() const { return program_.vizMesh(); }
+  const std::vector<float>& VizLines() const { return program_.vizLines(); }
+  // Whether C++ would have this box. A viz box that compiles is the mesh half;
+  // one that does not is the shader half.
+  bool BuildsAsCxx() const;
+  // What the canvas says about how its types are drawn. A viz's lines become
+  // part of every program that has a value of that type, so a box has to be
+  // told where to find them. Owned by the canvas, which outlives every box.
+  void SetVizSources(const mathprogram::VizSources* sources) { vizSources_ = sources; }
+  bool                      HasVizShader() const { return haveVizShader_; }
+  Shader                    VizShader() const { return vizShader_; }
+  int                       VizUniform(const char* name) const;
 
   // Draws this box's shader into a rectangle. The window that owns that
   // rectangle lives elsewhere; the GPU side of it lives here.
@@ -298,8 +362,11 @@ class CodeBlock {
   std::string TextLatex(std::string_view words) const;
   // The face those words are set in, which is what measures them.
   Face        ProseFace() const;
-  // The row the caret is in, or -1.
-  int         CaretRow(const Geometry& g) const;
+  // The row a position in the source is drawn in, or -1. Takes the position
+  // rather than reading the caret, since the caret is not the only thing that
+  // wants pointing at a line.
+  int         RowOf(const Geometry& g, int line, int col) const;
+  int         CaretRow(const Geometry& g) const { return RowOf(g, caretLine_, caretCol_); }
   // How far into a row a byte offset sits, and the offset nearest an x. Read
   // off the cached layout, so the arrow keys can use them without a font store.
   float       RowOffsetX(const Row& row, std::size_t col) const;
@@ -325,6 +392,10 @@ class CodeBlock {
   void   TouchEdit();
   // The selection in reading order, whichever way round it was made.
   void   SelectionRange(int* fromLine, int* fromCol, int* toLine, int* toCol) const;
+  // Whether `name` is written as a whole word anywhere between two positions.
+  // `wholeLines` ignores the columns and takes every line in the range entire.
+  bool   MentionedBetween(const std::string& name, int fromLine, int fromCol, int toLine,
+                          int toCol, bool wholeLines) const;
   // The slice of a row that is selected, as byte offsets, or false for none.
   bool   SelectionInRow(const Row& row, std::size_t* from, std::size_t* to) const;
   // Takes the selected text out. True if there was any.
@@ -361,6 +432,13 @@ class CodeBlock {
   // "is anything selected" is one comparison and needs no extra flag.
   int    anchorLine_ = 0;
   int    anchorCol_ = 0;
+  // Whether the caret has ever been put somewhere on purpose. Until it has,
+  // "where the caret was left" means the end of the box.
+  bool   caretUsed_ = false;
+  // A number line is offering to write a value into this box this frame. Set
+  // from outside every frame, like the highlights: it is a fact about where the
+  // pointer is, not something to remember.
+  bool   insertCaret_ = false;
   double blinkAnchor_ = 0.0;
   bool   dirty_ = false;
   // Resolved during Draw, before the geometry that depends on it is measured.
@@ -375,11 +453,16 @@ class CodeBlock {
   double                lastEditTime_ = -1.0;
 
   mathprogram::Program program_;
+  const mathprogram::VizSources* vizSources_ = nullptr;
 
   // The GPU side of a box whose code turned out to be GLSL: the shader itself,
   // the uniform slots its knobs drive, and a blank surface for it to cover.
   Shader                                shader_{};
   bool                                  haveShader_ = false;
+  // A viz box's vertex shader, which is a different thing from the fragment
+  // shader above: it places a mesh rather than colouring a square.
+  Shader                                vizShader_{};
+  bool                                  haveVizShader_ = false;
   std::vector<std::pair<std::string, int>> uniforms_;
   Texture2D                             previewSurface_{};
   bool                                  havePreviewSurface_ = false;

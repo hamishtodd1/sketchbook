@@ -25,6 +25,9 @@ constexpr int kRunTimeoutMs = 4000;
 //
 // The types themselves are not defined here. Each one contributes the C++ that
 // makes it exist (src/types/), and this file only knows where to put it.
+std::string VizMeshSource();
+std::string FormatFloat(float value);
+
 std::string CxxPrologue(const clifford::Signature& sig,
                         const std::vector<std::string>& algebraTypes) {
   return std::string(
@@ -38,6 +41,9 @@ std::string CxxPrologue(const clifford::Signature& sig,
       "static float sb_input(int argc, char** argv, int i, float fallback) {\n"
       "  return (i + 1 < argc) ? (float)std::atof(argv[i + 1]) : fallback;\n"
       "}\n") +
+      // A canvas that defines a viz has its lines injected here, once per value
+      // of that type, so the vocabulary they are written in has to be present.
+      VizMeshSource() +
       // Everything a type adds to the language it is written in comes from the
       // type's own file, so the toolchain never has to know what one is.
       types::realfunction::Source() +
@@ -51,6 +57,96 @@ std::string CxxPrologue(const clifford::Signature& sig,
 // The same job as the C++ prologue, for the other language. A fragment shader
 // wants the interface raylib gives it, one uniform per knob, and a main to put
 // the user's lines in -- so the boilerplate goes on at both ends.
+// What a viz box adds to C++: two ways of laying down geometry, and the value it
+// is drawing. Triangles for a shape, lines for a path -- a path cannot be a
+// ribbon of triangles here, because its width has to be constant on screen and
+// the mesh is in value units, which the placing shader is free to stretch.
+//
+// `value` is the thing being drawn. Standing alone -- which is how a viz box is
+// compiled, so that its mistakes are reported on its own lines -- it is an
+// example of the type; injected into a program that actually has one, it is
+// that one.
+std::string VizCxxPrologue(const std::string& type) {
+  std::string dummy;
+  if (type == types::realfunction::kName) {
+    dummy = std::string(types::realfunction::kName) + " value = " +
+            types::ExampleRealFunction("value") + ";\n";
+  } else {
+    dummy = "float value = " + FormatFloat(types::ExampleReal("value")) + "f;\n";
+  }
+
+  return std::string(
+             "#include <cmath>\n"
+             "#include <cstdio>\n"
+             "#include <functional>\n"
+             "#include <vector>\n"
+             "using std::sin; using std::cos; using std::tan; using std::atan2;\n"
+             "using std::exp; using std::log; using std::sqrt; using std::pow;\n"
+             "using std::fabs;\n") +
+         types::realfunction::Source() + VizMeshSource() + dummy + "int main() {\n";
+}
+
+// The half of that which a program *using* a value needs too, since the same
+// lines are injected there.
+std::string VizMeshSource() {
+  return std::string(
+      "static std::vector<float> sb_tris;\n"
+      "static std::vector<float> sb_lines;\n"
+      "static void vertex(float x, float y) { sb_tris.push_back(x); sb_tris.push_back(y); }\n"
+      "static void line(float ax, float ay, float bx, float by) {\n"
+      "  sb_lines.push_back(ax); sb_lines.push_back(ay);\n"
+      "  sb_lines.push_back(bx); sb_lines.push_back(by);\n"
+      "}\n"
+      "static void sb_mesh(const char* name) {\n"
+      "  std::printf(\"mesh.%s=\", name);\n"
+      "  for (float f : sb_tris) std::printf(\"%.6g \", (double)f);\n"
+      "  std::printf(\"\\n\");\n"
+      "  std::printf(\"line.%s=\", name);\n"
+      "  for (float f : sb_lines) std::printf(\"%.6g \", (double)f);\n"
+      "  std::printf(\"\\n\");\n"
+      "  sb_tris.clear(); sb_lines.clear();\n"
+      "}\n");
+}
+
+std::string VizCxxEpilogue() {
+  return std::string("  sb_mesh(\"\");\n  return 0;\n}\n");
+}
+
+// And its GLSL half is a *vertex* shader: the one that decides where each of
+// those vertices ends up. The attribute and uniform names are raylib's, since
+// the mesh is submitted through its batch.
+std::string VizShaderPrologue(int* lines) {
+  const std::string out =
+      "#version 330\n"
+      "in vec3 vertexPosition;\n"
+      "in vec2 vertexTexCoord;\n"
+      "in vec4 vertexColor;\n"
+      "out vec2 fragTexCoord;\n"
+      "out vec4 fragColor;\n"
+      "uniform mat4 mvp;\n"
+      // What the display window can tell a viz about the value it is drawing.
+      "uniform float value;\n"     // the number itself, for a real
+      "uniform vec4 sbArea;\n"     // where it draws: x, y, w, h, middle at the centre
+      "uniform vec4 sbView;\n"     // what that rectangle spans: cx, cy, wide, high
+      "uniform float sbScale;\n"   // how big chrome is drawn at this zoom
+      // Value space to screen. Provided rather than left to be written out,
+      // because every viz needs it and a place box should be one line.
+      "vec2 sbMap(vec2 v) {\n"
+      "  return vec2(sbArea.x + sbArea.z * (0.5 + (v.x - sbView.x) / sbView.z),\n"
+      "              sbArea.y + sbArea.w * (0.5 - (v.y - sbView.y) / sbView.w));\n"
+      "}\n"
+      "void main() {\n"
+      "  fragTexCoord = vertexTexCoord;\n"
+      "  fragColor = vertexColor;\n"
+      "  vec2 p = vertexPosition.xy;\n";
+  *lines = static_cast<int>(std::count(out.begin(), out.end(), '\n'));
+  return out;
+}
+
+std::string VizShaderEpilogue() {
+  return std::string("  gl_Position = mvp * vec4(p, 0.0, 1.0);\n}\n");
+}
+
 std::string ShaderPrologue(const std::vector<Variable>& variables,
                            const clifford::Signature& sig,
                            const std::vector<std::string>& algebraTypes, int* lines) {
@@ -173,8 +269,15 @@ Program::~Program() {
   compiler::Discard(exePath_);
 }
 
-void Program::Rebuild(const std::vector<std::string>& lines) {
-  if (build_.valid()) return;  // one build at a time
+void Program::Rebuild(const std::vector<std::string>& lines, const VizSources* vizes) {
+  if (build_.valid()) {
+    // One build at a time -- but remember that the ask happened, or it is lost.
+    rebuildQueued_ = true;
+    queuedLines_ = lines;
+    queuedVizes_ = vizes;
+    return;
+  }
+  rebuildQueued_ = false;
 
   // Remember what the knobs were set to, so an edit does not reset them.
   std::unordered_map<std::string, float> previous;
@@ -188,8 +291,15 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
   // algebra, which is what these tools are mostly for.
   clifford::Signature signature = clifford::kDefaultSignature;
   std::string         joined;
+  // And what, if anything, this box draws. `Viz(Real);` makes it a viz: it says
+  // how a value of that type is shown rather than declaring one, so it is
+  // assembled entirely differently from here on.
+  vizType_.clear();
   for (const std::string& raw : lines) {
     clifford::ParseAlgebra(raw, &signature);
+    if (std::string drawn; mathline::Parse(raw).kind == mathline::Kind::Viz) {
+      vizType_ = mathline::Parse(raw).name;
+    }
     joined += raw;
     joined += '\n';
   }
@@ -213,11 +323,18 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
     }
 
     const mathline::Line line = mathline::Parse(raw, signature);
+    // So does the line that says what this box draws.
+    if (line.kind == mathline::Kind::Viz) {
+      body += "\n";
+      shaderBody += "\n";
+      continue;
+    }
 
     if (line.kind == mathline::Kind::Declaration && !line.hasInitialiser) {
       // The abstract declaration the user wrote; the initialiser is ours.
       Variable variable;
       variable.name = line.name;
+      variable.type = line.type;
       variable.latexName = mathline::NameToLatex(line.name);
       variable.kind = mathline::IsFunctionType(line.type)
                           ? Kind::Function
@@ -279,6 +396,7 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
     if (line.kind == mathline::Kind::Declaration && line.hasInitialiser) {
       Variable variable;
       variable.name = line.name;
+      variable.type = line.type;
       variable.latexName = mathline::NameToLatex(line.name);
       variable.kind = mathline::IsFunctionType(line.type)
                           ? Kind::Function
@@ -292,6 +410,36 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
     // is the user's mistake to see reported.
     body += "  " + raw + "\n";
     shaderBody += "  " + raw + "\n";
+  }
+
+  // A viz box has no variables and wants none: what it produces is a mesh, or
+  // the shader that places one. Both halves are assembled from the same lines,
+  // exactly as an ordinary box's two languages are, and which one the box turns
+  // out to be is decided the same way -- C++ first, GLSL if C++ refuses it.
+  if (!vizType_.empty()) {
+    variables_.clear();
+    probed_.clear();
+    glslProbe_.clear();
+    vizMesh_.clear();
+
+    int vizPrologueLines = 0;
+    glsl_ = VizShaderPrologue(&vizPrologueLines) + shaderBody + VizShaderEpilogue();
+    glslOffset_ = vizPrologueLines;
+    looksLikeGlsl_ = MentionsShaderWord(shaderBody);
+
+    state_ = State::Building;
+    error_ = {};
+    detail_.clear();
+    restore_.clear();
+
+    // Named, not called twice: begin() and end() on two different temporaries
+    // are iterators into two different strings.
+    const std::string prologue = VizCxxPrologue(vizType_);
+    const std::string source = prologue + body + VizCxxEpilogue();
+    const int offset = static_cast<int>(std::count(prologue.begin(), prologue.end(), '\n'));
+    build_ = std::async(std::launch::async,
+                        [source, offset] { return compiler::Compile(source, offset); });
+    return;
   }
 
   if (variables.empty()) {
@@ -318,6 +466,18 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
       body += "  std::printf(\"" + variable.name + "=%.9g\\n\", (double)" + variable.name +
               ");\n";
     }
+
+    // And, if the canvas says how this type is drawn, its lines run here -- in
+    // the only program that has the value, which for a function is the only
+    // place it can be sampled at all. Sampling and building the mesh are then
+    // the same editable snippet, and they cost nothing extra: this program was
+    // going to be run anyway.
+    if (vizes == nullptr) continue;
+    const auto found = vizes->find(variable.type);
+    if (found == vizes->end() || found->second.empty()) continue;
+    body += "  {\n    const auto& value = " + variable.name + "; (void)value;\n";
+    for (const std::string& raw : found->second) body += "    " + raw + "\n";
+    body += "    sb_mesh(\"" + variable.name + "\");\n  }\n";
   }
   body += "  return 0;\n}\n";
 
@@ -473,6 +633,12 @@ void Program::Poll() {
       probed_.clear();
       Launch();  // first run, to fill in the derived values
     }
+
+    if (rebuildQueued_) {
+      rebuildQueued_ = false;
+      Rebuild(queuedLines_, queuedVizes_);
+      return;
+    }
   }
 
   if (run_.valid() && run_.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -481,6 +647,26 @@ void Program::Poll() {
 
     if (output.ok) {
       for (const RunValue& printed : output.values) {
+        // A viz box standing alone prints one mesh, for its example value.
+        if (!vizType_.empty() && printed.name == "mesh.") {
+          vizMesh_ = printed.numbers;
+          continue;
+        }
+        if (!vizType_.empty() && printed.name == "line.") {
+          vizLines_ = printed.numbers;
+          continue;
+        }
+        // A program that has values prints one mesh per value.
+        if (printed.name.rfind("mesh.", 0) == 0 || printed.name.rfind("line.", 0) == 0) {
+          const bool tris = printed.name[0] == 'm';
+          const std::string owner = printed.name.substr(5);
+          for (Variable& variable : variables_) {
+            if (variable.name != owner) continue;
+            (tris ? variable.mesh : variable.lines) = printed.numbers;
+            break;
+          }
+          continue;
+        }
         for (Variable& variable : variables_) {
           if (variable.name != printed.name) continue;
           if (variable.kind == Kind::Function) {

@@ -24,6 +24,8 @@ float Distance(Vector2 a, Vector2 b) {
 void Viewport::Reset(Vector2 worldCentre, float zoom) {
   target_ = worldCentre;
   zoom_ = std::clamp(zoom, kMinZoom, kMaxZoom);
+  // Being put somewhere ends any journey to somewhere else.
+  gliding_ = false;
   mouseDragging_ = false;
   haveTouchBaseline_ = false;
   touchCount_ = 0;
@@ -96,18 +98,18 @@ void Viewport::UpdateTouch() {
   haveTouchBaseline_ = true;
 }
 
-void Viewport::UpdateMouse(bool wheelToCanvas) {
+void Viewport::UpdateMouse(bool wheelToCanvas, bool panToCanvas) {
   if (touchCooldown_ > 0) {
     --touchCooldown_;
     mouseDragging_ = false;
     return;
   }
 
-  // The right button pans, and it pans wherever the pointer happens to be:
-  // nothing on the canvas uses it, so it never has to be taken away from a
-  // window under the cursor. Middle-drag does the same, for mice that prefer it.
-  const bool held =
-      IsMouseButtonDown(MOUSE_BUTTON_RIGHT) || IsMouseButtonDown(MOUSE_BUTTON_MIDDLE);
+  // The right button pans, nearly everywhere: a number line scrolls on it too,
+  // and while one is being scrolled the canvas leaves it alone. Middle-drag
+  // does the same, for mice that prefer it.
+  const bool held = panToCanvas && (IsMouseButtonDown(MOUSE_BUTTON_RIGHT) ||
+                                    IsMouseButtonDown(MOUSE_BUTTON_MIDDLE));
   if (!held) {
     mouseDragging_ = false;
   } else if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) ||
@@ -133,7 +135,7 @@ void Viewport::GlideTo(Vector2 worldCentre, float zoom, float seconds) {
   gliding_ = true;
 }
 
-void Viewport::Update(bool interactive, bool pointerFree) {
+void Viewport::Update(bool interactive, bool pointerFree, bool panFree) {
   if (gliding_) {
     // Moving the canvas yourself wins. Being carried somewhere you did not ask
     // to go, with no way to stop, is the worst thing a camera can do.
@@ -181,7 +183,7 @@ void Viewport::Update(bool interactive, bool pointerFree) {
     touchCount_ = touch::Count();
     if (touchCount_ > 0) touchCooldown_ = 8;
   }
-  UpdateMouse(pointerFree);
+  UpdateMouse(pointerFree, panFree);
 }
 
 }  // namespace sb

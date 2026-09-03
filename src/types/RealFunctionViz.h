@@ -20,6 +20,7 @@
 
 #include "types/RealViz.h"
 #include "blocks.h"
+#include "viz.h"
 #include "fontstore.h"
 #include "raylib.h"
 #include "viewport.h"
@@ -57,10 +58,19 @@ class PlotPanel {
   void Forget(const CodeBlock* block);
 
   bool HandleInput(const Viewport& viewport, FontStore& fonts);
-  void Draw(const Viewport& viewport, FontStore& fonts) const;
+  // `vizes` is how the canvas says a function should be drawn, if it says
+  // anything. Null, or silent about RealFunction, and the polyline below is
+  // what you get -- the one the app was born with.
+  void Draw(const Viewport& viewport, FontStore& fonts,
+            const VizStore* vizes = nullptr) const;
 
   Rectangle DockedBounds(const CodeBlock* block, const Viewport& viewport,
                          FontStore& fonts) const;
+
+  // As AxisPanel::MarkerFor: where a named curve is, so that taking hold of its
+  // name in the text can light up the same things.
+  bool MarkerFor(const CodeBlock* block, const std::string& name, const Viewport& viewport,
+                 FontStore& fonts, Vector2* out) const;
 
   // As AxisPanel::ActiveVariables.
   void ActiveVariables(const Viewport& viewport, FontStore& fonts,
@@ -96,6 +106,10 @@ class PlotPanel {
   enum class Drag { None, Pan, Move };
 
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
+  // As AxisPanel::Shown: a box being read a line at a time only talks about the
+  // variables on that line, and the windows for the rest of it stand down.
+  static bool Shown(const CurveRef& ref);
+  static bool Shown(const Plot& plot);
   const mathprogram::Variable* Resolve(const CurveRef& ref) const;
   // Opens the window out until every curve on it is in view.
   void Reframe(Plot& plot) const;

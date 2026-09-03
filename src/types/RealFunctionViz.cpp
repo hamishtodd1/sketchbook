@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "grid.h"
+#include "rlgl.h"
 #include "selection.h"
 #include "types/examples.h"
 #include "tex/tex.h"
@@ -248,6 +249,33 @@ void PlotPanel::DrawSelectionRims(const Viewport& viewport, FontStore& fonts) co
   }
 }
 
+bool PlotPanel::Shown(const CurveRef& ref) {
+  return ref.block == nullptr || ref.block->InScope(ref.name);
+}
+
+bool PlotPanel::Shown(const Plot& plot) {
+  for (const CurveRef& ref : plot.refs) {
+    if (Shown(ref)) return true;
+  }
+  return false;
+}
+
+bool PlotPanel::MarkerFor(const CodeBlock* block, const std::string& name,
+                          const Viewport& viewport, FontStore& fonts, Vector2* out) const {
+  for (std::size_t i = 0; i < plots_.size(); ++i) {
+    if (!Shown(plots_[i])) continue;
+    for (const CurveRef& ref : plots_[i].refs) {
+      if (ref.block != block || ref.name != name || !Shown(ref)) continue;
+      // The middle of the plot, as a curve's wire always leaves: a curve is a
+      // whole function and has no one place it is.
+      const Rectangle rect = RectFor(i, viewport, fonts);
+      if (out != nullptr) *out = {rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f};
+      return true;
+    }
+  }
+  return false;
+}
+
 void PlotPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
                                 std::vector<ActiveValue>* out) const {
   if (out == nullptr) return;
@@ -262,6 +290,7 @@ void PlotPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
 
   if (drag_ != Drag::None && dragPlot_ < plots_.size()) {
     for (const CurveRef& ref : plots_[dragPlot_].refs) {
+      if (!Shown(ref)) continue;
       out->push_back({ref.block, ref.name, middle(dragPlot_)});
     }
     return;
@@ -269,9 +298,13 @@ void PlotPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
 
   const Vector2 pointer = GetMousePosition();
   for (std::size_t i = 0; i < plots_.size(); ++i) {
+    if (!Shown(plots_[i])) continue;
     const Rectangle rect = RectFor(i, viewport, fonts);
     if (!CheckCollisionPointRec(pointer, rect) && !PointOnRim(rect, pointer)) continue;
-    for (const CurveRef& ref : plots_[i].refs) out->push_back({ref.block, ref.name, middle(i)});
+    for (const CurveRef& ref : plots_[i].refs) {
+      if (!Shown(ref)) continue;
+      out->push_back({ref.block, ref.name, middle(i)});
+    }
     return;
   }
 }
@@ -398,6 +431,7 @@ bool PlotPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
 
   for (std::size_t i = 0; i < plots_.size(); ++i) {
     Plot& plot = plots_[i];
+    if (!Shown(plot)) continue;   // not drawn, so not there to be used
     const Rectangle rect = RectFor(i, viewport, fonts);
     const bool onRim = PointOnRim(rect, pointer);
     if (!CheckCollisionPointRec(pointer, rect) && !onRim) continue;
@@ -431,15 +465,32 @@ bool PlotPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
   return false;
 }
 
-void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
+void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts, const VizStore* vizes) const {
   const float zoom = viewport.Zoom();
   if (zoom < 0.02f) return;
+
+  // How the canvas says a function is drawn, if it says anything.
+  const Viz* curveViz =
+      (vizes == nullptr) ? nullptr : vizes->Find(types::realfunction::kName);
+
+  // The curves in use this frame -- the same set that lights up its name in the
+  // code and gets a wire. Those are the ones that blink.
+  std::vector<ActiveValue> active;
+  ActiveVariables(viewport, fonts, &active);
+  const auto inUse = [&active](const CurveRef& ref) {
+    for (const ActiveValue& value : active) {
+      if (value.block == ref.block && value.name == ref.name) return true;
+    }
+    return false;
+  };
 
   for (std::size_t i = 0; i < plots_.size(); ++i) {
     const Plot& plot = plots_[i];
     const bool carried = (drag_ == Drag::Move && dragMoved_ && i == dragPlot_);
     if (carried && OverDropTarget(GetMousePosition())) continue;
     if (plot.docked && plot.dock != nullptr && plot.dock->Absorbed()) continue;
+    // Nothing on it is being talked about, so there is nothing for it to say.
+    if (!Shown(plot)) continue;
 
     const Rectangle rect = RectFor(i, viewport, fonts);
     const float scale = rect.height / kPlotSide;
@@ -512,9 +563,25 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     // One polyline per function on these axes.
     for (std::size_t c = 0; c < plot.refs.size(); ++c) {
       const mathprogram::Variable* variable = Resolve(plot.refs[c]);
-      if (variable == nullptr || variable->samples.empty()) continue;
-      const Color tint = plot.refs[c].block->VariableColor(plot.refs[c].name);
+      if (variable == nullptr || !Shown(plot.refs[c])) continue;
+      const Color tint =
+          Blink(plot.refs[c].block->VariableColor(plot.refs[c].name), inUse(plot.refs[c]));
       const float thickness = std::max(1.4f, 2.0f * scale);
+
+      // The canvas says how a function is drawn, so it is drawn that way. Its
+      // lines ran inside the program that owns the function -- the only place
+      // one can be sampled -- so what arrives here is already this curve.
+      if (curveViz != nullptr && curveViz->Ready() &&
+          (!variable->lines.empty() || !variable->mesh.empty())) {
+        rlSetLineWidth(thickness);
+        curveViz->Draw(variable->mesh, variable->lines, 0.0f, rect,
+                       {plot.centre.x, plot.centre.y, plot.span * rect.width / rect.height,
+                        plot.span},
+                       scale, tint);
+        rlSetLineWidth(1.0f);
+        continue;
+      }
+      if (variable->samples.empty()) continue;
 
       bool    havePrevious = false;
       Vector2 previous{};
@@ -537,11 +604,12 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
       const float baseline = rect.y + 6.0f * scale + nameEm;
       for (std::size_t c = 0; c < plot.refs.size(); ++c) {
         const mathprogram::Variable* variable = Resolve(plot.refs[c]);
-        if (variable == nullptr) continue;
+        if (variable == nullptr || !Shown(plot.refs[c])) continue;
         const tex::Layout layout =
             tex::Render(variable->latexName, fonts, nameEm, /*display=*/false);
-        tex::DrawLayout(layout, fonts, {x, baseline},
-                        plot.refs[c].block->VariableColor(plot.refs[c].name));
+        tex::DrawLayout(
+            layout, fonts, {x, baseline},
+            Blink(plot.refs[c].block->VariableColor(plot.refs[c].name), inUse(plot.refs[c])));
         x += layout.width + 12.0f * scale;
       }
     }

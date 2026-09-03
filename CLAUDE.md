@@ -40,7 +40,12 @@ the frame budget as a real constraint, not something to tidy up later.
 What already protects it, and should not be undone:
 
 - **Font atlases are cached on a size ladder** with an LRU, so zooming does not
-  re-rasterise every glyph every frame (`fontstore.*`).
+  re-rasterise every glyph every frame (`fontstore.*`). The LRU **may not evict
+  anything used since the frame began**: a glyph hands its caller a pointer
+  straight into an atlas texture, so throwing one away mid-frame both dangles
+  that pointer -- the letters come out as smudges -- and asks for a whole face
+  to be rasterised again inside the frame budget. Over budget with nothing
+  evictable, the cache simply runs large for a frame.
 - **Per-line LaTeX layout is cached** and rebuilt only when that line's text or
   the em size actually changes (`CodeBlock::EnsureCache`).
 - **Compiling and running happen on worker threads**, and repeated knob moves
@@ -222,9 +227,30 @@ the caret without shift puts it down.
 It exists for its own sake, but the reason it was built is the gesture above:
 selecting part of a name is how you take hold of what that name refers to.
 
+**The grid is only up while it is being used.** The dots are a placement aid,
+not scenery, so the canvas is bare while you are reading it and the dots fade in
+while something is being placed: a window carried, a window resized, or the
+canvas zoomed -- zoom because it is what decides how fine the lattice is.
+Panning is none of those and leaves the canvas alone. They linger for half a
+second afterwards, since a resize is a run of separate wheel clicks and a grid
+that came and went between them would be a flicker, and they fade rather than
+blink, because the dots appearing is information rather than an event.
+
+**There is one dot per line of type.** The spacing is not an arbitrary lattice
+laid over the canvas: it is the height of a line at the default size, measured
+from the font at startup rather than written down. So the grid is ruled paper,
+and a box put down on it has its lines sitting in the gaps between rows of dots
+rather than straddling them.
+
+That last part needs one more thing: **it is the text that lands on the grid,
+not the card's corner.** A box's padding is not a whole number of anything, so
+snapping the corner would leave the lines wherever the padding happened to put
+them. Snapping the first character instead makes the alignment true, and the
+corner lands half a padding off a dot, which nobody can see.
+
 **Every window sits on the grid, and boxes never overlap.** A window's top-left
-corner snaps to the nearest dot of the grid *as drawn*, so placement gets finer
-as you zoom in. That holds for boxes, number lines, plots and
+corner snaps to the nearest dot of the grid *as drawn* -- the text's corner, for
+a box -- so placement gets finer as you zoom in. That holds for boxes, number lines, plots and
 pictures alike (`SnapToGrid`, in `grid.*`, next to the code that draws the
 dots). Boxes
 additionally never overlap: one put down on top of another steps clear along
@@ -232,6 +258,11 @@ whichever edge is nearest, a whole dot at a time, and the number lines and plots
 docked under a box count as part of it. Every box placement goes through one
 function (`App::PlaceBlock`), so dragging, typing a new box and loading a file
 cannot disagree about the rules.
+
+**The camera opens one notch in.** `kDefaultZoom` is a single wheel step above
+unity, which is where a box of the default type size is comfortable to read
+rather than merely legible. Slides still define themselves at zoom 1, since a
+slide is a screenful at its own scale and that is a different question.
 
 **The pointer says what the canvas is doing.** While the right button is down
 and the canvas is being dragged, the cursor becomes a **closed hand**: the
@@ -274,8 +305,40 @@ neighbouring variables land far apart and adding one never recolours the others.
 The dark end is skipped, since the cards are already dark.
 
 Colour therefore no longer says whether a variable is free or derived. **Shape**
-does: a ring you can drag, a filled dot you cannot. They are different questions
-and deserve different channels.
+does: a ring you can drag, a filled dot you cannot. And a **blink** says *this
+one, now*: a visualization in use flashes white, half a second on and half a
+second off. Three questions, three channels -- and a blink because colour is
+already spoken for, and because on a shared axis several markers wear colours
+from the same map. A hard switch rather than a fade, since a throb reads as
+decoration where a blink reads as a signal.
+
+**What lights up is the one thing under the pointer.** Pointing at a number line
+lights up a single value: the marker nearest the pointer, within grabbing
+distance. Not the row's whole contents -- that would be a claim about every
+value on it when the pointer is on one -- and nothing at all over the bare axis,
+where a press makes a *new* value rather than taking hold of an old one.
+
+A **derived** marker lights up too, and that is worth saying plainly because it
+is not the same question as whether you could drag it. Being read-only means a
+press will not move it; it does not mean pointing at it says nothing. Which
+thing in the code a dot stands for, and where that thing is written, is exactly
+what someone pointing at it wants to know. So the two questions are asked
+separately: *what is under the pointer* lights up, and *what a press would take
+hold of* is the nearest **free** marker. One search answers both, differing by a
+single flag, so they cannot drift apart.
+
+Carrying a row by its rim is the other case, and there the whole row does light
+up: you are holding the window and everything on it. A plot has no handles and
+nothing finer to point at than the window itself, so hovering one lights every
+curve on it -- the granularity follows what the window has to offer.
+
+**And it works from the other end.** Highlight a mention of a variable in the
+text and the same things light up: the name wherever else it is written, the
+wires converging, and the viz blinking at the far end. Taking hold of a name in
+the code and taking hold of its window are the same statement made from
+opposite sides, so they had better look the same -- and it is the same gesture
+that pulls a variable out of the code onto an axis of its own, read as a
+question rather than as a drag.
 
 **Using a window boxes the name.** Hover or grab a number line -- and, in time,
 any other visualization -- and the *mention* of its variable lights up in the
@@ -290,6 +353,15 @@ says which one it is the same thing as, which starts to matter as soon as two
 windows are open at once. It leaves both ends horizontally and lands on
 whichever side of the name the other end is already on, so it never crosses the
 thing it is pointing at.
+
+**A name written five times is still one variable, so the wires converge.**
+They gather at a junction just outside the card, on the side the window is on,
+level with the middle of the mentions -- and one wire runs from there to the
+window. The strands arrive at the junction along the same horizontal tangent, so
+near it they lie on top of one another and the bundle reads as a single cable
+fanning out. Five separate cables leaving the same handle would say there were
+five things to point at, when the whole claim being made is that there is one.
+A name written once needs no junction and gets none.
 
 **The curve leaves the visualization, not the pointer.** The handle on a number
 line *is* the variable; the pointer is only where your hand happens to be. That
@@ -318,6 +390,201 @@ produced. So the renderer can ask "where did the third identifier end up?" and
 get an answer in pixels, without the typesetter knowing anything about
 variables.
 
+### What a window is showing
+
+A variable is **mutable unless it is `const`** -- in C++ and in GLSL alike -- so
+it can hold one value on one line and a different one three lines further down.
+A window standing for it therefore has to answer *when*, and there are two
+answers depending on whether the box is being read or being written.
+
+**With no caret in the box, a window shows the value at the end of the block.**
+Not a convention picked for convenience: it falls out of how the program is
+assembled, since every value is printed after the last of the user's lines. A
+block is one whole statement, and its windows report what it came to.
+
+**With a caret in the box, only the variables being written about have
+windows.** The line the caret is on names some variables; those keep their
+windows, and every other window belonging to that box stands down. Highlight a
+stretch instead and it is every variable the highlight *touches* -- the same
+test that decides what dragging text out of a box takes hold of, so one letter
+of a name is enough.
+
+The reason is the mutability above. With the caret on line three, the number a
+window would be showing is the one from the end of line seven, which is not what
+line three is about -- and a number that looks like an answer to the question
+you are asking, but is an answer to a different one, is worse than no number.
+
+A window that stands down **keeps its place** rather than closing the gap, so
+nothing shuffles about as the caret moves, and it takes no pointer while it is
+not drawn. Two exceptions. A **shader's picture** stands for a whole box rather
+than for one variable, so it stays: hiding it while its shader is being typed
+would be exactly backwards. And an axis **shared between two boxes** only stands
+down the markers belonging to the box with the caret, since the other box is not
+the one being edited.
+
+Known edge: a `float a;` assigned over further down now looks like a knob that
+does nothing, because its window reports the end of the block, where the
+assignment has already replaced what the knob chose. That is honest rather than
+broken, and it is the first argument for `const` meaning something here.
+
+### Display windows and vizes
+
+Two words, because the difference between them is the whole of where this is
+going.
+
+A **dw** -- a *display window* -- is a window that shows values on a scale of
+its own. The number line and the plot are the two there are. A dw knows about
+scales, panning, zooming, framing, merging, docking and being carried; it knows
+nothing whatever about what a real or a function looks like.
+
+A **Viz** is how *one type* is drawn inside a dw. `RealViz` is how a real looks
+on a number line, `RealFunctionViz` is how a function looks on a plot,
+`ScalarBivectorViz` is one of the ones still to come -- and a **shader box's
+picture is one as well**, with a full-screen quad for its mesh and all its work
+in a fragment shader. Saying so is what makes the shape general: a viz is a mesh
+plus a pair of shaders, and the kinds we have differ only in which of the three
+is carrying the weight. The names are already the
+file names in `types/`; what is new is insisting on the distinction, because a
+dw is the app's and **a viz is meant to be the user's**.
+
+A viz answers four questions, and every one of them is code somebody wrote:
+
+| | |
+| --- | --- |
+| **mesh** | its geometry, in its own units |
+| **place** | where each of those vertices ends up, given the value |
+| **distance** | how near the pointer counts as being on it |
+| **drag** | what value the pointer is now asking for |
+
+The canvas can now answer the first two, for both types. The last two are still
+the app's: `AxisPanel::GrabbableAt` is the third and the `Drag::Handle` case of
+`AxisPanel::HandleInput` is the fourth, and a function has neither, which is why
+a curve cannot be dragged.
+
+### Writing a viz inside the app
+
+**The first two questions can now be answered on the canvas.** A box whose first
+line is `Viz(float);` is a **viz box**: it says how a value of that type is
+drawn rather than declaring a value of its own. It has no variables and grows no
+number lines.
+
+There are two of them per viz, paired by the type they name, and which is which
+needs no new rule at all -- a box is already C++ first and GLSL if C++ refuses
+it, and the two halves are written in different languages.
+
+**The C++ half turns a value into geometry**, and it runs *inside the program
+that has the value*. That is forced rather than chosen: a `std::function` cannot
+leave the process that made it, so the only place a function can be sampled is
+the program it was built in. So a viz's lines are injected there, once per value
+of its type, with `value` bound to it -- which turns out to be the good answer
+rather than merely the possible one:
+
+- **sampling and building the mesh become the same editable snippet.** There is
+  no separate "how is this type sampled" to write and keep in step.
+- **it costs nothing.** That program was going to be compiled and run anyway;
+  the vertices ride back on the same run as the values. Nothing extra is
+  launched when a knob moves.
+
+Two ways of laying geometry down, and no more:
+
+| | |
+| --- | --- |
+| `vertex(x, y)` | three calls make a triangle |
+| `line(ax, ay, bx, by)` | one segment of a path |
+
+A path is not a ribbon of triangles, because its width has to be constant on
+screen while the mesh is in value units, which the placing shader is free to
+stretch by different amounts along each axis. Two primitives is the smaller
+answer than one primitive plus a per-vertex offset.
+
+**The GLSL half places it**, and it is the *vertex* shader. It is handed `p`,
+the vertex in the viz's own units, and is expected to leave it somewhere in
+screen pixels. The window tells it `value` (the number being drawn, for a real),
+`sbArea` (the rectangle it draws in, its middle at the view's centre), `sbView`
+(what that rectangle spans, as centre and extent) and `sbScale` (how big chrome
+is drawn at this zoom). And it is given `sbMap`, which takes a point in value
+space to a point on screen -- provided rather than left to be written out,
+because every viz needs it and a place box should be one line.
+
+It is:
+
+```
+Viz(float);                                Viz(RealFunction);
+p = sbMap(vec2(value, 0.0)) + p*sbScale;   p = sbMap(p);
+```
+
+for the marker on a number line and the curve on a plot respectively. The mesh
+halves are the ring, and the sampling:
+
+```
+Viz(float);                                Viz(RealFunction);
+for (int i = 0; i < 20; ++i) {             float px = value(-8.0f), py = -8.0f;
+  float s = 6.2832f * i / 20.0f;           for (int i = 1; i < 129; ++i) {
+  float e = 6.2832f * (i + 1) / 20.0f;       float y = -8.0f + 16.0f*i/128.0f;
+  vertex(7*cos(s), 7*sin(s));                float x = value(y);
+  ...                                        line(px, py, x, y);
+}                                            px = x; py = y;
+                                           }
+```
+
+`C:\sketches\viz.sketch` is exactly that, both of them, and editing any of the
+four boxes changes what is drawn on the next rebuild.
+
+**A viz box is compiled standing alone as well**, with `value` an example of its
+type. That is what tells the two halves apart -- the mesh half is the one C++
+will have -- and it means a mistake in a viz is reported on the viz's own lines
+rather than surfacing in somebody else's box. Its mesh stands in until a real
+value has one.
+
+**A viz box *starts* as code rather than as mathematics.** There is no equation
+reading of a mesh or of where to put one, so that is the useful side to open on.
+It is only a default: pressing the toggle reads it as mathematics like anything
+else, line by line, and the lines with no reading stay code.
+
+The general rule, which this is a case of: **every code box has the math/code
+toggle**, and only a box beginning `\text` does not -- there the box is words,
+and what it toggles instead is whether you are shown its source. What differs
+between kinds of code box is which side the toggle starts on, never whether it
+is there.
+
+**A type with no viz boxes keeps the drawing the app was born with.** Nothing has
+to be authored for a canvas to work -- authoring one is how you take it over. So
+the built-in ring, dot and polyline are still there, and still the fallback.
+
+**Winding does not decide whether you can see it.** raylib culls back faces, and
+screen space turns the y axis upside down, so a ring written the way anyone would
+write one -- anticlockwise, in the coordinates it was thought in -- comes out
+clockwise and vanishes. A flat shape has no back face, so culling is simply off
+while a viz draws. This cost an hour to find and is exactly the kind of thing an
+author must never have to know.
+
+The mesh goes straight into raylib's own batch, so a viz is drawn through the
+same path as everything else on the canvas and gets `mvp` filled in for free.
+
+**A shader box's picture is a viz too.** That is worth saying because it is the
+observation that makes the shape general: there the mesh is a single full-screen
+quad, the vertex half is trivial, and all the work is in a *fragment* shader.
+So a viz is a mesh plus a pair of shaders, and the kinds we have differ only in
+which of the three is doing the work -- geometry for a marker, a path for a
+curve, a fragment for a field. Unifying them is not done, but the vocabulary now
+says what unifying them would mean.
+
+`vdw2` is where the elaborate ones live -- `BiViz22.js`, `TriPViz.js`,
+`ScalarFieldViz.js` and the rest -- and its shape is the one to grow towards:
+there a viz is `{geometries, transform, getDist, onDrag}`, which is the same four
+questions under different names.
+
+### What a viz still cannot say
+
+- **Distance and drag are still the app's.** A viz box cannot yet say how near
+  counts as near, or what a drag means. Both are small, and both want the same
+  treatment: a third and fourth box, or two more halves of the same one.
+- **A viz cannot say what it needs from the value.** A real's marker does not
+  depend on its number at all, yet its lines are re-run for every value; a curve
+  genuinely does. Nothing distinguishes them, so nothing skips the work.
+- **One viz per type.** Two viz boxes claiming the same type is not an error and
+  not a choice -- the first mesh half and the first shader half win.
+
 ### Slides
 
 A slide is not a document that lives somewhere else. It is a **region of this
@@ -333,11 +600,25 @@ slide seen at its own scale is exactly a screenful. Arriving at one **covers**
 the window rather than fitting inside it, which is what puts the rim just off
 screen; if the window is not the deck's shape, the sides are what get lost.
 
-The **new slide button lives on the canvas**, not in a toolbar. Clicking it
-leaves a slide where the button was and glides the button down past it, so the
-next click lands the next slide underneath. A deck is therefore a column you can
-scroll through and zoom out of, rather than a list beside the work -- and the
-button is always at the end of it.
+**A deck runs left to right**, the way a sentence does and the way every deck
+anyone has ever clicked through does. It is a row of places you can scroll along
+and zoom out of, rather than a list beside the work.
+
+The **new slide button lives on the canvas**, not in a toolbar, and it stands at
+the **end of the deck** -- in the gap just past the last slide, rather than out
+in the middle of where the next one is going to be. That is what makes it read
+as the place the deck stops. Clicking it puts a slide clear of the last one,
+with the same gap between them that every pair of slides has, and walks the
+button along to the new end; so the next click lands the next slide further
+right again, and the button is always where the deck runs out. The very first
+slide, when there is no deck yet, is made where the button already is.
+
+**And the arrow keys go through it.** Once the camera is framing a slide, left
+and right flick to the one before or after -- instantly, because going through a
+deck one slide at a time is not a journey and easing into each one would make it
+into several. Off a slide the arrows mean nothing yet, and inside a box they are
+the caret's. Which slide follows which is decided by nothing but **where they
+sit**: the order you can see is the order there is.
 
 **And the camera goes to look at it**, on the same glide a click on the rim
 would have given. Making a slide is a way of saying "I am working here now", so
@@ -353,8 +634,8 @@ it is why nothing has to be exported: what is on the slide is what was already
 there.
 
 **And a slide does not move.** It is not a container and it does not travel: it
-is a *place*, fixed in the canvas, and the deck is the column of places the
-button walked down. Clicking one does the only thing it does, which is take the
+is a *place*, fixed in the canvas, and the deck is the row of places the button
+walked along. Clicking one does the only thing it does, which is take the
 camera there. Nothing on a slide belongs to it, so there is nothing for a slide
 to carry -- and a thing that stays still is a thing you can navigate by.
 
@@ -382,9 +663,9 @@ Clicking it takes the slide **and everything on it**. What counts as "on it" is
 decided by each window's middle, which is exactly how the lasso decides what it
 caught -- so a caption half over an edge belongs to whichever slide holds its
 middle, and there is one answer to that question rather than two. The deck then
-**closes the gap**: every slide below comes up by one slide and one gap, and so
-does everything standing on them, and so does the new-slide button. A deck is a
-column, and a column has no holes in it.
+**closes the gap**: every slide to the right comes back by one slide and one
+gap, and so does everything standing on them, and so does the new-slide button.
+A deck is a row, and a row has no holes in it.
 
 The aspect is a deck-wide setting, chosen from the Escape menu as one of the few
 shapes a deck is ever made for. It starts at **3:2**, which is also the shape
@@ -617,6 +898,47 @@ of window eventually: **the code is where things come from.** A window is not
 asked for from a menu; it is pulled off the name of the thing it is about, and
 it lands where you let go.
 
+**And a variable is made by putting one down on the axis.** Press the bare part
+of an axis -- anywhere but on one of its markers -- and a new variable appears
+there, in the code of the box that axis belongs to. Pointing at that spot first
+says where: the box blinks a caret at the line the declaration would land on,
+which is what makes the gesture aimable rather than a surprise.
+
+So the two gestures are each other's inverse. A variable is pulled *out* of the
+code onto the canvas; a variable is pushed *into* the code from the canvas.
+Neither the text nor the windows is the place things are made -- they are two
+views of one program and you can work in either.
+
+**Making one and moving one are the same gesture.** The press that creates it
+carries straight on into holding its marker, so from the first frame it behaves
+exactly as though the marker had been there all along and you had grabbed it.
+That is what decides the declaration: it is `float d;`, **free**, not a literal.
+A value you have just put down is one you are about to move, and only a free
+variable has a handle to move it by -- a number written into the source could
+only be dragged by rebuilding the box every frame. So the number goes where
+every free variable's number goes, into the knob, and closing the axis is what
+would write it down. The name is the first letter nothing in the box is using.
+
+**Where it lands is where the caret was left**, or the end of the box if the
+caret has never been put anywhere. A blank line is written on rather than pushed
+down, since a blank line is somewhere to write. That the caret shows even while
+the box is reading as mathematics is the point of it: what is being pointed at
+is a *line*, not a place between two letters, so on a typeset row the caret sits
+at the end of the statement rather than pretending to a column that reading does
+not have.
+
+**And it joins the axis it was put on**, at the scale it was put at, rather than
+the axis its box would otherwise have given it. It is in view by construction,
+so that axis does not reframe -- reframing would move every other value aside to
+make room for one that needed none.
+
+**Which is why an axis scrolls on the right button.** The left button is now
+spoken for all the way along a number line -- a marker to grab, or a place to
+put a new one -- so there is nothing left for it to pan with, and the gesture
+that moves everything else on the canvas is the one it takes instead. A number
+line is the one thing on the canvas that claims the right button, so it is the
+one thing the canvas has to be told about.
+
 They start **docked** under their box and can be pulled off onto the canvas.
 Dropping one onto another **merges** them onto a single shared axis — this is a
 *viewing* operation, not a modelling one. The variables are not identified; they
@@ -649,8 +971,8 @@ A type is three concerns, and they are three files:
 | --- | --- |
 | `RealFunction.*` | the type itself: the C++ the app injects so `RealFunction f;` compiles, and the statement that prints one back |
 | `Clifford.*` | a whole family of types: it writes out the structs and products of Cl(p,q,r) on demand |
-| `RealFunctionViz.*` | how one is shown (the plot) and how an example of one is made |
-| `RealViz.*` | the same two things for a real: the number line, and a tidy number |
+| `RealFunctionViz.*` | how one is shown and how an example of one is made -- the *viz*, plus the plot it is shown in |
+| `RealViz.*` | the same two things for a real: the number line (a *dw*) and the marker on it (a *viz*) |
 
 There is no `Real.*`, because `float` is already C++ and needs no definition.
 That asymmetry is the point of splitting a type from its viz: only some types
@@ -986,12 +1308,16 @@ float b;
 float c = (a + b) / 2;
 ```
 
-renders as `a ∈ ℝ`, `b ∈ ℝ`, `c = (a+b)/2` (a real fraction), with three number
-lines docked underneath. Dragging a knob re-runs the compiled program and the
-derived marker follows. Hovering a line turns it back into `float a = -0.778;`
-with the injected part in blue; clicking it hides the injection and edits the
-code. Lines merge onto a shared axis by dragging one grip onto another, and each
-axis zooms on its own wheel.
+renders as `a ∈ ℝ`, `b ∈ ℝ`, `c = (a+b)/2` (a real fraction), with one number line
+docked underneath carrying all three: a ring for each free variable, a dot for
+the derived one. Dragging a knob re-runs the compiled program and the derived
+marker follows. Clicking that axis anywhere but on a marker writes a new
+`float d = 0.1504;` into the box, at a caret the box blinks while you are
+pointing -- on its LaTeX as readily as on its code. Hovering a line turns it
+back into `float a = -0.778;` with the injected part in blue; clicking it hides
+the injection and edits the code. A variable pulled out of the code gets an axis
+of its own, axes merge by dragging one grip onto another, and each zooms on its
+own wheel.
 
 Editing a box turns the *whole* box into Monokai-coloured code, with a
 math/code toggle shown only while the box has the caret. Undo is Ctrl+Z; Ctrl+left/right move by word. A line the compiler
@@ -1001,6 +1327,10 @@ to point at; the message sits in a white balloon in a proportional face.
 Canvases save and load: Escape menu buttons, Ctrl+S (straight back to where the
 canvas came from) and Ctrl+O, plus `--open <file>` on the command line. The
 format is plain text, one record per line, in `App::SaveCanvas`.
+`C:\sketches\demo\demo.sketch` is a deck of six slides carrying one of
+everything -- reals and their knobs, functions and their plots, a shader, an
+algebra, prose, a picture and a video -- and is the quickest way to see whether
+a change has broken something.
 
 Number lines belong to the canvas rather than to a box, so an axis can carry
 variables from two different boxes at once.
@@ -1051,11 +1381,20 @@ pictures snap to the width or height of what is near them.
 
 The canvas pans on the **right button** and zooms on the wheel; one finger pans
 and two pinch. The left button belongs to the contents of the canvas -- a click
-places the caret, a rim drag moves a window, a handle drag chooses a value --
-and never moves the canvas itself. Nothing on the canvas uses the right button,
-so panning works wherever the pointer happens to be, even over a window that has
-claimed the wheel for its own scale. The wheel now belongs to whatever window it
-is over, since that is what resizes it.
+places the caret, a rim drag moves a window, a handle drag chooses a value, a
+press on a number line puts a new value there -- and never moves the canvas
+itself. Panning therefore works wherever the pointer happens to be, even over a
+window that has claimed the wheel for its own scale, with one exception: a
+number line scrolls its own scale on the right button, because its left button
+is entirely spoken for. That is the only window that takes it, and it says so,
+so the canvas can leave its own pan alone for as long as the scroll lasts. The
+wheel belongs to whatever window it is over, since that is what resizes it.
+
+A viz can now be written on the canvas itself. Two boxes saying `Viz(float);`
+-- one C++ laying down a mesh with `vertex(x, y)`, one GLSL placing its vertices
+-- are what draws the markers on the number line, and editing either changes
+them on the next rebuild. `C:\sketches\viz.sketch` is that, working. A type
+with no viz boxes keeps the drawing the app was born with.
 
 Key files: `mathline.*` (C++ subset -> LaTeX), `mathprogram.*` (assemble /
 compile / re-run, and the scaffolding a fragment is wrapped in), `types/` (one
@@ -1063,7 +1402,8 @@ directory per supported type: what it is, how to make an example of it, how to
 draw it), `blocks.*` (per-line rendering and editing, code and prose alike),
 `media.*` (pictures and video as windows), `video.*` (the ffmpeg pipe, raylib
 free), `resize.*` (the wheel-resize rule and its snapping), `highlight.*`
-(Monokai), `filedialog_win32.*` (open/save dialogs).
+(Monokai), `viz.*` (the vocabulary above, and the viz boxes the canvas
+defines), `filedialog_win32.*` (open/save dialogs).
 
 `bool testFunc()` with its red/blue square still works, but only as a fallback
 for a box that declares no variables. It is scaffolding from before this
@@ -1073,10 +1413,6 @@ direction existed and can go whenever it stops being useful.
 
 Kept here so they are not lost between sessions. Answered ones move up into the
 sections above.
-- Nothing yet says which slide comes after which, beyond where they sit. A deck
-  is currently a column because the button walks down it, not because an order
-  is recorded anywhere.
-
 - A paragraph wraps to a measure, but nothing yet lets one **flow into the
   next** -- a body that outgrows its slide simply runs off the bottom of it.
   Nothing warns, either.

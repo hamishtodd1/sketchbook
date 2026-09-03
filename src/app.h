@@ -15,6 +15,7 @@
 #include "shaderwindow.h"
 #include "ui.h"
 #include "viewport.h"
+#include "viz.h"
 
 namespace sb {
 
@@ -110,6 +111,10 @@ class App {
   // Slides: regions of the canvas worth looking at on their own, and the button
   // that makes them.
   SlidePanel                              slides_;
+  // How each type is drawn, as written on this very canvas. A type with no viz
+  // boxes keeps the drawing the app was born with, so an ordinary canvas needs
+  // to know nothing about any of this.
+  VizStore                                vizes_;
 
   // Where this canvas came from, so Ctrl+S can save straight back to it.
   std::string currentPath_;
@@ -129,6 +134,12 @@ class App {
   // True while the system cursor is hidden because a hand is being drawn in its
   // place. Kept so the two can never get out of step.
   bool       cursorHidden_ = false;
+
+  // The grid is a placement aid, not scenery, so it is only up while something
+  // is being placed. `gridUntil_` is when the linger after the last such
+  // gesture runs out; `gridShow_` chases it, so the dots fade rather than blink.
+  float      gridShow_ = 0.0f;
+  double     gridUntil_ = 0.0;
 
   // The loop being drawn, in screen points, while the background is dragged.
   std::vector<Vector2> lasso_;

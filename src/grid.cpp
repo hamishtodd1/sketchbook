@@ -7,11 +7,22 @@
 
 namespace sb {
 
+namespace {
+// Until somebody measures a line of type, the value theme.h guesses at.
+float g_baseStep = kGridBaseStep;
+}  // namespace
+
+void SetGridBaseStep(float world) {
+  if (world > 1.0f) g_baseStep = world;
+}
+
+float GridBaseStep() { return g_baseStep; }
+
 float GridStep(float zoom) {
-  if (!(zoom > 0.0f)) return kGridBaseStep;
+  if (!(zoom > 0.0f)) return g_baseStep;
 
   // Pick a power-of-two world spacing whose on-screen size lands in the band.
-  float step = kGridBaseStep;
+  float step = g_baseStep;
   int guard = 0;
   while (step * zoom < kGridMinPx && guard++ < 64) step *= 2.0f;
   guard = 0;
@@ -24,9 +35,9 @@ Vector2 SnapToGrid(Vector2 world, float zoom) {
   return {std::round(world.x / step) * step, std::round(world.y / step) * step};
 }
 
-void DrawDotGrid(const Viewport& viewport) {
+void DrawDotGrid(const Viewport& viewport, float strength) {
   const float zoom = viewport.Zoom();
-  if (!(zoom > 0.0f)) return;
+  if (!(zoom > 0.0f) || strength <= 0.004f) return;
 
   const float step = GridStep(zoom);
   const float spacing = step * zoom;
@@ -44,9 +55,11 @@ void DrawDotGrid(const Viewport& viewport) {
   const long long j0 = static_cast<long long>(std::floor(topLeft.y / step)) - 1;
   const long long j1 = static_cast<long long>(std::ceil(bottomRight.y / step)) + 1;
 
+  const float show = std::clamp(strength, 0.0f, 1.0f);
   Color coarse = kGridDot;
+  coarse.a = static_cast<unsigned char>(kGridDot.a * show);
   Color fine = kGridDot;
-  fine.a = static_cast<unsigned char>(kGridDot.a * t);
+  fine.a = static_cast<unsigned char>(kGridDot.a * t * show);
 
   const float coarseSize = 3.0f;
   const float fineSize = 2.0f + t;
@@ -56,7 +69,7 @@ void DrawDotGrid(const Viewport& viewport) {
       // Dots on the even sublattice survive when the level doubles, so they are
       // the ones drawn at full strength.
       const bool onCoarse = ((i % 2 == 0) && (j % 2 == 0));
-      if (!onCoarse && fine.a == 0) continue;
+      if (onCoarse ? coarse.a == 0 : fine.a == 0) continue;
 
       const Vector2 p =
           viewport.ToScreen({static_cast<float>(i) * step, static_cast<float>(j) * step});

@@ -131,9 +131,11 @@ constexpr float kLadder[] = {16.0f, 24.0f, 32.0f, 48.0f, 64.0f, 96.0f, 128.0f};
 constexpr int   kLadderCount = static_cast<int>(sizeof(kLadder) / sizeof(kLadder[0]));
 
 // Keep the cache bounded. Both limits must be exceeded before we evict, so a
-// couple of large atlases in active use are never thrashed.
+// couple of large atlases in active use are never thrashed. Eleven faces, and a
+// canvas can easily have three or four sizes of several of them on screen at
+// once, so the entry count has to allow for that rather than for one box.
 constexpr std::size_t kMaxTexels = 48ull * 1024 * 1024;
-constexpr std::size_t kMaxEntries = 14;
+constexpr std::size_t kMaxEntries = 28;
 
 int LadderRung(float emPx) {
   for (int i = 0; i < kLadderCount; ++i) {
@@ -205,8 +207,16 @@ bool FontStore::HasGlyph(Face face, int codepoint) const {
 
 void FontStore::EvictIfNeeded() {
   while (cache_.size() > kMaxEntries || (texelsInUse_ > kMaxTexels && cache_.size() > 2)) {
+    // Nothing used since the frame began may go. A glyph hands its caller a
+    // pointer straight into the atlas texture, so unloading one that something
+    // has already drawn from -- or is about to -- leaves that pointer dangling,
+    // and the letters come out as smudges. It would also mean re-rasterising a
+    // whole face every frame, which is not something to do inside a frame
+    // budget. Over budget with nothing evictable, the cache simply runs large
+    // for a frame; the bound applies again as soon as the screen changes.
     auto oldest = cache_.end();
     for (auto it = cache_.begin(); it != cache_.end(); ++it) {
+      if (it->second.lastUsed > frameMark_) continue;
       if (oldest == cache_.end() || it->second.lastUsed < oldest->second.lastUsed) oldest = it;
     }
     if (oldest == cache_.end()) break;

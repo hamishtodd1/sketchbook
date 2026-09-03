@@ -27,6 +27,7 @@
 #include "fontstore.h"
 #include "raylib.h"
 #include "viewport.h"
+#include "viz.h"
 
 namespace sb {
 
@@ -64,11 +65,19 @@ class AxisPanel {
   // Returns true if it took the pointer or the wheel, so the canvas can stay
   // put while an axis is being used.
   bool HandleInput(const Viewport& viewport, FontStore& fonts, const Blocks& blocks);
-  void Draw(const Viewport& viewport, FontStore& fonts) const;
+  // `vizes` is how the canvas says a real should be drawn, if it says anything.
+  // Null, or silent about `float`, and the marker below is what you get -- the
+  // one the app was born with.
+  void Draw(const Viewport& viewport, FontStore& fonts, const VizStore* vizes = nullptr) const;
 
-  // The variables whose row is being hovered or dragged. Everything standing
-  // for a variable wears its colour, and this is what says which one is in use
-  // so its name can be boxed where it is written.
+  // The variables in use: the one whose handle is being dragged, everything on
+  // a row being carried, and -- while merely hovering -- the single handle a
+  // press would take hold of, if there is one.
+  //
+  // That last one is the rule worth stating: what lights up under the pointer
+  // is a **promise about the press**. Lighting every value on the row would
+  // promise all of them when the press is about to be about one, and over the
+  // bare axis it would promise a value where a press makes a new one instead.
   void ActiveVariables(const Viewport& viewport, FontStore& fonts,
                        std::vector<ActiveValue>* out) const;
 
@@ -78,12 +87,35 @@ class AxisPanel {
   Rectangle DockedBounds(const CodeBlock* block, const Viewport& viewport,
                          FontStore& fonts) const;
 
+  // The box a click on the axis under the pointer would write a value into, or
+  // nullptr if the pointer is not making that offer -- because it is over a
+  // marker, over the rim, or not over an axis at all. The box answers by
+  // blinking a caret where the declaration would go.
+  CodeBlock* InsertTarget(const Viewport& viewport, FontStore& fonts) const;
+
+  // True while an axis is being scrolled on the right button, so the canvas
+  // leaves its own right-button pan alone for as long as that lasts.
+  bool Scrolling() const { return drag_ == Drag::Pan; }
+
+  // Where a named variable's marker is, if this panel is showing one. Taking
+  // hold of a name in the text lights up the same things as taking hold of its
+  // window, and this is what says where the other end of the wire goes.
+  bool MarkerFor(const CodeBlock* block, const std::string& name, const Viewport& viewport,
+                 FontStore& fonts, Vector2* out) const;
+
   // Takes a variable off the axis it shares with the rest of its box and starts
   // carrying it as an axis of its own, from the pointer. The drop is the same
   // drop any other carried row gets -- onto the canvas, onto another axis to
   // merge, or onto the cross.
   bool BeginPullOut(CodeBlock* block, const std::string& name, Vector2 pointer,
                     const Viewport& viewport);
+
+  // What a ref currently stands for, or null. Public because the nearest-marker
+  // search is a free function shared by two callers.
+  const mathprogram::Variable* Value(const AxisRef& ref) const { return Resolve(ref); }
+
+  // Whether a value still has anything to say -- see the private half below.
+  static bool Shown(const AxisRef& ref);
 
   bool Empty() const { return lines_.empty(); }
   // True while a row is being dragged. A drag in flight has to be offered the
@@ -124,6 +156,36 @@ class AxisPanel {
 
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
   static Rectangle AxisArea(Rectangle row);
+  // Whether a value still has anything to say. A box being read a line at a
+  // time only talks about the variables written on that line, and the windows
+  // for the rest of it stand down -- not drawn, and taking no pointer. Their
+  // *place* in the stack is kept, so nothing shuffles as the caret moves.
+  static bool Shown(const NumberLine& line);
+  // The handle a left press would take hold of on this row: the nearest free
+  // marker within grabbing distance, which beats the rim and the scroll alike.
+  // One function, used both to decide what a press grabs and to decide what
+  // lights up under the pointer, so the promise and the press cannot drift.
+  const AxisRef* GrabbableAt(std::size_t index, Vector2 pointer, const Viewport& viewport,
+                             FontStore& fonts) const;
+  // The marker nearest the pointer on this row, whether or not it is one you
+  // could take hold of. Pointing at a derived value still says which thing it
+  // is -- it just cannot be moved.
+  const AxisRef* MarkerNear(std::size_t index, Vector2 pointer, const Viewport& viewport,
+                            FontStore& fonts) const;
+  // Which row is offering to take a value, or kNoRow. The rim carries the row
+  // and a marker is a value that already exists, so only the bare axis offers.
+  static constexpr std::size_t kNoRow = static_cast<std::size_t>(-1);
+  std::size_t OfferedRow(Vector2 pointer, const Viewport& viewport, FontStore& fonts) const;
+  bool        OverMarker(std::size_t index, Vector2 pointer, const Viewport& viewport,
+                         FontStore& fonts) const;
+  // The box a row writes into: the one it docks under, which stays put when
+  // lines merge, so a shared axis still has one answer.
+  CodeBlock*  Owner(const NumberLine& line) const;
+  // Writes a value into that box at the place on the axis the pointer is, and
+  // says what it called it -- empty if it could not. The caller carries on
+  // holding the new marker, so making one and moving one are the same gesture.
+  std::string MakeVariable(std::size_t index, Vector2 pointer, const Viewport& viewport,
+                           FontStore& fonts);
   const mathprogram::Variable* Resolve(const AxisRef& ref) const;
   // Where a variable's marker is drawn on its row: the dot that *is* the
   // variable, which is where a wire from its name should land.
@@ -134,6 +196,19 @@ class AxisPanel {
   void Reframe(NumberLine& line) const;
 
   std::vector<NumberLine> lines_;
+
+  // A value made by clicking an axis belongs on *that* axis, at the place it
+  // was put -- not on whatever axis its box would otherwise have given it. The
+  // claim is held from the click until the build that creates the variable
+  // comes back, since a ref to something that does not exist yet would be swept
+  // away by the next Sync. The line is remembered by something already on it,
+  // so merging or throwing away another line cannot make it point elsewhere.
+  struct Pending {
+    AxisRef made;
+    AxisRef anchor;
+    bool    live = false;
+  };
+  Pending pending_;
 
   Drag        drag_ = Drag::None;
   std::size_t dragLine_ = 0;

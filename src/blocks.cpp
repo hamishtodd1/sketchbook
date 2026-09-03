@@ -137,13 +137,14 @@ void CaptureTraceLog(int level, const char* text, va_list args) {
   *g_shaderLog += '\n';
 }
 
-bool CompileFragmentShader(const std::string& source, Shader* shader, std::string* log) {
+// A null half means raylib's own, which is what supplies fragTexCoord and
+// fragColor one way and the screen-space mvp the other.
+bool CompileShaderHalf(const char* vertex, const char* fragment, Shader* shader,
+                       std::string* log) {
   log->clear();
   g_shaderLog = log;
   SetTraceLogCallback(CaptureTraceLog);
-  // A null vertex shader means raylib's own, which is what supplies
-  // fragTexCoord and fragColor.
-  const Shader compiled = LoadShaderFromMemory(nullptr, source.c_str());
+  const Shader compiled = LoadShaderFromMemory(vertex, fragment);
   SetTraceLogCallback(nullptr);
   g_shaderLog = nullptr;
 
@@ -153,6 +154,10 @@ bool CompileFragmentShader(const std::string& source, Shader* shader, std::strin
   }
   UnloadShader(compiled);
   return false;
+}
+
+bool CompileFragmentShader(const std::string& source, Shader* shader, std::string* log) {
+  return CompileShaderHalf(nullptr, source.c_str(), shader, log);
 }
 
 void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float borderWidth) {
@@ -252,7 +257,8 @@ CodeBlock::~CodeBlock() {
   // context, and a destructor can run after the window has gone. Whoever
   // destroys a box has to have released it first. Say so if they did not,
   // rather than leaking in silence.
-  if (haveShader_ || haveProbe_ || havePreviewSurface_ || haveProbeTarget_) {
+  if (haveShader_ || haveProbe_ || havePreviewSurface_ || haveProbeTarget_ ||
+      haveVizShader_) {
     TraceLog(LOG_WARNING, "BLOCKS: a box was destroyed still holding GPU memory");
   }
 }
@@ -381,6 +387,11 @@ bool CodeBlock::ShowsCode(int line) const {
   // source -- and so at the sigil, which is how a text box stops being one --
   // is the toggle on its own strip.
   if (IsText()) return showSource_;
+  // A box that says how something is drawn is code all the way through: there
+  // is no mathematical reading of a mesh or of where to put it, and a viz is
+  // written to be read as what it is. The toggle still works, so a box can be
+  // made to show its LaTeX; this is only where it starts.
+  if (!program_.vizType().empty() && !showMath_) return true;
   if (cache_[static_cast<std::size_t>(line)].latex.empty()) return true;
   // A line the compiler complained about shows its code, so the red caret has
   // real characters to point at -- and so you can see what to fix.
@@ -464,6 +475,141 @@ bool CodeBlock::BakeVariable(const std::string& name) {
     return true;
   }
   return false;
+}
+
+// Whether `name` is written, as a whole word, anywhere in the stretch of the
+// box between two positions. Touching a mention is enough -- highlighting one
+// letter of a name is how you take hold of what that name refers to, so it had
+// better be how you ask about it too.
+bool CodeBlock::MentionedBetween(const std::string& name, int fromLine, int fromCol, int toLine,
+                                 int toCol, bool wholeLines) const {
+  if (name.empty()) return false;
+  for (int i = std::max(fromLine, 0); i <= toLine && i < static_cast<int>(lines_.size()); ++i) {
+    const std::string& line = lines_[static_cast<std::size_t>(i)];
+    std::size_t begin = 0;
+    std::size_t end = line.size();
+    if (!wholeLines) {
+      if (i == fromLine) begin = std::min(static_cast<std::size_t>(fromCol), line.size());
+      if (i == toLine) end = std::min(static_cast<std::size_t>(toCol), line.size());
+    }
+
+    for (std::size_t at = line.find(name); at != std::string::npos;
+         at = line.find(name, at + 1)) {
+      const std::size_t after = at + name.size();
+      const bool clearBefore = at == 0 || !IsWordChar(line[at - 1]);
+      const bool clearAfter = after >= line.size() || !IsWordChar(line[after]);
+      if (!clearBefore || !clearAfter) continue;
+      if (at < end && after > begin) return true;
+    }
+  }
+  return false;
+}
+
+std::vector<std::string> CodeBlock::HighlightedVariables() const {
+  std::vector<std::string> named;
+  if (!focused_ || !HasSelection()) return named;
+
+  int fromLine = 0;
+  int fromCol = 0;
+  int toLine = 0;
+  int toCol = 0;
+  SelectionRange(&fromLine, &fromCol, &toLine, &toCol);
+  for (const mathprogram::Variable& variable : program_.variables()) {
+    if (MentionedBetween(variable.name, fromLine, fromCol, toLine, toCol, /*wholeLines=*/false)) {
+      named.push_back(variable.name);
+    }
+  }
+  return named;
+}
+
+bool CodeBlock::InScope(const std::string& name) const {
+  // Nobody is reading this box a line at a time, so all of it counts.
+  if (!focused_ || name.empty()) return true;
+
+  int fromLine = caretLine_;
+  int fromCol = caretCol_;
+  int toLine = caretLine_;
+  int toCol = caretCol_;
+  // A bare caret is asking about its whole line; a highlight about exactly what
+  // it covers.
+  const bool selected = HasSelection();
+  if (selected) SelectionRange(&fromLine, &fromCol, &toLine, &toCol);
+  return MentionedBetween(name, fromLine, fromCol, toLine, toCol, /*wholeLines=*/!selected);
+}
+
+void CodeBlock::SetInsertCaret(bool value) {
+  // A caret offering something should be visible the moment it is offered,
+  // rather than halfway through a blink.
+  if (value && !insertCaret_) blinkAnchor_ = GetTime();
+  insertCaret_ = value;
+}
+
+int CodeBlock::InsertLine() const {
+  if (lines_.empty()) return 0;
+  // Nowhere has been chosen yet, so the end of what is written is where the
+  // next thing goes -- which is where a person would put it.
+  if (!caretUsed_) return static_cast<int>(lines_.size()) - 1;
+  return std::clamp(caretLine_, 0, static_cast<int>(lines_.size()) - 1);
+}
+
+std::string CodeBlock::FreshName() const {
+  const auto spokenFor = [this](const std::string& name) {
+    for (const mathprogram::Variable& variable : program_.variables()) {
+      if (variable.name == name) return true;
+    }
+    // Not only the declared ones: a name written anywhere in the box is taken,
+    // whether or not the build that would have told us so has finished.
+    for (const std::string& line : lines_) {
+      for (std::size_t at = line.find(name); at != std::string::npos;
+           at = line.find(name, at + 1)) {
+        const bool clearBefore = at == 0 || !IsWordChar(line[at - 1]);
+        const std::size_t after = at + name.size();
+        const bool clearAfter = after >= line.size() || !IsWordChar(line[after]);
+        if (clearBefore && clearAfter) return true;
+      }
+    }
+    return false;
+  };
+
+  // Single letters first, the way one names a value while thinking, and only
+  // then letters with a number after them.
+  for (int round = 0; round < 100; ++round) {
+    for (char letter = 'a'; letter <= 'z'; ++letter) {
+      std::string candidate(1, letter);
+      if (round > 0) candidate += std::to_string(round + 1);
+      if (!spokenFor(candidate)) return candidate;
+    }
+  }
+  return "v";
+}
+
+void CodeBlock::InsertDeclaration(const std::string& declaration) {
+  PushUndo(EditKind::Structural);
+  if (lines_.empty()) lines_.emplace_back();
+
+  int at = InsertLine();
+  // A blank line is somewhere to write, not something to push out of the way.
+  const std::string& target = lines_[static_cast<std::size_t>(at)];
+  if (target.find_first_not_of(" 	") == std::string::npos) {
+    lines_[static_cast<std::size_t>(at)] = declaration;
+  } else {
+    lines_.insert(lines_.begin() + at + 1, declaration);
+    ++at;
+  }
+
+  caretLine_ = at;
+  caretCol_ = static_cast<int>(lines_[static_cast<std::size_t>(at)].size());
+  TouchEdit();
+  RequestCompile();
+}
+
+bool CodeBlock::BuildsAsCxx() const {
+  const mathprogram::State state = program_.state();
+  return state == mathprogram::State::Ready || state == mathprogram::State::Building;
+}
+
+int CodeBlock::VizUniform(const char* name) const {
+  return haveVizShader_ ? GetShaderLocation(vizShader_, name) : -1;
 }
 
 void CodeBlock::DrawShaderInto(Rectangle rect) const {
@@ -694,6 +840,11 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
 
 float CodeBlock::PaddingX(float em) { return kPadX * (em / kBaseEm); }
 
+Vector2 CodeBlock::TextOffset() const {
+  const float scale = em_ / kBaseEm;
+  return {kPadX * scale, kPadY * scale};
+}
+
 Rectangle CodeBlock::WorldBounds(const Viewport& viewport, FontStore& fonts) const {
   const Geometry& g = Measure(viewport, fonts);
   const float     zoom = std::max(viewport.Zoom(), 1e-6f);
@@ -804,17 +955,16 @@ int CodeBlock::RowAt(Vector2 point, const Viewport& viewport, FontStore& fonts) 
   return g.rows.empty() ? -1 : static_cast<int>(g.rows.size()) - 1;
 }
 
-int CodeBlock::CaretRow(const Geometry& g) const {
+int CodeBlock::RowOf(const Geometry& g, int line, int col) const {
   int fallback = -1;
   for (std::size_t i = 0; i < g.rows.size(); ++i) {
     const Row& row = g.rows[i];
-    if (row.line != caretLine_) continue;
+    if (row.line != line) continue;
     if (fallback < 0) fallback = static_cast<int>(i);
     // The first row that contains the offset wins, so a caret sitting exactly
     // on a wrap point shows at the end of a line rather than the start of the
     // next -- which is where you just typed.
-    if (static_cast<std::size_t>(caretCol_) >= row.begin &&
-        static_cast<std::size_t>(caretCol_) <= row.end) {
+    if (static_cast<std::size_t>(col) >= row.begin && static_cast<std::size_t>(col) <= row.end) {
       return static_cast<int>(i);
     }
     fallback = static_cast<int>(i);
@@ -885,6 +1035,7 @@ void CodeBlock::PlaceCaret(Vector2 point, const Viewport& viewport, FontStore& f
   }
   caretCol_ = static_cast<int>(best);
   ClampCaret();
+  caretUsed_ = true;
   blinkAnchor_ = GetTime();
 }
 
@@ -1084,6 +1235,7 @@ void CodeBlock::Undo() {
 
 void CodeBlock::TouchEdit() {
   dirty_ = true;
+  caretUsed_ = true;
   // Every edit ends with nothing selected. The anchor is only ever the far end
   // of a selection being made; left where it was, each keystroke would select
   // everything typed since and the next one would replace it.
@@ -1221,6 +1373,7 @@ void CodeBlock::MoveCaret(int dLine, int dChar) {
   // the whole of what shift means: keep the anchor, move the caret, and the
   // stretch between them is highlighted.
   if (!ShiftDown()) SelectNone();
+  caretUsed_ = true;
   blinkAnchor_ = GetTime();
 }
 
@@ -1243,6 +1396,7 @@ void CodeBlock::MoveCaretByWord(int direction) {
     caretCol_ = i;
   }
   if (!ShiftDown()) SelectNone();
+  caretUsed_ = true;
   blinkAnchor_ = GetTime();
 }
 
@@ -1351,7 +1505,7 @@ void CodeBlock::RequestCompile() {
 
   // The mathematical reading comes first. Only a box that declares nothing
   // falls back to the older `bool testFunc()` behaviour.
-  program_.Rebuild(lines_);
+  program_.Rebuild(lines_, vizSources_);
   if (program_.state() != mathprogram::State::Empty) {
     outcome_ = {};
     return;
@@ -1367,6 +1521,10 @@ void CodeBlock::ReleaseGpu() {
   if (haveShader_) {
     UnloadShader(shader_);
     haveShader_ = false;
+  }
+  if (haveVizShader_) {
+    UnloadShader(vizShader_);
+    haveVizShader_ = false;
   }
   if (haveProbe_) {
     UnloadShader(probeShader_);
@@ -1452,6 +1610,22 @@ void CodeBlock::CompileShader() {
   uniforms_.clear();
 
   std::string log;
+
+  // A viz box's GLSL is the *vertex* shader -- the one that decides where the
+  // mesh ends up. Nothing else about it is different: it is assembled from the
+  // same lines, compiled on the same thread, and its errors come back the same
+  // way, because it is still just the box's text tried as the other language.
+  if (!program_.vizType().empty()) {
+    if (haveVizShader_) {
+      UnloadShader(vizShader_);
+      haveVizShader_ = false;
+    }
+    haveVizShader_ =
+        CompileShaderHalf(program_.glslSource().c_str(), nullptr, &vizShader_, &log);
+    program_.ShaderCompiled(haveVizShader_, log);
+    return;
+  }
+
   const bool ok = CompileFragmentShader(program_.glslSource(), &shader_, &log);
   haveShader_ = ok;
 
@@ -1506,7 +1680,7 @@ void CodeBlock::Poll() {
   // A box edited back into valid C++ should stop drawing the picture it used to
   // be. While a rebuild is in flight the old one stays up, the way the knobs
   // keep their old values.
-  if (haveShader_ && state != mathprogram::State::ShaderReady &&
+  if ((haveShader_ || haveVizShader_) && state != mathprogram::State::ShaderReady &&
       state != mathprogram::State::Building && state != mathprogram::State::Shading) {
     ReleaseGpu();
   }
@@ -1619,20 +1793,36 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
     DrawSpans(fonts, source, spans, split, source.size(), {x, row.baseline}, g.emPx);
   }
 
-  // Caret. Only while this box is actually being edited, and solid while
-  // typing so it never distracts mid-edit.
-  const int caretRow = focused_ ? CaretRow(g) : -1;
+  // Caret. While this box is being edited, and solid while typing so it never
+  // distracts mid-edit -- and also while a number line is offering to put a
+  // value in, since then the caret is what says where that value would land.
+  int markLine = -1;
+  int markCol = 0;
+  if (focused_) {
+    markLine = caretLine_;
+    markCol = caretCol_;
+  } else if (insertCaret_) {
+    markLine = InsertLine();
+    markCol = caretUsed_
+                  ? caretCol_
+                  : static_cast<int>(lines_[static_cast<std::size_t>(markLine)].size());
+  }
+  const int caretRow = markLine < 0 ? -1 : RowOf(g, markLine, markCol);
   if (caretRow >= 0) {
     const double phase = std::fmod(GetTime() - blinkAnchor_, 1.06);
     if (phase < 0.62) {
-      const Row&         row = g.rows[static_cast<std::size_t>(caretRow)];
-      const std::string& line = lines_[static_cast<std::size_t>(row.line)];
-      const std::size_t  col =
-          std::clamp(static_cast<std::size_t>(caretCol_), row.begin, row.end);
-      const float x =
-          row.x + text::Measure(fonts, row.asLatex ? ProseFace() : Face::Mono,
-                                std::string_view(line).substr(row.begin, col - row.begin),
-                                g.emPx);
+      const Row& row = g.rows[static_cast<std::size_t>(caretRow)];
+      // A row reading as mathematics has no columns to sit between: the caret
+      // goes after the whole statement, which is where a new line would go.
+      float x = row.x + row.width;
+      if (!row.asLatex || prose) {
+        const std::string& line = lines_[static_cast<std::size_t>(row.line)];
+        const std::size_t  col =
+            std::clamp(static_cast<std::size_t>(markCol), row.begin, row.end);
+        x = row.x + text::Measure(fonts, row.asLatex ? ProseFace() : Face::Mono,
+                                  std::string_view(line).substr(row.begin, col - row.begin),
+                                  g.emPx);
+      }
       DrawRectangleRec({x, row.y + row.height * 0.08f, std::max(1.0f, g.emPx * 0.07f),
                         row.height * 0.86f},
                        asWords ? kSlideInk : kCaret);
@@ -1757,25 +1947,70 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
     const Geometry& g = Measure(viewport, fonts);
     if (g.emPx >= 0.4f) {
       const float thickness = std::max(1.4f, 1.8f * g.zoom);
+      // Where the strands of one bundle meet, just outside the card on the side
+      // the window is on.
+      const float gap = std::max(10.0f, 16.0f * g.zoom);
+
       for (const ActiveValue& active : highlights_) {
         const Color   tint = VariableColor(active.name);
         const Vector2 from = active.from;
+
+        // Every place this box writes the name. A variable mentioned five times
+        // is still one variable, so the five strands are gathered rather than
+        // five separate cables leaving the same window.
+        std::vector<Rectangle> mentions;
         for (std::size_t i = 0; i < g.rows.size(); ++i) {
           for (const Rectangle& box : MentionRects(i, active.name, g, fonts)) {
-            // It lands on whichever side the window is already on, so the curve
-            // never crosses the name it is pointing at.
-            const bool fromLeft = from.x < box.x + box.width * 0.5f;
-            const Vector2 target = {fromLeft ? box.x : box.x + box.width,
-                                    box.y + box.height * 0.5f};
-            // Tangents leave both ends horizontally, which is what makes it
-            // read as a cable rather than as a stray line.
-            const float reach = std::clamp(std::abs(target.x - from.x) * 0.45f, 24.0f, 190.0f);
-            const float direction = fromLeft ? 1.0f : -1.0f;
-            DrawSplineSegmentBezierCubic(from, {from.x + reach * direction, from.y},
-                                         {target.x - reach * direction, target.y}, target,
-                                         thickness, Fade(tint, 0.8f));
+            mentions.push_back(box);
           }
         }
+        if (mentions.empty()) continue;
+
+        // Which side the bundle leaves by. One answer for the whole bundle, or
+        // the strands would set off in opposite directions and never meet.
+        const bool  onLeft = from.x < g.rect.x + g.rect.width * 0.5f;
+        const float outward = onLeft ? -1.0f : 1.0f;
+
+        // Tangents leave both ends horizontally, which is what makes a curve
+        // read as a cable rather than as a stray line.
+        const auto cable = [&](Vector2 a, float aReach, Vector2 b, float bReach) {
+          DrawSplineSegmentBezierCubic(a, {a.x + aReach, a.y}, {b.x + bReach, b.y}, b, thickness,
+                                       Fade(tint, 0.8f));
+        };
+
+        if (mentions.size() == 1) {
+          const Rectangle box = mentions.front();
+          const bool      fromLeft = from.x < box.x + box.width * 0.5f;
+          const Vector2   target = {fromLeft ? box.x : box.x + box.width,
+                                    box.y + box.height * 0.5f};
+          const float     reach = std::clamp(std::abs(target.x - from.x) * 0.45f, 24.0f, 190.0f);
+          const float     direction = fromLeft ? 1.0f : -1.0f;
+          cable(from, reach * direction, target, -reach * direction);
+          continue;
+        }
+
+        // The junction: level with the middle of the mentions, and clear of the
+        // card so it reads as a place the strands meet rather than as a stain
+        // on the edge of the box.
+        float meanY = 0.0f;
+        for (const Rectangle& box : mentions) meanY += box.y + box.height * 0.5f;
+        meanY /= static_cast<float>(mentions.size());
+        const Vector2 junction = {onLeft ? g.rect.x - gap : g.rect.x + g.rect.width + gap, meanY};
+
+        // Out to each mention. They arrive at the junction along the same
+        // horizontal tangent, so near it they lie on top of one another and the
+        // bundle reads as one wire fanning out.
+        for (const Rectangle& box : mentions) {
+          const Vector2 target = {onLeft ? box.x : box.x + box.width,
+                                  box.y + box.height * 0.5f};
+          const float   reach =
+              std::clamp(std::abs(target.x - junction.x) * 0.55f, 14.0f, 150.0f);
+          cable(junction, -outward * reach, target, outward * reach);
+        }
+
+        // And the one wire that actually says which window this is.
+        const float reach = std::clamp(std::abs(junction.x - from.x) * 0.45f, 24.0f, 190.0f);
+        cable(from, (from.x < junction.x ? 1.0f : -1.0f) * reach, junction, outward * reach);
       }
     }
   }

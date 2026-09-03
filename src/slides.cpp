@@ -80,24 +80,91 @@ Rectangle SlidePanel::DeleteButtonRect(Rectangle rim, FontStore& fonts) {
 void SlidePanel::RemoveSlide(int index, float aspect) {
   if (index < 0 || index >= static_cast<int>(slides_.size())) return;
   const Slide gone = slides_[static_cast<std::size_t>(index)];
-  const float shift = kSlideHeight + kSlideGap;
+  const float shift = Bounds(gone, aspect).width + kSlideGap;
 
   removal_.asked = true;
   removal_.bounds = Bounds(gone, aspect);
   removal_.shift = shift;
 
   slides_.erase(slides_.begin() + index);
-  // A deck is a column, so what came after closes the gap rather than leaving a
+  // A deck is a row, so what came after closes the gap rather than leaving a
   // hole in the middle of it.
   for (Slide& slide : slides_) {
-    if (slide.centre.y > gone.centre.y) slide.centre.y -= shift;
+    if (slide.centre.x > gone.centre.x) slide.centre.x -= shift;
   }
-  if (buttonPos_.y > gone.centre.y) {
-    buttonPos_.y -= shift;
+  if (buttonPos_.x > gone.centre.x) {
+    buttonPos_.x -= shift;
     // A glide still running would put the button straight back where it was.
     buttonMoving_ = false;
   }
   hoverSlide_ = -1;
+}
+
+std::vector<int> SlidePanel::Order() const {
+  // Where they sit *is* the order: a deck reads left to right, and nothing
+  // records a sequence apart from the arrangement you can see.
+  std::vector<int> order(slides_.size());
+  for (std::size_t i = 0; i < order.size(); ++i) order[i] = static_cast<int>(i);
+  std::sort(order.begin(), order.end(), [this](int a, int b) {
+    const Vector2 left = slides_[static_cast<std::size_t>(a)].centre;
+    const Vector2 right = slides_[static_cast<std::size_t>(b)].centre;
+    if (left.x != right.x) return left.x < right.x;
+    return left.y < right.y;
+  });
+  return order;
+}
+
+Vector2 SlidePanel::NextCentre(float aspect) const {
+  // The very first slide is made where the button is. After that one goes at
+  // the end of the deck, clear of the last slide with a gap between them --
+  // never on top of it, which is what a button standing beside a slide rather
+  // than in the middle of the next one has to be careful about.
+  if (slides_.empty()) return buttonPos_;
+  const Slide&    last = slides_[static_cast<std::size_t>(Order().back())];
+  const Rectangle bounds = Bounds(last, aspect);
+  return {bounds.x + bounds.width + kSlideGap + bounds.width * 0.5f, last.centre.y};
+}
+
+Vector2 SlidePanel::ButtonHome(float aspect) const {
+  if (slides_.empty()) return DefaultButtonPosition();
+  const Slide&    last = slides_[static_cast<std::size_t>(Order().back())];
+  const Rectangle bounds = Bounds(last, aspect);
+  // In the gap just past the last slide: at the end of the deck, rather than
+  // out in the middle of where the next slide is going to be.
+  return {bounds.x + bounds.width + kSlideGap + kButtonWidth * 0.5f, last.centre.y};
+}
+
+int SlidePanel::SlideAtCamera(const Viewport& camera, float aspect) const {
+  const Vector2 at = camera.Centre();
+  for (std::size_t i = 0; i < slides_.size(); ++i) {
+    const Rectangle bounds = Bounds(slides_[i], aspect);
+    if (std::abs(at.x - slides_[i].centre.x) > bounds.width * 0.02f) continue;
+    if (std::abs(at.y - slides_[i].centre.y) > bounds.height * 0.02f) continue;
+    const float want = ZoomToFill(slides_[i], aspect);
+    if (std::abs(camera.Zoom() / want - 1.0f) > 0.02f) continue;
+    return static_cast<int>(i);
+  }
+  return -1;
+}
+
+bool SlidePanel::Step(int direction, Viewport* camera, float aspect) const {
+  if (camera == nullptr || slides_.empty()) return false;
+  const int at = SlideAtCamera(*camera, aspect);
+  if (at < 0) return false;   // not on a slide: the arrows are not ours
+
+  const std::vector<int> order = Order();
+  int place = 0;
+  while (place < static_cast<int>(order.size()) && order[static_cast<std::size_t>(place)] != at) {
+    ++place;
+  }
+  const int next = place + (direction < 0 ? -1 : 1);
+  if (next < 0 || next >= static_cast<int>(order.size())) return false;
+
+  const Slide& slide = slides_[static_cast<std::size_t>(order[static_cast<std::size_t>(next)])];
+  // Put there, not carried there. Going through a deck one slide at a time is
+  // not a journey, and easing into each one would make it into several.
+  camera->Reset(slide.centre, ZoomToFill(slide, aspect));
+  return true;
 }
 
 float SlidePanel::TextEm() { return kTextEm; }
@@ -164,10 +231,11 @@ bool SlidePanel::HandleInput(const Viewport& viewport, FontStore& fonts, float a
   const Rectangle button = ButtonRect(viewport);
   if (CheckCollisionPointRec(pointer, button)) {
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !buttonMoving_) {
-      // The slide is left where the button was; the button goes on below it, so
-      // the next one lands under this one and the deck reads downwards.
+      // The slide goes at the end of the deck, clear of the last one; the
+      // button then walks along past it, so the next click lands the next slide
+      // further right again and the deck reads left to right.
       Slide slide;
-      slide.centre = buttonPos_;
+      slide.centre = NextCentre(aspect);
       slides_.push_back(slide);
       // The title and the body are windows like any other, and windows belong
       // to the canvas rather than to this panel. So it says a slide has
@@ -175,7 +243,7 @@ bool SlidePanel::HandleInput(const Viewport& viewport, FontStore& fonts, float a
       pending_ = {true, slide.centre};
 
       buttonFrom_ = buttonPos_;
-      buttonTo_ = {buttonPos_.x, buttonPos_.y + kSlideHeight + kSlideGap};
+      buttonTo_ = ButtonHome(aspect);
       buttonElapsed_ = 0.0f;
       buttonMoving_ = true;
 

@@ -19,8 +19,11 @@ class Viewport {
 
   // `interactive` is false while a modal (the options menu) has input.
   // `pointerFree` is false when a window under the pointer has claimed it: the
-  // canvas then keeps the right-button pan but gives up the wheel and touch.
-  void Update(bool interactive, bool pointerFree);
+  // canvas then gives up the wheel and touch.
+  // `panFree` is false while a window is using the right button for a scroll of
+  // its own -- a number line's, so far. The canvas pans on the right button
+  // wherever the pointer is, so the one window that wants it has to say so.
+  void Update(bool interactive, bool pointerFree, bool panFree = true);
 
   // Glides to a view rather than jumping to it -- eased in and out, and with
   // the zoom moving geometrically, since doubling and halving are what a zoom
@@ -43,7 +46,7 @@ class Viewport {
   void PanByScreenDelta(Vector2 delta);
   void ZoomAbout(Vector2 screenAnchor, float factor);
   void UpdateTouch();
-  void UpdateMouse(bool wheelToCanvas);
+  void UpdateMouse(bool wheelToCanvas, bool panToCanvas);
 
   Vector2 target_{0.0f, 0.0f};  // world point sitting at the screen centre
   float   zoom_ = 1.0f;

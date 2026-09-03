@@ -22,6 +22,18 @@ so it does not need ninja or `mingw32-make`. Assets are copied next to the
 executable after each build; the binary also falls back to the source tree, so
 it runs from anywhere.
 
+There is a canvas that demonstrates the lot -- reals and their knobs, functions
+and their plots, a shader, an algebra, prose, a picture and a video, laid out as
+a deck of six slides:
+
+```sh
+./build/sketchbook.exe --open C:/sketches/demo/demo.sketch
+```
+
+Click a slide's rim to go to it, then use the left and right arrow keys to go
+through the deck. `demo.sketch` names its picture and its video by absolute
+path, so keep the three files in the same folder or edit the two `media` lines.
+
 ## Using it
 
 | Input | Action |
@@ -39,6 +51,8 @@ it runs from anywhere.
 | `Ctrl`+`left`/`right` | Move the caret by word |
 | `Ctrl`+`S` / `Ctrl`+`O` | Save (back to the same file) / open a canvas |
 | Drag a number-line handle | Choose that variable's value |
+| Press a number line off its markers | Make a variable there and drag it |
+| Right-drag a number line | Scroll that axis |
 | Drag across a box's text | Highlight it |
 | `Shift`+arrows, `Shift`+`Home`/`End` | Extend the highlight |
 | Drag selected text out of the box | That variable gets an axis of its own |
@@ -51,6 +65,7 @@ it runs from anywhere.
 | Drag a rim | Move that window; drop it on another of its kind to merge them |
 | Drag a window onto the cross | Close it |
 | Click a slide's rim | Glide the camera onto that slide |
+| `left`/`right` on a slide | Flick to the previous/next slide |
 | Hover a slide's rim | A *delete slide* button appears in its corner |
 | Drag the background | Lasso a selection |
 | Left-click anywhere | Put the selection down |
@@ -64,11 +79,13 @@ Editing keys are the usual ones: arrows, `Home`, `End`, `Backspace`, `Delete`,
 (four spaces). A press that moves more than a few pixels is a drag rather than a
 click, so it does not move the caret.
 
-The **right button pans** and nothing on the canvas uses it, so a pan works
-wherever the pointer is — including over a window that has claimed the wheel for
-its own scale. The left button belongs to the contents of the canvas: clicking
-places the caret, dragging a rim moves a window, dragging a handle chooses a
-value. A box left completely empty is discarded when you click away.
+The **right button pans**, and it does so wherever the pointer is — including
+over a window that has claimed the wheel for its own scale. The left button
+belongs to the contents of the canvas: clicking places the caret, dragging a rim
+moves a window, dragging a handle chooses a value, pressing a number line puts a
+new value there. That last one is why a number line is the one window that takes
+the right button too, to scroll its own scale: its left button is entirely
+spoken for. A box left completely empty is discarded when you click away.
 
 Every window on the canvas -- code boxes, number lines, plots and pictures alike
 -- is moved by the **rim** around its edge, which appears when you hover there.
@@ -110,8 +127,19 @@ variable's marker takes away the view and nothing else. Editing the literal back
 out brings the knob back: a free variable always has somewhere to be moved
 from.
 
-Every window's top-left corner **snaps to the nearest grid dot** -- to the grid
-as drawn, so placement gets finer as you zoom in. Boxes additionally **never
+The **grid only appears while it is being used** — while a window is being
+carried or resized, and while the canvas is zoomed, since zoom is what decides
+how fine the lattice is. It fades in, lingers half a second, and fades out
+again, so reading a canvas means looking at a bare one.
+
+There is **one dot per line of type** -- the spacing is the height of a line at
+the default size, measured from the font -- so the grid is ruled paper and a box
+put down has its lines in the gaps between rows of dots. What lands on a dot is
+the box's first character rather than its corner, since the padding between them
+is not a whole number of anything.
+
+Every window **snaps to the nearest grid dot** -- to the grid as drawn, so
+placement gets finer as you zoom in. Boxes additionally **never
 overlap**: a box put down on top of another steps clear of it along whichever
 edge is nearest, a whole dot at a time. The number lines and plots docked under
 a box count as part of it, since they travel with it. Dragging, typing a new box
@@ -155,24 +183,68 @@ to the current number would make the box breathe as you drag.
 
 Every variable has a **colour of its own**, from viridis, and everything that
 stands for it wears it: its handle on a number line, its curve on a plot, its
-name written beside either. Hover or grab one of those windows and the variable's
-name lights up in the box it came from, in that variable's colour, wherever it is
-written -- in the LaTeX or in the code, whichever that line is showing, and on
-every line that mentions it -- with a curve of the same colour running from the
+name written beside either.
+
+What lights up under the pointer is **the one thing it is on**: on a number line,
+the marker nearest it. A derived marker lights up too — being read-only means a
+press will not move it, not that pointing at it says nothing. What a press would
+*take hold of* is a separate question, answered by the nearest **free** marker.
+Nothing lights over the bare axis, where a press makes a new value instead.
+Carrying a row by its rim lights all of it, since that is what you are holding;
+a plot has nothing finer than the window itself, so hovering one lights every
+curve.
+
+It works from the other end too: **highlight a mention** of a variable in the
+text and the same things light up — the name wherever else it is written, the
+wires, and the viz blinking at the far end.
+
+Whichever it is, the variable's name lights up in the box it came from, in that
+variable's colour, wherever it is written -- in the LaTeX or in the code,
+whichever that line is showing, and on every line that mentions it -- with a
+curve of the same colour running from the
 **value itself** to each one: from that variable's handle on the number line,
 not from your pointer. The handle is the variable; the pointer is only where
 your hand is.
 
+A name written more than once gets **one cable, not several**. The strands
+gather at a junction just outside the card, level with the middle of the
+mentions, and a single wire runs from there to the window — because however many
+times it is written, it is one variable, and that is the whole claim the wire is
+making.
+
 Hovering a **shader's picture** lights up `fragTexCoord`, because that is what
 the pointer is: the point the shader is being evaluated at, and the point its
-number lines are read from. Colour says *which*
-variable; shape says whether it is yours to move.
+number lines are read from. Colour says *which* variable; shape says whether it
+is yours to move; and a **blink** — white, twice a second — says which one is in
+use right now.
 
 A box then gets **one number line** docked under it, carrying all of its reals
 on one scale: free variables get a handle you can drag, derived ones a marker
 that follows. The axis frames itself the first time everything on it has a
 value, so all of them are in view — a stack of one-value axes would say nothing
 about how they compare.
+
+A variable is mutable unless it is `const`, so a window has to say *when*. With
+no caret in the box it shows the value **at the end of the block**, which is
+where every value is printed. Put the caret in the box and only the variables
+written on that line keep their windows — or every variable the highlight
+touches, if there is one; the rest of that box's windows stand down, since the
+number they would be showing belongs to a line you are not looking at. They keep
+their place rather than closing the gap, so nothing shuffles as the caret moves.
+A shader's picture stays either way: it stands for the box, not for a variable.
+
+To make a new variable, **press the axis where you want it**: anywhere on a
+number line but on one of its markers. The box that axis belongs to blinks a
+caret where the declaration will go — even when it is reading as mathematics,
+since what is being pointed at is a line rather than a place between two letters
+— and the press writes `float d;` there, with its knob already at the point you
+pressed. It goes on the line the caret was last left on, or the end of the box,
+and a blank line is written on rather than pushed down.
+
+The press then **carries straight on into dragging it**, exactly as if the
+marker had been there all along and you had grabbed it — which is why the
+variable is declared free rather than written down as a number. Scroll the axis
+on the **right button**, since the left one is now busy everywhere along it.
 
 To give a variable an axis of its own, **pull it out of the code**: select any
 part of any mention of it and drag it out of the box. It comes away carrying
@@ -184,18 +256,71 @@ them together is the whole point of the gesture. The two need not come from the
 same box: an axis belongs to the canvas. Each axis zooms and pans on its own
 wheel, independently of the canvas.
 
+## Display windows and vizes
+
+The number line and the plot are **display windows** -- *dws*. A dw knows about
+scales, panning, zooming, merging and being carried; it knows nothing about what
+a real or a function looks like. What a value *looks* like is a **viz**:
+`RealViz` is the marker on a number line, `RealFunctionViz` is the curve on a
+plot.
+
+A shader box's **picture is a viz too** — a full-screen quad for its mesh, with
+all the work in a fragment shader. Saying so is what makes the shape general.
+
+A viz answers four questions -- its **mesh**, where each vertex is **placed**,
+how near the pointer counts as being on it, and what a drag means -- and the
+first two can be written on the canvas itself. A box whose first line is
+`Viz(float);` says how that type is drawn rather than declaring a value. Two
+boxes per viz, paired by the type they name, and which is which needs no new
+rule: a box is C++ first and GLSL if C++ refuses it.
+
+```
+Viz(float);                                Viz(RealFunction);
+for (int i = 0; i < 20; ++i) {             float px = value(-8.0f), py = -8.0f;
+  float s = 6.2832f * i / 20.0f;           for (int i = 1; i < 129; ++i) {
+  float e = 6.2832f * (i + 1) / 20.0f;       float y = -8.0f + 16.0f*i/128.0f;
+  vertex(7 * cos(s), 7 * sin(s));            float x = value(y);
+  ...                                        line(px, py, x, y);
+}                                            px = x; py = y;
+                                           }
+```
+
+The **C++ half turns a value into geometry**, with `vertex(x, y)` for triangles
+and `line(ax, ay, bx, by)` for a path — and it runs *inside the program that has
+the value*, because a `std::function` cannot leave the process that made it. So
+sampling and building the mesh are the same editable snippet, and they cost
+nothing: that program was going to run anyway, and the vertices ride back with
+the values.
+
+The **GLSL half places it** — the vertex shader, handed `p` in the viz's own
+units and expected to leave it in screen pixels. It gets `value`, `sbArea`,
+`sbView`, `sbScale` and `sbMap`, which takes value space to screen. That makes
+the placing half one line: `p = sbMap(vec2(value, 0.0)) + p * sbScale;` for a
+marker, `p = sbMap(p);` for a curve.
+
+A viz box *starts* as code rather than as mathematics, since there is no equation
+reading of a mesh — but the math/code toggle is there as on every code box, and
+only a `\text` box lacks it.
+
+Open `C:\sketches\viz.sketch` and change a number in any of the four boxes. A
+type with no viz boxes keeps the drawing the app was born with, so nothing has to
+be authored for a canvas to work.
+
 ## Slides
 
 A slide is a **region of the canvas with a permanent rim** round it, not a
 separate document. Click the **New slide** button (on the canvas, just left of
-where the camera opens) and a slide appears where the button was, with a title
-and some body text; the camera glides to frame it, and the button glides down
-below it, so clicking again puts the next slide underneath and a deck grows as a
-column.
+where the camera opens) and a slide appears with a title and some body text; the
+camera glides to frame it, and the button walks along to sit in the gap just
+past it. Clicking again puts the next slide beyond that one, clear of it with
+the same gap between them — so a deck grows **left to right**, and the button is
+always at the end of it rather than out in the middle of where the next slide
+will be.
 
 Click a slide's rim and the camera glides until that slide fills the window --
-presenting is navigating. Its inside is left alone, so everything on a slide
-stays usable. The deck's shape is set in the Escape menu: 3:2, 16:9, 4:3 or
+presenting is navigating. Once it is framing one, **left and right flick through
+the deck**, instantly; which slide follows which is decided by nothing but where
+they sit. A slide's inside is left alone, so everything on one stays usable. The deck's shape is set in the Escape menu: 3:2, 16:9, 4:3 or
 1:1. It starts at **3:2**, which is also the shape the app window opens at, so a
 slide seen at its own scale is exactly a screenful.
 
@@ -207,8 +332,9 @@ the camera there.
 
 Point at a slide's rim and a **delete slide** button appears in its bottom-right
 corner. Click it and the slide goes, taking everything whose middle is on it --
-the same test the lasso uses. The deck then closes the gap: every slide below
-comes up by one slide, with its contents and with the **New slide** button.
+the same test the lasso uses. The deck then closes the gap: every slide to the
+right comes back by one slide, with its contents and with the **New slide**
+button.
 
 ## Words, pictures and video
 

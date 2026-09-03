@@ -35,12 +35,13 @@ enum class Kind {
   Declaration,  // `float a;` or `float c = <expr>;`
   Assignment,   // `c = <expr>;`
   Algebra,      // `Algebra(3,0,1);` -- which algebra the box works in
+  Viz,          // `Viz(Real);` -- this box draws that type, rather than using it
 };
 
 struct Line {
   Kind        kind = Kind::Blank;
   std::string type;            // "float" / "double", for declarations
-  std::string name;            // the variable declared or assigned
+  std::string name;            // the variable declared or assigned; the type a Viz draws
   bool        hasInitialiser = false;
   std::string latex;           // empty unless there is a reading
 

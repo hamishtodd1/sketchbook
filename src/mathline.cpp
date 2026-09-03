@@ -511,6 +511,33 @@ bool MatchLambda(const std::vector<Token>& tokens, std::size_t index, std::strin
   return tokens[index].kind == Tok::End;
 }
 
+// `Viz(Real);` -- the line that says this box draws that type rather than using
+// one. Hand-parsed, like `Algebra(...)`, because it is a statement about the box
+// and never reaches a compiler.
+bool ParseVizSigil(std::string_view line, std::string* type) {
+  std::size_t at = line.find_first_not_of(" 	");
+  if (at == std::string_view::npos) return false;
+  if (line.compare(at, 4, "Viz(") != 0) return false;
+  at += 4;
+
+  const std::size_t begin = at;
+  while (at < line.size() && (IsIdentPart(line[at]) || (at == begin && IsIdentStart(line[at])))) {
+    ++at;
+  }
+  if (at == begin) return false;
+  const std::string_view name = line.substr(begin, at - begin);
+
+  while (at < line.size() && line[at] == ' ') ++at;
+  if (at >= line.size() || line[at] != ')') return false;
+  ++at;
+  while (at < line.size() && line[at] == ' ') ++at;
+  if (at < line.size() && line[at] == ';') ++at;
+  if (line.find_first_not_of(" 	", at) != std::string_view::npos) return false;
+
+  if (type != nullptr) *type = std::string(name);
+  return true;
+}
+
 }  // namespace
 
 bool IsRealType(std::string_view type) { return type == "float" || type == "double"; }
@@ -558,6 +585,15 @@ Line Parse(std::string_view source, const clifford::Signature& sig) {
 
   line.kind = Kind::Unparsed;
   if (!tokenizeOk) return line;
+
+  // Saying what this box draws is a statement *about* the box rather than one
+  // in it, exactly as choosing the algebra is.
+  if (std::string drawn; ParseVizSigil(source, &drawn)) {
+    line.kind = Kind::Viz;
+    line.name = std::move(drawn);
+    line.latex = "\\mathrm{viz}\\;" + NameToLatex(line.name);
+    return line;
+  }
 
   // Choosing the algebra is a statement of mathematics, not a statement in the
   // program: it names the setting everything after it is written in.

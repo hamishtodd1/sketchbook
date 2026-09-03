@@ -22,6 +22,11 @@ constexpr float kRowGap = 12.0f;
 constexpr float kFloatWidth = 340.0f;
 // Keeps handles clear of the rim band, so grabbing a value never moves the row.
 constexpr float kInset = 20.0f;
+// How near a marker counts as being on it. It decides two things at once: which
+// handle a press grabs, and whether the axis is bare enough here to be offering
+// a new value -- which had better be the same distance, or a press could grab
+// one thing while the pointer was promising another.
+constexpr float kGrabRadius = 18.0f;
 constexpr float kLabelEm = 17.0f;
 constexpr float kTickEm = 12.0f;
 
@@ -81,6 +86,22 @@ const mathprogram::Variable* AxisPanel::Resolve(const AxisRef& ref) const {
   return ref.block->FindVariable(ref.name);
 }
 
+bool AxisPanel::Shown(const AxisRef& ref) {
+  return ref.block == nullptr || ref.block->InScope(ref.name);
+}
+
+bool AxisPanel::Shown(const NumberLine& line) {
+  for (const AxisRef& ref : line.refs) {
+    if (Shown(ref)) return true;
+  }
+  return false;
+}
+
+CodeBlock* AxisPanel::Owner(const NumberLine& line) const {
+  if (line.dock != nullptr) return line.dock;
+  return line.refs.empty() ? nullptr : line.refs.front().block;
+}
+
 void AxisPanel::Reframe(NumberLine& line) const {
   bool  any = false;
   float low = 0.0f;
@@ -116,8 +137,10 @@ void AxisPanel::Forget(const CodeBlock* block) {
                               [](const NumberLine& line) { return line.refs.empty(); }),
                lines_.end());
   drag_ = Drag::None;
-  // The handle being dragged named a box that may be the one going away.
+  // The handle being dragged named a box that may be the one going away, and so
+  // may the value a click was waiting on.
   dragRef_ = {};
+  if (pending_.made.block == block || pending_.anchor.block == block) pending_ = {};
 }
 
 bool AxisPanel::Sync(const Blocks& blocks) {
@@ -161,10 +184,32 @@ bool AxisPanel::Sync(const Blocks& blocks) {
       // own. The values in a box are read together, so they belong on one
       // scale; a variable that wants its own axis is pulled out onto the canvas.
       NumberLine* home = nullptr;
-      for (NumberLine& line : lines_) {
-        if (line.docked && line.dock == block.get()) {
-          home = &line;
-          break;
+      bool        placed = false;
+
+      // Unless it was made by clicking an axis, in which case it belongs on the
+      // axis it was put on, at the scale it was put at -- it is already in view
+      // by construction, and reframing would move everything else to make room
+      // for a value that needed none.
+      if (pending_.live && pending_.made.block == block.get() &&
+          pending_.made.name == variable.name) {
+        for (NumberLine& line : lines_) {
+          for (const AxisRef& ref : line.refs) {
+            if (ref.block != pending_.anchor.block || ref.name != pending_.anchor.name) continue;
+            home = &line;
+            placed = true;
+            break;
+          }
+          if (home != nullptr) break;
+        }
+        pending_.live = false;
+      }
+
+      if (home == nullptr) {
+        for (NumberLine& line : lines_) {
+          if (line.docked && line.dock == block.get()) {
+            home = &line;
+            break;
+          }
         }
       }
       if (home == nullptr) {
@@ -176,7 +221,7 @@ bool AxisPanel::Sync(const Blocks& blocks) {
         home = &lines_.back();
       }
       home->refs.push_back({block.get(), variable.name});
-      home->framed = false;
+      if (!placed) home->framed = false;
     }
   }
 
@@ -363,6 +408,7 @@ void AxisPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
   }
   if (drag_ != Drag::None && dragLine_ < lines_.size()) {
     for (const AxisRef& ref : lines_[dragLine_].refs) {
+      if (!Shown(ref)) continue;
       out->push_back({ref.block, ref.name, MarkerAt(dragLine_, ref, viewport, fonts)});
     }
     return;
@@ -370,10 +416,14 @@ void AxisPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
 
   const Vector2 pointer = GetMousePosition();
   for (std::size_t i = 0; i < lines_.size(); ++i) {
+    if (!Shown(lines_[i])) continue;
     const Rectangle row = RectFor(i, viewport, fonts);
     if (!CheckCollisionPointRec(pointer, row) && !PointOnRim(row, pointer)) continue;
-    for (const AxisRef& ref : lines_[i].refs) {
-      out->push_back({ref.block, ref.name, MarkerAt(i, ref, viewport, fonts)});
+    // The marker the pointer is on -- free or derived. A press only takes hold
+    // of a free one, but pointing at a derived value still has something to
+    // say: which thing in the code it is, and where that is written.
+    if (const AxisRef* at = MarkerNear(i, pointer, viewport, fonts); at != nullptr) {
+      out->push_back({at->block, at->name, MarkerAt(i, *at, viewport, fonts)});
     }
     return;
   }
@@ -402,6 +452,129 @@ Rectangle AxisPanel::DockedBounds(const CodeBlock* block, const Viewport& viewpo
     bounds.height = bottom - bounds.y;
   }
   return bounds;
+}
+
+bool AxisPanel::OverMarker(std::size_t index, Vector2 pointer, const Viewport& viewport,
+                           FontStore& fonts) const {
+  const Rectangle   row = RectFor(index, viewport, fonts);
+  const Rectangle   area = AxisArea(row);
+  const float       scale = row.height / kRowHeight;
+  const NumberLine& line = lines_[index];
+  for (const AxisRef& ref : line.refs) {
+    const mathprogram::Variable* variable = Resolve(ref);
+    if (variable == nullptr || !Shown(ref)) continue;
+    const float x = area.x + area.width * (0.5f + (variable->value - line.centre) / line.span);
+    // Clamped the way the marker itself is, so one pointing in off the end is
+    // still something the pointer can be over.
+    const float at = std::clamp(x, area.x, area.x + area.width);
+    if (std::abs(pointer.x - at) < kGrabRadius * scale) return true;
+  }
+  return false;
+}
+
+// One search, asked two ways: `freeOnly` is the difference between "what would
+// a press take hold of" and "what is the pointer on".
+static const AxisRef* NearestOn(const NumberLine& line, Rectangle area, float scale,
+                                float pointerX, bool freeOnly,
+                                const AxisPanel& panel);
+
+const AxisRef* AxisPanel::MarkerNear(std::size_t index, Vector2 pointer,
+                                     const Viewport& viewport, FontStore& fonts) const {
+  if (index >= lines_.size()) return nullptr;
+  const Rectangle row = RectFor(index, viewport, fonts);
+  if (!CheckCollisionPointRec(pointer, row) && !PointOnRim(row, pointer)) return nullptr;
+  return NearestOn(lines_[index], AxisArea(row), row.height / kRowHeight, pointer.x,
+                   /*freeOnly=*/false, *this);
+}
+
+bool AxisPanel::MarkerFor(const CodeBlock* block, const std::string& name,
+                          const Viewport& viewport, FontStore& fonts, Vector2* out) const {
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    if (!Shown(lines_[i])) continue;
+    for (const AxisRef& ref : lines_[i].refs) {
+      if (ref.block != block || ref.name != name || !Shown(ref)) continue;
+      if (out != nullptr) *out = MarkerAt(i, ref, viewport, fonts);
+      return true;
+    }
+  }
+  return false;
+}
+
+const AxisRef* AxisPanel::GrabbableAt(std::size_t index, Vector2 pointer,
+                                      const Viewport& viewport, FontStore& fonts) const {
+  if (index >= lines_.size()) return nullptr;
+  const NumberLine& line = lines_[index];
+  const Rectangle   row = RectFor(index, viewport, fonts);
+  // The rim is included: a handle within reach wins over it, so that grabbing a
+  // value never moves the row by accident.
+  if (!CheckCollisionPointRec(pointer, row) && !PointOnRim(row, pointer)) return nullptr;
+
+  return NearestOn(line, AxisArea(row), row.height / kRowHeight, pointer.x, /*freeOnly=*/true,
+                   *this);
+}
+
+static const AxisRef* NearestOn(const NumberLine& line, Rectangle area, float scale,
+                                float pointerX, bool freeOnly, const AxisPanel& panel) {
+  float          nearest = kGrabRadius * scale;
+  const AxisRef* found = nullptr;
+  for (const AxisRef& ref : line.refs) {
+    const mathprogram::Variable* variable = panel.Value(ref);
+    // A derived marker is read-only, so there is nothing there to take hold of
+    // -- but there is still something there to point at.
+    if (variable == nullptr || !AxisPanel::Shown(ref)) continue;
+    if (freeOnly && !variable->free) continue;
+    const float x = area.x + area.width * (0.5f + (variable->value - line.centre) / line.span);
+    const float distance = std::abs(pointerX - x);
+    if (distance < nearest) {
+      nearest = distance;
+      found = &ref;
+    }
+  }
+  return found;
+}
+
+std::size_t AxisPanel::OfferedRow(Vector2 pointer, const Viewport& viewport,
+                                  FontStore& fonts) const {
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    if (!Shown(lines_[i])) continue;
+    const Rectangle row = RectFor(i, viewport, fonts);
+    // The rim carries the row, so it is not offering anything.
+    if (PointOnRim(row, pointer)) return kNoRow;
+    if (!CheckCollisionPointRec(pointer, row)) continue;
+    return OverMarker(i, pointer, viewport, fonts) ? kNoRow : i;
+  }
+  return kNoRow;
+}
+
+CodeBlock* AxisPanel::InsertTarget(const Viewport& viewport, FontStore& fonts) const {
+  if (drag_ != Drag::None) return nullptr;
+  const std::size_t index = OfferedRow(GetMousePosition(), viewport, fonts);
+  return index == kNoRow ? nullptr : Owner(lines_[index]);
+}
+
+std::string AxisPanel::MakeVariable(std::size_t index, Vector2 pointer, const Viewport& viewport,
+                                    FontStore& fonts) {
+  if (index >= lines_.size()) return {};
+  NumberLine& line = lines_[index];
+  CodeBlock*  block = Owner(line);
+  if (block == nullptr || line.refs.empty()) return {};
+
+  const Rectangle area = AxisArea(RectFor(index, viewport, fonts));
+  const float value = line.centre + line.span * ((pointer.x - area.x) / area.width - 0.5f);
+
+  // Declared, not fixed. A value you have just put down is one you will want to
+  // move, and only a *free* variable has a handle to move it by -- a literal in
+  // the source could only be dragged by rebuilding the box every frame. So the
+  // number goes where every free variable's value goes, into the knob; the
+  // source says `float d;` and closing the axis is what would write it down.
+  const std::string name = block->FreshName();
+  block->InsertDeclaration("float " + name + ";");
+  // The rebuild is assembled there and then, so the variable exists from this
+  // moment even though nothing has run yet: its marker is on the axis before
+  // the pointer has moved, and the drag below has something to hold.
+  block->SetVariableValue(name, value);
+  pending_ = {{block, name}, line.refs.front(), true};
+  return name;
 }
 
 Rectangle AxisPanel::AxisArea(Rectangle row) {
@@ -447,7 +620,11 @@ bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Bl
         break;
     }
 
-    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+    // Scrolling is the right button's; everything else is the left's. Asking
+    // whether the button is still down rather than for the release itself, so a
+    // release lost to another window cannot leave a row stuck to the cursor.
+    const int button = (drag_ == Drag::Pan) ? MOUSE_BUTTON_RIGHT : MOUSE_BUTTON_LEFT;
+    if (!IsMouseButtonDown(button)) {
       if (drag_ == Drag::Move && dragMoved_) {
         bool merged = false;
         // Dropped on another line? Then they share an axis from now on. This
@@ -496,6 +673,7 @@ bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Bl
   // ---- start a new interaction --------------------------------------------
   for (std::size_t i = 0; i < lines_.size(); ++i) {
     NumberLine& line = lines_[i];
+    if (!Shown(line)) continue;
     const Rectangle row = RectFor(i, viewport, fonts);
     const bool onRim = PointOnRim(row, pointer);
     if (!CheckCollisionPointRec(pointer, row) && !onRim) continue;
@@ -511,24 +689,21 @@ bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Bl
       return true;
     }
 
+    // The right button scrolls the scale, the way it moves the canvas
+    // everywhere else. It is the one thing on the canvas that takes it, which
+    // is why the canvas has to be told.
+    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+      drag_ = Drag::Pan;
+      dragLine_ = i;
+      dragMoved_ = false;
+      return true;
+    }
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return true;  // hovering claims it
 
-    const Rectangle area = AxisArea(row);
-    const float scale = row.height / kRowHeight;
-
-    // A handle within grabbing distance wins over both the rim and panning.
-    float bestDistance = 18.0f * scale;
-    const AxisRef* best = nullptr;
-    for (const AxisRef& ref : line.refs) {
-      const mathprogram::Variable* variable = Resolve(ref);
-      if (variable == nullptr || !variable->free) continue;
-      const float x = area.x + area.width * (0.5f + (variable->value - line.centre) / line.span);
-      const float distance = std::abs(pointer.x - x);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        best = &ref;
-      }
-    }
+    // A handle within grabbing distance wins over both the rim and the scroll --
+    // and it is the same question the pointer was already answering by blinking
+    // that handle, so the press keeps the promise the hover made.
+    const AxisRef* best = GrabbableAt(i, pointer, viewport, fonts);
     if (best != nullptr) {
       drag_ = Drag::Handle;
       dragLine_ = i;
@@ -546,9 +721,16 @@ bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Bl
       return true;
     }
 
-    drag_ = Drag::Pan;
-    dragLine_ = i;
-    dragMoved_ = false;
+    // Anywhere else on the axis: a new value, put exactly where you put it.
+    // The drag that made it goes straight on into holding it, so making a
+    // marker and moving one are one gesture rather than two.
+    const std::string made = MakeVariable(i, pointer, viewport, fonts);
+    if (!made.empty()) {
+      drag_ = Drag::Handle;
+      dragLine_ = i;
+      dragRef_ = {Owner(lines_[i]), made};
+      dragMoved_ = false;
+    }
     return true;
   }
 
@@ -556,9 +738,32 @@ bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Bl
   return false;
 }
 
-void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
+void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts,
+                     const VizStore* vizes) const {
   const float zoom = viewport.Zoom();
   if (zoom < 0.02f) return;
+
+  // The row offering to take a value, if any. The box being pointed into shows
+  // *where* the declaration would land; this shows *what* value it would have.
+  const Vector2     pointer = GetMousePosition();
+  const std::size_t offered =
+      drag_ == Drag::None ? OfferedRow(pointer, viewport, fonts) : kNoRow;
+
+  // Which values are in use this frame -- the same set that lights up its name
+  // in the code and gets a wire. Those are the markers that blink, so the three
+  // things saying "this one" all say it about the same one.
+  // A real's viz, if the canvas has one written on it. `float` is the name the
+  // user writes, so it is the name a viz box has to claim.
+  const Viz* realViz = (vizes == nullptr) ? nullptr : vizes->Find("float");
+
+  std::vector<ActiveValue> active;
+  ActiveVariables(viewport, fonts, &active);
+  const auto inUse = [&active](const AxisRef& ref) {
+    for (const ActiveValue& value : active) {
+      if (value.block == ref.block && value.name == ref.name) return true;
+    }
+    return false;
+  };
 
   for (std::size_t i = 0; i < lines_.size(); ++i) {
     const NumberLine& line = lines_[i];
@@ -567,6 +772,8 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     // canvas until you pull off it.
     if (carried && OverDropTarget(GetMousePosition())) continue;
     if (line.docked && line.dock != nullptr && line.dock->Absorbed()) continue;
+    // Nothing on it is being talked about, so there is nothing for it to say.
+    if (!Shown(line)) continue;
 
     const Rectangle row = RectFor(i, viewport, fonts);
     const Rectangle area = AxisArea(row);
@@ -603,18 +810,25 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
       }
     }
 
+    if (offered == i) {
+      const float x = std::clamp(pointer.x, area.x, area.x + area.width);
+      DrawLineEx({x, axisY - 9.0f * scale}, {x, axisY + 9.0f * scale},
+                 std::max(1.0f, 1.5f * scale), Fade(kAccent, 0.55f));
+    }
+
     // One marker per variable sharing this axis.
     for (const AxisRef& ref : line.refs) {
       const mathprogram::Variable* variable = Resolve(ref);
-      if (variable == nullptr) continue;
+      if (variable == nullptr || !Shown(ref)) continue;
 
       const float x = area.x + area.width * (0.5f + (variable->value - line.centre) / line.span);
       const bool offLeft = x < area.x;
       const bool offRight = x > area.x + area.width;
       const float clamped = std::clamp(x, area.x, area.x + area.width);
       // Colour says *which* variable; the shape below says whether it is yours
-      // to drag. They are different questions and want different channels.
-      const Color tint = ref.block->VariableColor(ref.name);
+      // to drag; and a blink says *this one, now*. Three questions, three
+      // channels.
+      const Color tint = Blink(ref.block->VariableColor(ref.name), inUse(ref));
 
       if (offLeft || offRight) {
         // Out of view: point the way rather than pretending it is at the edge.
@@ -622,6 +836,22 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
         DrawTriangle({clamped + direction * 7.0f * scale, axisY},
                      {clamped, axisY - 5.0f * scale},
                      {clamped, axisY + 5.0f * scale}, Fade(tint, 0.55f));
+      } else if (realViz != nullptr && realViz->Ready()) {
+        // The canvas says how a real is drawn, so it is drawn that way. The
+        // geometry is this value's own, laid down by the viz's lines inside the
+        // program that has it; the example mesh stands in until that has run.
+        const std::vector<float>& tris =
+            variable->mesh.empty() && realViz->mesh != nullptr ? *realViz->mesh : variable->mesh;
+        const std::vector<float>& segs = variable->lines.empty() && realViz->lines != nullptr
+                                             ? *realViz->lines
+                                             : variable->lines;
+        // The rectangle's middle is the axis line, so a viz that maps a value
+        // straight through lands on it.
+        const Rectangle box = {area.x, axisY - row.height * 0.5f, area.width, row.height};
+        realViz->Draw(tris, segs, variable->value, box,
+                      {line.centre, 0.0f, line.span, row.height / std::max(area.width, 1.0f) *
+                                                         line.span},
+                      scale, tint);
       } else if (variable->free) {
         DrawCircleV({clamped, axisY}, 7.0f * scale, tint);
         DrawCircleV({clamped, axisY}, 3.0f * scale, kAxisBg);

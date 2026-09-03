@@ -49,6 +49,7 @@ add_executable(sketchbook
   src/process_win32.cpp
   src/ui.cpp
   src/viewport.cpp
+  src/viz.cpp
   src/tex/tex_parse.cpp
   src/tex/tex_layout.cpp
   src/tex/tex_symbols.cpp

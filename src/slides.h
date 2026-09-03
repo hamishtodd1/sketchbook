@@ -9,10 +9,16 @@
 // showed at zoom 1, and the width is that times the aspect the deck is being
 // made for, so a slide viewed at its own scale is exactly a screenful.
 //
-// The **new slide** button sits on the canvas rather than in a toolbar, and
-// clicking it leaves a slide where the button was and drops the button below
-// it. Clicking again does the same, so a deck grows downwards and is somewhere
-// you can scroll through rather than a list beside the work.
+// The **new slide** button sits on the canvas rather than in a toolbar, at the
+// **end of the deck**: right beside the last slide rather than out in the
+// middle of where the next one will go, so it reads as the place the deck
+// stops. Clicking it puts a slide clear of that one, with a gap between them,
+// and walks the button along to the new end. A deck therefore grows **left to
+// right**, and is a row you can scroll along rather than a list beside the
+// work.
+//
+// Which slide follows which is decided by where they sit, left to right --
+// nothing else records an order, and nothing else needs to.
 #pragma once
 
 #include <string>
@@ -45,13 +51,13 @@ struct NewSlide {
 
 // A slide the user asked to throw away. By the time this is reported the panel
 // has already taken the slide out of the deck and closed the gap behind it; the
-// canvas is told which region went, and how far the deck below it came up, so
+// canvas is told which region went, and how far the deck after it came back, so
 // it can do the same to the windows. Same division of labour as NewSlide: the
 // panel knows about slides, the canvas knows about what is on them.
 struct SlideRemoval {
   bool      asked = false;
   Rectangle bounds{};      // world, the slide that went
-  float     shift = 0.0f;  // how far everything below it moved up
+  float     shift = 0.0f;  // how far everything to the right of it moved left
 };
 
 class SlidePanel {
@@ -76,6 +82,14 @@ class SlidePanel {
   // Returns true if it took the pointer.
   bool HandleInput(const Viewport& viewport, FontStore& fonts, float aspect,
                    Viewport* camera);
+
+  // The slide the camera is framing, or -1: the one a click on its rim would
+  // have put it at.
+  int SlideAtCamera(const Viewport& camera, float aspect) const;
+  // Flicks to the slide before or after that one, instantly -- flicking through
+  // a deck is not travelling to it, and a glide per keypress would be seasick.
+  // False if the camera is not on a slide, or there is no next one.
+  bool Step(int direction, Viewport* camera, float aspect) const;
   void Advance(float seconds);
   void Draw(const Viewport& viewport, FontStore& fonts, float aspect) const;
 
@@ -98,10 +112,15 @@ class SlidePanel {
   static Rectangle DeleteButtonRect(Rectangle rim, FontStore& fonts);
   static Rectangle OnScreen(const Slide& slide, const Viewport& viewport, float aspect);
   void      RemoveSlide(int index, float aspect);
+  // The slides in the order they read, which is the order they sit in.
+  std::vector<int> Order() const;
+  // Where the next slide goes, and where the button belongs once it is there.
+  Vector2   NextCentre(float aspect) const;
+  Vector2   ButtonHome(float aspect) const;
 
   std::vector<Slide> slides_;
 
-  // The button, and the glide it is making down past the slide just made.
+  // The button, and the glide it is making along past the slide just made.
   Vector2 buttonPos_ = DefaultButtonPosition();
   Vector2 buttonFrom_{};
   Vector2 buttonTo_{};

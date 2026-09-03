@@ -12,6 +12,7 @@
 #include "resize.h"
 #include "text.h"
 #include "theme.h"
+#include "touch.h"
 
 namespace sb {
 namespace {
@@ -29,7 +30,11 @@ constexpr int kFileVersion = 3;
 bool App::Init(const std::string& assetDir, std::string* error) {
   if (!fonts_.Load(assetDir + "/fonts", error)) return false;
 
-  viewport_.Reset({0.0f, 0.0f}, 1.0f);
+  // One dot to a line of type. The grid is ruled paper rather than an arbitrary
+  // lattice, so it is measured from the font rather than guessed at.
+  SetGridBaseStep(text::LineHeight(fonts_, Face::Mono, kDefaultBlockEm));
+
+  viewport_.Reset({0.0f, 0.0f}, kDefaultZoom);
   // Plots stack under the number lines, so they have to know how tall those are.
   plots_.SetAxes(&axes_);
 
@@ -114,7 +119,14 @@ Rectangle App::Footprint(const CodeBlock* block) {
 
 void App::PlaceBlock(CodeBlock* block, Vector2 desired) {
   if (block == nullptr) return;
-  block->SetWorldPosition(sb::SnapToGrid(desired, viewport_.Zoom()));
+  // What lands on the grid is the text, not the card's corner. There is one dot
+  // per line of type, so a box put down this way has its lines sitting in the
+  // gaps between rows of dots; snapping the corner instead would put them
+  // wherever the padding happened to leave them.
+  const Vector2 pad = block->TextOffset();
+  const Vector2 at =
+      sb::SnapToGrid({desired.x + pad.x, desired.y + pad.y}, viewport_.Zoom());
+  block->SetWorldPosition({at.x - pad.x, at.y - pad.y});
   ResolveOverlaps(block);
 }
 
@@ -273,6 +285,7 @@ CodeBlock* App::NewBlockAtCentre() {
   const Vector2 world = viewport_.ToWorld({centre.x - 120.0f, centre.y - 30.0f});
   codeBlocks_.push_back(
       std::make_unique<CodeBlock>(world, kDefaultBlockEm, std::vector<std::string>{}));
+  codeBlocks_.back()->SetVizSources(&vizes_.Sources());
   CodeBlock* block = codeBlocks_.back().get();
   // The middle of the screen may well be occupied; the new box goes to the
   // nearest free dot instead of opening on top of what is there.
@@ -645,25 +658,25 @@ void App::ThrowAwaySlide(Rectangle bounds, float shift) {
   SelectWithinWorld(bounds);
   DeleteSelection();
 
-  // The deck is a column, so what was below comes up to fill the gap: the
+  // The deck is a row, so what was to the right comes back to fill the gap: the
   // slides have already moved themselves, and this is everything on them.
   if (shift > 0.0f) {
-    constexpr float kFarBelow = 1.0e6f;
+    constexpr float kFarRight = 1.0e6f;
     ClearSelection();
-    SelectWithinWorld({bounds.x, bounds.y + bounds.height, bounds.width, kFarBelow});
+    SelectWithinWorld({bounds.x + bounds.width, bounds.y, kFarRight, bounds.height});
     for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
       if (!block->Selected()) continue;
       const Vector2 at = block->WorldPosition();
-      block->SetWorldPosition({at.x, at.y - shift});
+      block->SetWorldPosition({at.x - shift, at.y});
     }
     axes_.BeginSelectionDrag();
     plots_.BeginSelectionDrag();
     shaders_.BeginSelectionDrag();
     media_.BeginSelectionDrag();
-    axes_.MoveSelection({0.0f, -shift});
-    plots_.MoveSelection({0.0f, -shift});
-    shaders_.MoveSelection({0.0f, -shift});
-    media_.MoveSelection({0.0f, -shift});
+    axes_.MoveSelection({-shift, 0.0f});
+    plots_.MoveSelection({-shift, 0.0f});
+    shaders_.MoveSelection({-shift, 0.0f});
+    media_.MoveSelection({-shift, 0.0f});
   }
   ClearSelection();
   SettleBlocks();
@@ -900,6 +913,15 @@ void App::Update() {
     if (IsKeyPressed(KEY_V)) PasteClipboard();
   }
 
+  // Once the camera is framing a slide, left and right go through the deck --
+  // presenting is navigating, so the keys that turn a page move the camera.
+  // Only while nothing is being typed into, since there the arrows are the
+  // caret's, and only from a slide: elsewhere they mean nothing yet.
+  if (canvasActive && focus_ == nullptr && !ctrl) {
+    if (IsKeyPressed(KEY_RIGHT)) slides_.Step(+1, &viewport_, options_.slideAspect);
+    if (IsKeyPressed(KEY_LEFT)) slides_.Step(-1, &viewport_, options_.slideAspect);
+  }
+
   slides_.Advance(GetFrameTime());
   // A slide that has just appeared gets its title and its body, as two windows
   // of the canvas rather than as text the slide owns.
@@ -915,6 +937,18 @@ void App::Update() {
   // A box that has just gained (or lost) number lines is a different size than
   // it was a frame ago, so this is the moment to check nobody is sitting on
   // anybody. Only on the change: it is far too much work to do every frame.
+  // What the canvas says about how things are drawn. Rebuilt every frame: a
+  // viz is not registered, it is written down somewhere and therefore true, and
+  // the boxes saying so are edited like any others.
+  if (vizes_.Sync(codeBlocks_)) {
+    // What the canvas says about drawing has changed, so every box that has a
+    // value of one of those types is now a different program.
+    for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+      block->SetVizSources(&vizes_.Sources());
+      if (block->VizType().empty()) block->RequestCompile();
+    }
+  }
+
   bool shapesChanged = axes_.Sync(codeBlocks_);
   shapesChanged = plots_.Sync(codeBlocks_) || shapesChanged;
   shapesChanged = shaders_.Sync(codeBlocks_) || shapesChanged;
@@ -929,17 +963,59 @@ void App::Update() {
     plots_.ActiveVariables(viewport_, fonts_, &active);
     shaders_.ActiveVariables(viewport_, fonts_, &active);
   }
+
+  // Taking hold of a name in the text is the same statement as taking hold of
+  // its window, so it lights up the same things: the name wherever else it is
+  // written, the wire, and the viz blinking at the other end. The reverse of
+  // pulling a variable out of the code, and the same gesture -- highlight a
+  // mention -- read from the other side.
+  if (canvasActive && focus_ != nullptr) {
+    for (const std::string& name : focus_->HighlightedVariables()) {
+      Vector2 at{};
+      if (axes_.MarkerFor(focus_, name, viewport_, fonts_, &at) ||
+          plots_.MarkerFor(focus_, name, viewport_, fonts_, &at)) {
+        active.push_back({focus_, name, at});
+      }
+    }
+  }
+  // Pointing at the bare part of a number line is an offer to put a value into
+  // the box that axis belongs to. The box answers by blinking a caret where the
+  // declaration would land, so the click has somewhere visible to be aimed.
+  const CodeBlock* insertInto = canvasActive ? axes_.InsertTarget(viewport_, fonts_) : nullptr;
+
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     std::vector<ActiveValue> mine;
     for (const ActiveValue& value : active) {
       if (value.block == block.get()) mine.push_back(value);
     }
     block->SetHighlights(std::move(mine));
+    block->SetInsertCaret(block.get() == insertInto);
   }
 
   // The canvas pans on the right button wherever the pointer is; the wheel and
   // touch belong to whatever window is under it.
-  viewport_.Update(canvasActive, !consumed);
+  viewport_.Update(canvasActive, !consumed, !axes_.Scrolling());
+
+  // The dots are what a window lands on, so they are only worth drawing while
+  // something is being landed: a window carried, a window resized, or the
+  // canvas zoomed -- zoom because it is what decides how fine the lattice is.
+  // Panning is none of those and leaves the canvas bare, which is how it should
+  // look while you are only reading it.
+  //
+  // A linger afterwards, because a resize is a run of separate wheel clicks and
+  // a grid that came and went between them would be a flicker; and a fade
+  // either way, because the dots appearing is information rather than an event.
+  constexpr double kGridLinger = 0.5;
+  constexpr float  kGridFadeSeconds = 0.16f;
+  const bool carrying = (dragBlock_ != nullptr && dragBlockMoved_) ||
+                        (selectionDrag_ && selectionMoved_) || axes_.Carrying() ||
+                        plots_.Carrying() || shaders_.Carrying() || media_.Carrying();
+  const bool scaling = GetMouseWheelMoveV().y != 0.0f || touch::Count() >= 2;
+  if (canvasActive && (carrying || scaling)) gridUntil_ = GetTime() + kGridLinger;
+  const float wanted = GetTime() < gridUntil_ ? 1.0f : 0.0f;
+  const float rate = std::max(GetFrameTime(), 0.0f) / kGridFadeSeconds;
+  gridShow_ = (wanted > gridShow_) ? std::min(wanted, gridShow_ + rate)
+                                   : std::max(wanted, gridShow_ - rate);
 
   // While the canvas is being dragged the pointer is a closed hand. The system
   // cursor goes away and ours is drawn in its place, since there is no
@@ -958,8 +1034,12 @@ void App::Update() {
 
 void App::Draw() {
   ClearBackground(kCanvasBg);
+  // Everything the rest of this function asks for is off limits to the atlas
+  // evictor until the next frame, so nothing can drop a texture another window
+  // is still drawing from.
+  fonts_.BeginFrame();
 
-  if (options_.showGridDots) DrawDotGrid(viewport_);
+  if (options_.showGridDots) DrawDotGrid(viewport_, gridShow_);
 
   // Under everything else: a slide is a region of the canvas, and whatever is
   // on it stands on top of it.
@@ -968,8 +1048,8 @@ void App::Draw() {
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->Draw(viewport_, fonts_);
   for (const MathBlock& block : mathBlocks_) block.Draw(viewport_, fonts_);
 
-  axes_.Draw(viewport_, fonts_);
-  plots_.Draw(viewport_, fonts_);
+  axes_.Draw(viewport_, fonts_, &vizes_);
+  plots_.Draw(viewport_, fonts_, &vizes_);
   shaders_.Draw(viewport_, fonts_);
   media_.Draw(viewport_, fonts_);
 
@@ -1307,6 +1387,7 @@ bool App::LoadCanvas(const std::string& path) {
 
   for (LoadedBlock& loaded : blocks) {
     auto block = std::make_unique<CodeBlock>(loaded.position, loaded.em, std::move(loaded.lines));
+    block->SetVizSources(&vizes_.Sources());
     block->SetShowMath(loaded.showMath);
     block->SetBold(loaded.bold);
     block->SetItalic(loaded.italic);
