@@ -291,6 +291,12 @@ subscript always shown, including `⟨M⟩₀` for the scalar part. Only the gra
 type has get a selector, so asking an `Even` for its grade 3 is a compile error
 rather than a silent zero.
 
+The algebra is written for **GLSL** too, so a shader box can use it. GLSL has no
+operator overloading, so there the products are the named functions `gp`, `ip`,
+`op`, `rp`, `rev`, `dual`, `add`, `sub`, `div` -- which exist in C++ as well, and
+read identically (`op(p, q)` sets as `p ∧ q`). Operators are a convenience;
+the function spelling is the one that runs in either language.
+
 C++ binds `|` and `^` looser than `+`, so `a + b | c` is `(a + b) | c`; write
 the brackets. Only the types a box mentions are written out, plus whatever the
 products between them need, so an ordinary box of floats pays nothing.

@@ -51,7 +51,9 @@ std::string CxxPrologue(const clifford::Signature& sig,
 // The same job as the C++ prologue, for the other language. A fragment shader
 // wants the interface raylib gives it, one uniform per knob, and a main to put
 // the user's lines in -- so the boilerplate goes on at both ends.
-std::string ShaderPrologue(const std::vector<Variable>& variables, int* lines) {
+std::string ShaderPrologue(const std::vector<Variable>& variables,
+                           const clifford::Signature& sig,
+                           const std::vector<std::string>& algebraTypes, int* lines) {
   std::string out = std::string("#version 330\n") + "in vec2 " + kShaderInput +
                     ";\n"
                     "in vec4 fragColor;\n"
@@ -65,6 +67,10 @@ std::string ShaderPrologue(const std::vector<Variable>& variables, int* lines) {
       out += "uniform float " + variable.name + ";\n";
     }
   }
+  // The same algebra the C++ gets, written for the other language. GLSL has no
+  // operator overloading, so only the named forms are there -- which is why a
+  // box meant to run either way writes `gp(a, b)` rather than `a * b`.
+  if (!algebraTypes.empty()) out += clifford::GlslPrologue(sig, algebraTypes);
   out += "void main() {\n";
   *lines = static_cast<int>(std::count(out.begin(), out.end(), '\n'));
   return out;
@@ -78,7 +84,9 @@ std::string ShaderPrologue(const std::vector<Variable>& variables, int* lines) {
 //
 // This is the same body over again with different ends: the varying replaced by
 // that point, and the user's own write to finalColor overwritten by ours.
-std::string ProbePrologue(const std::vector<Variable>& variables) {
+std::string ProbePrologue(const std::vector<Variable>& variables,
+                          const clifford::Signature& sig,
+                          const std::vector<std::string>& algebraTypes) {
   std::string out =
       "#version 330\n"
       "in vec4 fragColor;\n"
@@ -91,6 +99,7 @@ std::string ProbePrologue(const std::vector<Variable>& variables) {
       out += "uniform float " + variable.name + ";\n";
     }
   }
+  if (!algebraTypes.empty()) out += clifford::GlslPrologue(sig, algebraTypes);
   out += "void main() {\n";
   // Not the interpolated varying: the one point being asked about.
   out += std::string("  vec2 ") + kShaderInput + " = sbProbe;\n";
@@ -222,9 +231,14 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
         // choosing one a rebuild rather than a re-run, which is why it has no
         // knob yet.
         variables.push_back(variable);
-        body += "  " + line.type + " " + line.name + " = " +
-                clifford::ExampleValue(line.type, line.name, signature) + ";\n";
-        shaderBody += "\n";
+        // The chosen value is written into the source, in the one spelling both
+        // languages accept -- so the shader gets the declaration too, rather
+        // than a blank where its value should be.
+        const std::string declaration = "  " + line.type + " " + line.name + " = " +
+                                        clifford::ExampleValue(line.type, line.name, signature) +
+                                        ";\n";
+        body += declaration;
+        shaderBody += declaration;
         continue;
       }
 
@@ -309,7 +323,8 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
 
   // Assembled now, alongside the C++, and used only if the C++ is refused.
   int prologueLines = 0;
-  glsl_ = ShaderPrologue(variables, &prologueLines) + shaderBody + "}\n";
+  glsl_ = ShaderPrologue(variables, signature, algebraTypes, &prologueLines) + shaderBody +
+          "}\n";
   glslOffset_ = prologueLines;
   looksLikeGlsl_ = MentionsShaderWord(shaderBody);
 
@@ -321,7 +336,8 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
   }
   glslProbe_ = probed_.empty()
                    ? std::string()
-                   : (ProbePrologue(variables) + shaderBody + ProbeEpilogue(probed_));
+                   : (ProbePrologue(variables, signature, algebraTypes) + shaderBody +
+                      ProbeEpilogue(probed_));
 
   variables_ = std::move(variables);
   state_ = State::Building;

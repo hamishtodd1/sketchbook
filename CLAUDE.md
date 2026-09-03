@@ -782,6 +782,39 @@ One departure from Hestenes: **the subscript is always there**, including on the
 scalar part. He drops the zero, and dropping it makes the most easily missed of
 the projections the one that looks like no projection at all.
 
+**The same algebra is written for GLSL**, because a box that draws is exactly
+the kind of box that wants one. GLSL has no operator overloading, so `a * b`
+cannot be a geometric product there -- and that is the whole difficulty, since
+a box's text is *one* text, tried as C++ and then as a shader.
+
+The answer is GAmphetamine's own alternative spelling. Every product also exists
+as a **named function**, in both languages:
+
+| operator | function |
+| --- | --- |
+| `a * b` | `gp(a, b)` |
+| `a \| b` | `ip(a, b)` |
+| `a ^ b` | `op(a, b)` |
+| `a & b` | `rp(a, b)` |
+| `~a` | `rev(a)` |
+| `!a` | `dual(a)` |
+| `a + b`, `a - b`, `a / k` | `add`, `sub`, `div` |
+
+They mean the same thing and they *read* the same -- `op(p, q)` sets as
+`p \wedge q` exactly as `p ^ q` does. So a box written in the function form runs
+either way, and a box written with operators is C++ only. That is the rule:
+**operators are a convenience, functions are the portable spelling.**
+
+Three things differ inside the generated GLSL, all forced: it has no default
+member initialisers, so every function fills in every component of its answer
+rather than only the ones with terms; it has no forward declaration of a struct,
+so the types are emitted in an order where each is complete before it is
+mentioned; and its constants are struct constructors rather than the little
+lambdas C++ uses. That last one is why C++ is also given an
+every-component-at-once constructor -- `Bi(0.4, 0.0, ...)` is then one spelling
+that makes a value in either language, which is what the injected example value
+needs to be.
+
 C++ binds `|` looser than `^`, and `^` looser than `+`, so `a + b | c` means
 `(a + b) | c`. That is a fact about C++ and not something to paper over: the
 parser here follows the same precedence the compiler will, because the compiler
@@ -1065,6 +1098,14 @@ sections above.
   names, `Una301` and `Bi301`, which would make the algebra a property of the
   thing rather than of the box and would let two algebras share one canvas. A
   deck of slides about one algebra would rather say it once, though.
+
+- **A GLSL box carrying an algebra is a large shader.** Cl(3,0,1) with the
+  default types is about 150KB of generated GLSL, and shaders are compiled on
+  the thread that owns the graphics context -- there is nowhere else to compile
+  them. It has not been a problem yet (a box with one costs about a third of a
+  second more than one without), but it is the thing that would start to hurt
+  first, and the fix if it does is to emit only the products a box actually
+  calls rather than every product between the types it mentions.
 
 - **A multivector shows no injected value.** A real shows its number and a
   function shows its lambda, but a multivector of Cl(3,0,1) has sixteen

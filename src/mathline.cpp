@@ -342,6 +342,28 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
         // A shader's `length` is the norm, and a norm is written with bars.
         return "\\left\\Vert " + Emit(*node.args[0], 0, marks) + " \\right\\Vert";
       }
+      // The products written as functions rather than as operators, which is how
+      // a box that has to run as a shader must write them -- GLSL has no
+      // operator overloading. They mean the same thing, so they read the same.
+      if (node.args.size() == 2) {
+        const char* infix = nullptr;
+        if (node.text == "gp") infix = " ";
+        if (node.text == "ip") infix = " \\cdot ";
+        if (node.text == "op") infix = " \\wedge ";
+        if (node.text == "rp") infix = " \\vee ";
+        if (node.text == "add") infix = " + ";
+        if (node.text == "sub") infix = " - ";
+        if (infix != nullptr) {
+          return Emit(*node.args[0], 5, marks) + infix + Emit(*node.args[1], 6, marks);
+        }
+      }
+      if (node.args.size() == 1 && node.text == "rev") {
+        return "\\widetilde{" + Emit(*node.args[0], 0, marks) + "}";
+      }
+      if (node.args.size() == 1 && node.text == "dual") {
+        return Emit(*node.args[0], 6, marks) + "^{*}";
+      }
+
       // Grade selection, written the way Hestenes writes it. One departure: the
       // subscript is always there, including on the scalar part -- Hestenes
       // drops the zero, and dropping it makes the most easily missed of the

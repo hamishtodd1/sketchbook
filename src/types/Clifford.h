@@ -81,6 +81,13 @@ const std::vector<std::string>& DefaultTypes();
 // them. Nothing is written for a type nobody asked for.
 std::string Prologue(const Signature& sig, const std::vector<std::string>& wanted);
 
+// The same algebra in GLSL. GLSL has no operator overloading, so there the
+// products are only the named functions -- `gp`, `ip`, `op`, `rp`, `rev`,
+// `dual`, `add`, `sub`, `div`, `gradeK`. Those names exist in C++ too, so a box
+// written with them runs as either language, which is what lets one box's text
+// be tried as C++ and then as a shader.
+std::string GlslPrologue(const Signature& sig, const std::vector<std::string>& wanted);
+
 // The names of every type mentioned in a piece of source, so that a box gets
 // the products it uses and no others.
 std::vector<std::string> TypesMentioned(std::string_view source, const Signature& sig);
