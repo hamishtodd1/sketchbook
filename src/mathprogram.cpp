@@ -10,6 +10,7 @@
 #include <unordered_map>
 
 #include "mathline.h"
+#include "types/Clifford.h"
 #include "types/RealFunction.h"
 #include "types/examples.h"
 
@@ -24,7 +25,8 @@ constexpr int kRunTimeoutMs = 4000;
 //
 // The types themselves are not defined here. Each one contributes the C++ that
 // makes it exist (src/types/), and this file only knows where to put it.
-std::string Prologue() {
+std::string CxxPrologue(const clifford::Signature& sig,
+                        const std::vector<std::string>& algebraTypes) {
   return std::string(
       "#include <cmath>\n"
       "#include <cstdio>\n"
@@ -39,6 +41,10 @@ std::string Prologue() {
       // Everything a type adds to the language it is written in comes from the
       // type's own file, so the toolchain never has to know what one is.
       types::realfunction::Source() +
+      // A Clifford algebra is written out only for the box that uses one, and
+      // only the types that box turned out to mention. An ordinary box of
+      // floats pays nothing for it.
+      (algebraTypes.empty() ? std::string() : clifford::Prologue(sig, algebraTypes)) +
       "int main(int argc, char** argv) {\n";
 }
 
@@ -141,7 +147,7 @@ std::string FormatFloat(float value) {
 int Program::LineOffset() {
   // Counted rather than kept in step by hand: the prologue grows as the
   // language does, and a stale offset points diagnostics at the wrong line.
-  const std::string prologue = Prologue();
+  const std::string prologue = CxxPrologue(clifford::kDefaultSignature, {});
   return static_cast<int>(std::count(prologue.begin(), prologue.end(), '\n'));
 }
 
@@ -167,6 +173,19 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
     if (variable.free) previous.emplace(variable.name, variable.value);
   }
 
+  // Which algebra this box works in, and which of its types it mentions. Both
+  // are read off the box itself: `Algebra(3,0,1);` on a line of its own changes
+  // the signature, and everything else defaults to 3D projective geometric
+  // algebra, which is what these tools are mostly for.
+  clifford::Signature signature = clifford::kDefaultSignature;
+  std::string         joined;
+  for (const std::string& raw : lines) {
+    clifford::ParseAlgebra(raw, &signature);
+    joined += raw;
+    joined += '\n';
+  }
+  const std::vector<std::string> algebraTypes = clifford::TypesMentioned(joined, signature);
+
   std::vector<Variable> variables;
   std::string body;
   // The same lines assembled for the other language, kept in step line for line
@@ -175,15 +194,39 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
   int freeIndex = 0;
 
   for (const std::string& raw : lines) {
-    const mathline::Line line = mathline::Parse(raw);
+    // The line that chooses the algebra is a statement about the box, not a
+    // statement in it. It leaves a blank behind rather than vanishing, so a
+    // diagnostic still lands on the row the user wrote.
+    if (clifford::ParseAlgebra(raw, nullptr)) {
+      body += "\n";
+      shaderBody += "\n";
+      continue;
+    }
+
+    const mathline::Line line = mathline::Parse(raw, signature);
 
     if (line.kind == mathline::Kind::Declaration && !line.hasInitialiser) {
       // The abstract declaration the user wrote; the initialiser is ours.
       Variable variable;
       variable.name = line.name;
       variable.latexName = mathline::NameToLatex(line.name);
-      variable.kind = mathline::IsFunctionType(line.type) ? Kind::Function : Kind::Real;
+      variable.kind = mathline::IsFunctionType(line.type)
+                          ? Kind::Function
+                          : (mathline::IsMultivectorType(line.type, signature) ? Kind::Multivector
+                                                                              : Kind::Real);
       variable.free = true;
+
+      if (variable.kind == Kind::Multivector) {
+        // A multivector cannot travel down argv as one number, so its chosen
+        // value is written into the source the way a function's is. That makes
+        // choosing one a rebuild rather than a re-run, which is why it has no
+        // knob yet.
+        variables.push_back(variable);
+        body += "  " + line.type + " " + line.name + " = " +
+                clifford::ExampleValue(line.type, line.name, signature) + ";\n";
+        shaderBody += "\n";
+        continue;
+      }
 
       if (variable.kind == Kind::Function) {
         // A function cannot travel down argv, so choosing one means writing it
@@ -223,7 +266,10 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
       Variable variable;
       variable.name = line.name;
       variable.latexName = mathline::NameToLatex(line.name);
-      variable.kind = mathline::IsFunctionType(line.type) ? Kind::Function : Kind::Real;
+      variable.kind = mathline::IsFunctionType(line.type)
+                          ? Kind::Function
+                          : (mathline::IsMultivectorType(line.type, signature) ? Kind::Multivector
+                                                                              : Kind::Real);
       variable.free = false;
       variables.push_back(variable);
     }
@@ -247,6 +293,11 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
   }
 
   for (const Variable& variable : variables) {
+    if (variable.kind == Kind::Multivector) {
+      // Nothing is reported back for one yet: there is no window that shows a
+      // multivector, so there is nothing waiting to be told.
+      continue;
+    }
     if (variable.kind == Kind::Function) {
       body += types::realfunction::PrintStatement(variable.name);
     } else {
@@ -279,7 +330,7 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
 
   restore_.clear();
 
-  const std::string source = Prologue() + body;
+  const std::string source = CxxPrologue(signature, algebraTypes) + body;
   const int offset = LineOffset();
   build_ = std::async(std::launch::async,
                       [source, offset] { return compiler::Compile(source, offset); });

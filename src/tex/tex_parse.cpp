@@ -309,7 +309,11 @@ class Parser {
     if (name == "mathrm" || name == "rm") return fontSwitch(Face::MainRegular);
     if (name == "mathbf" || name == "bf") return fontSwitch(Face::MainBold);
     if (name == "mathit" || name == "it") return fontSwitch(Face::MainItalic);
-    if (name == "mathcal" || name == "cal") return fontSwitch(Face::Caligraphic);
+    // \mathscr is script, and the KaTeX distribution has no separate script
+    // face -- the same one KaTeX itself uses for both.
+    if (name == "mathcal" || name == "cal" || name == "mathscr") {
+      return fontSwitch(Face::Caligraphic);
+    }
     if (name == "mathtt" || name == "tt") return fontSwitch(Face::Mono);
     // Blackboard bold lives in the AMS face, whose A-Z *are* the double-struck
     // letters -- the same trick KaTeX uses. Lowercase has no such form, and

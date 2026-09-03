@@ -92,7 +92,10 @@ class SlidePanel {
 
  private:
   Rectangle ButtonRect(const Viewport& viewport) const;
-  Rectangle DeleteButtonRect() const;
+  // Where a slide's delete button sits, given where the slide is on screen.
+  // Returns a zero-size rectangle when the slide is too small on screen to
+  // carry one.
+  static Rectangle DeleteButtonRect(Rectangle rim, FontStore& fonts);
   static Rectangle OnScreen(const Slide& slide, const Viewport& viewport, float aspect);
   void      RemoveSlide(int index, float aspect);
 
@@ -108,12 +111,10 @@ class SlidePanel {
   NewSlide     pending_;
   SlideRemoval removal_;
 
-  // The slide whose rim is being pointed at, and where its delete button sits.
-  // The button follows the pointer along the rim and then stays put once the
-  // pointer leaves the rim for it -- a button that ran away from the click
-  // meant to press it would be no button at all.
-  int     hoverSlide_ = -1;
-  Vector2 deleteAt_{};
+  // The slide whose rim is being pointed at, which is the one showing its
+  // delete button. The button lives in that slide's bottom-right corner, so it
+  // is somewhere you can go and find rather than something to chase.
+  int hoverSlide_ = -1;
 };
 
 }  // namespace sb

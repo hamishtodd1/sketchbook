@@ -249,11 +249,21 @@ void PlotPanel::DrawSelectionRims(const Viewport& viewport, FontStore& fonts) co
 }
 
 void PlotPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
-                                std::vector<std::pair<CodeBlock*, std::string>>* out) const {
+                                std::vector<ActiveValue>* out) const {
   if (out == nullptr) return;
 
+  // A wire leaves the middle of the plot rather than any one point on a curve:
+  // a curve is a whole function and has no single place it is, and the colour
+  // already says which of them is meant.
+  const auto middle = [&](std::size_t index) {
+    const Rectangle rect = RectFor(index, viewport, fonts);
+    return Vector2{rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f};
+  };
+
   if (drag_ != Drag::None && dragPlot_ < plots_.size()) {
-    for (const CurveRef& ref : plots_[dragPlot_].refs) out->emplace_back(ref.block, ref.name);
+    for (const CurveRef& ref : plots_[dragPlot_].refs) {
+      out->push_back({ref.block, ref.name, middle(dragPlot_)});
+    }
     return;
   }
 
@@ -261,7 +271,7 @@ void PlotPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
   for (std::size_t i = 0; i < plots_.size(); ++i) {
     const Rectangle rect = RectFor(i, viewport, fonts);
     if (!CheckCollisionPointRec(pointer, rect) && !PointOnRim(rect, pointer)) continue;
-    for (const CurveRef& ref : plots_[i].refs) out->emplace_back(ref.block, ref.name);
+    for (const CurveRef& ref : plots_[i].refs) out->push_back({ref.block, ref.name, middle(i)});
     return;
   }
 }

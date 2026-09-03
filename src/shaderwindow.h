@@ -48,7 +48,7 @@ class ShaderPanel {
   // over one of these means `fragTexCoord` is the thing under the cursor. It is
   // reported like any other variable, and lights up where it is written.
   void ActiveVariables(const Viewport& viewport, FontStore& fonts,
-                       std::vector<std::pair<CodeBlock*, std::string>>* out) const;
+                       std::vector<ActiveValue>* out) const;
 
   bool Dragging() const { return dragging_; }
   // True while a window is actually being carried, which is what brings up the

@@ -1,9 +1,14 @@
 // Number lines: the knobs that choose values.
 //
-// Every variable gets one. Free variables get a handle you can drag; derived
-// ones get a read-only marker that moves when its inputs do. Lines start docked
-// under their box, can be pulled off onto the canvas, and can be dropped onto
-// one another to share a single axis -- which is a way of *seeing* two values
+// **A box gets one.** All of its reals share it, on one scale framed so that
+// every one of them is in view -- because the values in a box are read
+// together, and a stack of one-value axes says nothing about how they compare.
+// Free variables get a handle you can drag; derived ones get a read-only marker
+// that moves when its inputs do.
+//
+// A variable that deserves its own axis is *pulled out* of the box: select part
+// of where it is written and drag it onto the canvas. Lines can also be dropped
+// onto one another to share a single axis -- which is a way of *seeing* values
 // together, not a claim that they are equal.
 //
 // A line refers to variables by (box, name), so an axis can carry values from
@@ -34,6 +39,9 @@ struct NumberLine {
   std::vector<AxisRef> refs;
   float                centre = 0.0f;
   float                span = 4.0f;   // values across the full width
+  // An axis frames itself once, when the values it carries first exist. Not
+  // saved: a canvas that was written down keeps the scale it was left at.
+  bool                 framed = false;
   bool                 docked = true;
   Vector2              worldPos{};    // only meaningful once undocked
   // Which box a docked line stacks under. Stays put when lines merge.
@@ -62,13 +70,20 @@ class AxisPanel {
   // for a variable wears its colour, and this is what says which one is in use
   // so its name can be boxed where it is written.
   void ActiveVariables(const Viewport& viewport, FontStore& fonts,
-                       std::vector<std::pair<CodeBlock*, std::string>>* out) const;
+                       std::vector<ActiveValue>* out) const;
 
   // The screen rectangle the rows docked under a box cover, or a zero-size one
   // if nothing is docked there. They travel with the box, so as far as the
   // canvas is concerned they are part of it.
   Rectangle DockedBounds(const CodeBlock* block, const Viewport& viewport,
                          FontStore& fonts) const;
+
+  // Takes a variable off the axis it shares with the rest of its box and starts
+  // carrying it as an axis of its own, from the pointer. The drop is the same
+  // drop any other carried row gets -- onto the canvas, onto another axis to
+  // merge, or onto the cross.
+  bool BeginPullOut(CodeBlock* block, const std::string& name, Vector2 pointer,
+                    const Viewport& viewport);
 
   bool Empty() const { return lines_.empty(); }
   // True while a row is being dragged. A drag in flight has to be offered the
@@ -98,7 +113,11 @@ class AxisPanel {
   // --- persistence --------------------------------------------------------
   const std::vector<NumberLine>& Lines() const { return lines_; }
   void Clear() { lines_.clear(); drag_ = Drag::None; dragRef_ = {}; }
-  void Adopt(std::vector<NumberLine> lines) { lines_ = std::move(lines); }
+  void Adopt(std::vector<NumberLine> lines) {
+    lines_ = std::move(lines);
+    // A canvas that was written down keeps the scale it was saved at.
+    for (NumberLine& line : lines_) line.framed = true;
+  }
 
  private:
   enum class Drag { None, Handle, Pan, Move };
@@ -106,6 +125,10 @@ class AxisPanel {
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
   static Rectangle AxisArea(Rectangle row);
   const mathprogram::Variable* Resolve(const AxisRef& ref) const;
+  // Where a variable's marker is drawn on its row: the dot that *is* the
+  // variable, which is where a wire from its name should land.
+  Vector2 MarkerAt(std::size_t index, const AxisRef& ref, const Viewport& viewport,
+                   FontStore& fonts) const;
   // Points the line at everything now on it. Used when two lines merge, since
   // the host's old window need not contain the arriving value at all.
   void Reframe(NumberLine& line) const;

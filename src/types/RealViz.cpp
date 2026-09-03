@@ -157,15 +157,91 @@ bool AxisPanel::Sync(const Blocks& blocks) {
       }
       if (present) continue;
 
-      NumberLine line;
-      line.refs.push_back({block.get(), variable.name});
-      line.dock = block.get();
-      line.centre = 0.0f;
-      line.span = 4.0f;
-      lines_.push_back(line);
+      // It joins the axis its box already has rather than starting one of its
+      // own. The values in a box are read together, so they belong on one
+      // scale; a variable that wants its own axis is pulled out onto the canvas.
+      NumberLine* home = nullptr;
+      for (NumberLine& line : lines_) {
+        if (line.docked && line.dock == block.get()) {
+          home = &line;
+          break;
+        }
+      }
+      if (home == nullptr) {
+        NumberLine line;
+        line.dock = block.get();
+        line.centre = 0.0f;
+        line.span = 4.0f;
+        lines_.push_back(line);
+        home = &lines_.back();
+      }
+      home->refs.push_back({block.get(), variable.name});
+      home->framed = false;
     }
   }
+
+  // An axis frames itself once, as soon as everything on it has a value: values
+  // shown on one scale are only worth sharing it if they are all in view.
+  for (NumberLine& line : lines_) {
+    if (line.framed || line.refs.empty()) continue;
+    bool ready = true;
+    for (const AxisRef& ref : line.refs) {
+      const mathprogram::Variable* variable = Resolve(ref);
+      if (variable == nullptr || !variable->known) {
+        ready = false;
+        break;
+      }
+    }
+    if (!ready) continue;
+    Reframe(line);
+    line.framed = true;
+  }
   return lines_.size() != before;
+}
+
+bool AxisPanel::BeginPullOut(CodeBlock* block, const std::string& name, Vector2 pointer,
+                             const Viewport& viewport) {
+  if (block == nullptr || name.empty() || drag_ != Drag::None) return false;
+
+  // Off whatever axis it was sharing, and the one it leaves reframes around
+  // what is left on it.
+  bool found = false;
+  for (NumberLine& line : lines_) {
+    const std::size_t before = line.refs.size();
+    line.refs.erase(std::remove_if(line.refs.begin(), line.refs.end(),
+                                   [&](const AxisRef& ref) {
+                                     return ref.block == block && ref.name == name;
+                                   }),
+                    line.refs.end());
+    if (line.refs.size() != before) {
+      found = true;
+      Reframe(line);
+    }
+  }
+  if (!found) return false;
+  lines_.erase(std::remove_if(lines_.begin(), lines_.end(),
+                              [](const NumberLine& line) { return line.refs.empty(); }),
+               lines_.end());
+
+  const float zoom = viewport.Zoom();
+  NumberLine  line;
+  line.refs.push_back({block, name});
+  line.dock = block;
+  line.docked = false;
+  line.centre = 0.0f;
+  line.span = 4.0f;
+  lines_.push_back(line);
+
+  // Carried from its middle, so it arrives under the pointer rather than
+  // hanging off one corner of it -- and from here it is an ordinary carried
+  // row, dropped by the same code that drops any other.
+  dragLine_ = lines_.size() - 1;
+  dragGrab_ = {kFloatWidth * zoom * 0.5f, kRowHeight * zoom * 0.5f};
+  dragScreenPos_ = {pointer.x - dragGrab_.x, pointer.y - dragGrab_.y};
+  lines_.back().worldPos = viewport.ToWorld(dragScreenPos_);
+  drag_ = Drag::Move;
+  dragMoved_ = true;
+  return true;
 }
 
 Rectangle AxisPanel::RectFor(std::size_t index, const Viewport& viewport,
@@ -261,17 +337,34 @@ void AxisPanel::DrawSelectionRims(const Viewport& viewport, FontStore& fonts) co
   }
 }
 
+Vector2 AxisPanel::MarkerAt(std::size_t index, const AxisRef& ref, const Viewport& viewport,
+                            FontStore& fonts) const {
+  const Rectangle row = RectFor(index, viewport, fonts);
+  const Rectangle area = AxisArea(row);
+  const float     axisY = row.y + row.height * 0.58f;
+
+  const mathprogram::Variable* variable = Resolve(ref);
+  if (variable == nullptr) return {row.x + row.width * 0.5f, axisY};
+  // The same position the marker is drawn at, clamped to the axis the same way:
+  // a value off the end is pointed at from the edge, and so is its wire.
+  const float x =
+      area.x + area.width * (0.5f + (variable->value - lines_[index].centre) / lines_[index].span);
+  return {std::clamp(x, area.x, area.x + area.width), axisY};
+}
+
 void AxisPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
-                                std::vector<std::pair<CodeBlock*, std::string>>* out) const {
+                                std::vector<ActiveValue>* out) const {
   if (out == nullptr) return;
 
   // Dragging a handle is about exactly one variable, even on a shared axis.
-  if (drag_ == Drag::Handle && dragRef_.block != nullptr) {
-    out->emplace_back(dragRef_.block, dragRef_.name);
+  if (drag_ == Drag::Handle && dragRef_.block != nullptr && dragLine_ < lines_.size()) {
+    out->push_back({dragRef_.block, dragRef_.name, MarkerAt(dragLine_, dragRef_, viewport, fonts)});
     return;
   }
   if (drag_ != Drag::None && dragLine_ < lines_.size()) {
-    for (const AxisRef& ref : lines_[dragLine_].refs) out->emplace_back(ref.block, ref.name);
+    for (const AxisRef& ref : lines_[dragLine_].refs) {
+      out->push_back({ref.block, ref.name, MarkerAt(dragLine_, ref, viewport, fonts)});
+    }
     return;
   }
 
@@ -279,7 +372,9 @@ void AxisPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
   for (std::size_t i = 0; i < lines_.size(); ++i) {
     const Rectangle row = RectFor(i, viewport, fonts);
     if (!CheckCollisionPointRec(pointer, row) && !PointOnRim(row, pointer)) continue;
-    for (const AxisRef& ref : lines_[i].refs) out->emplace_back(ref.block, ref.name);
+    for (const AxisRef& ref : lines_[i].refs) {
+      out->push_back({ref.block, ref.name, MarkerAt(i, ref, viewport, fonts)});
+    }
     return;
   }
 }

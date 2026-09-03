@@ -224,6 +224,10 @@ void App::RemoveBlock(CodeBlock* block) {
   if (block == nullptr) return;
   if (focus_ == block) focus_ = nullptr;
   if (dragBlock_ == block) dragBlock_ = nullptr;
+  if (textBlock_ == block) {
+    textBlock_ = nullptr;
+    textDrag_ = TextDrag::None;
+  }
   axes_.Forget(block);
   plots_.Forget(block);
   shaders_.Forget(block);
@@ -665,22 +669,59 @@ void App::ThrowAwaySlide(Rectangle bounds, float shift) {
   SettleBlocks();
 }
 
-void App::HandlePointer() {
-  if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-    pressActive_ = true;
-    pressOrigin_ = GetMousePosition();
+bool App::HandleTextGesture() {
+  const Vector2 pointer = GetMousePosition();
+
+  // --- a gesture already under way -----------------------------------------
+  if (textDrag_ == TextDrag::Selecting && textBlock_ != nullptr) {
+    if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+      textBlock_->ExtendSelection(pointer, viewport_, fonts_);
+    } else {
+      textDrag_ = TextDrag::None;
+      textBlock_ = nullptr;
+    }
+    return true;
+  }
+  if (textDrag_ == TextDrag::Arming && textBlock_ != nullptr) {
+    const float moved = std::hypot(pointer.x - pullFrom_.x, pointer.y - pullFrom_.y);
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+      // A press that went nowhere was a click on the selection, not a pull.
+      textDrag_ = TextDrag::None;
+      textBlock_ = nullptr;
+    } else if (moved > kClickSlop) {
+      // Out it comes, and from here it is an ordinary carried row: it follows
+      // the pointer and is dropped wherever the button comes up.
+      axes_.BeginPullOut(textBlock_, pullName_, pointer, viewport_);
+      textBlock_->SelectNone();
+      textDrag_ = TextDrag::None;
+      textBlock_ = nullptr;
+    }
+    return true;
   }
 
-  if (!IsMouseButtonReleased(MOUSE_BUTTON_LEFT) || !pressActive_) return;
-  pressActive_ = false;
+  // --- starting one ---------------------------------------------------------
+  if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return false;
+  CodeBlock* hit = BlockAt(pointer);
+  if (hit == nullptr) return false;
 
-  const Vector2 release = GetMousePosition();
-  const float moved = std::hypot(release.x - pressOrigin_.x, release.y - pressOrigin_.y);
-  if (moved > kClickSlop) return;  // that was a pan, not a click
+  // Pressing on text that is already selected picks it up rather than throwing
+  // the selection away and starting again.
+  if (hit == focus_ && hit->PointInSelection(pointer, viewport_, fonts_)) {
+    const std::string name = hit->SelectedVariable();
+    if (!name.empty()) {
+      textDrag_ = TextDrag::Arming;
+      textBlock_ = hit;
+      pullName_ = name;
+      pullFrom_ = pointer;
+      return true;
+    }
+  }
 
-  CodeBlock* hit = BlockAt(release);
   SetFocus(hit);
-  if (hit != nullptr) hit->PlaceCaret(release, viewport_, fonts_);
+  hit->BeginSelection(pointer, viewport_, fonts_);
+  textDrag_ = TextDrag::Selecting;
+  textBlock_ = hit;
+  return true;
 }
 
 void App::HandleTyping() {
@@ -796,6 +837,7 @@ void App::Update() {
       !grabbingSelection) {
     ClearSelection();
   }
+  if (canvasActive && textDrag_ != TextDrag::None) consumed = HandleTextGesture();
   if (canvasActive && !consumed && dragBlock_ != nullptr) consumed = HandleBlockDrag();
   if (canvasActive && !consumed && media_.Busy()) consumed = media_.HandleInput(viewport_);
   if (canvasActive && !consumed && axes_.Dragging()) {
@@ -823,6 +865,8 @@ void App::Update() {
   }
   if (canvasActive && !consumed) consumed = media_.HandleInput(viewport_);
   if (canvasActive && !consumed) consumed = HandleBlockDrag();
+  // After the rim, so grabbing the edge of a box still moves it.
+  if (canvasActive && !consumed) consumed = HandleTextGesture();
   if (canvasActive && !consumed) consumed = axes_.HandleInput(viewport_, fonts_, codeBlocks_);
   if (canvasActive && !consumed) consumed = plots_.HandleInput(viewport_, fonts_);
   if (canvasActive && !consumed) consumed = shaders_.HandleInput(viewport_, fonts_);
@@ -834,15 +878,13 @@ void App::Update() {
     // Starting one: a press on a selected window's rim moves the whole
     // selection, and a press on the background begins a loop.
     HandleSelection();
-    if (!lassoActive_ && !selectionDrag_) {
-      HandlePointer();
-      HandleTyping();
-    }
+    if (!lassoActive_ && !selectionDrag_) HandleTyping();
   } else if (!canvasActive) {
     // Only the menu opening abandons a gesture. Something else taking the
     // pointer does not: that is what the in-flight pass above is for.
-    pressActive_ = false;
     lassoActive_ = false;
+    textDrag_ = TextDrag::None;
+    textBlock_ = nullptr;
   }
 
   // Keys that act on the selection, and only while no box is being typed into.
@@ -881,18 +923,18 @@ void App::Update() {
   // A window being hovered or dragged lights up the variable it stands for,
   // wherever that variable is written. Recomputed every frame: it is a property
   // of where the pointer is, not something to remember.
-  std::vector<std::pair<CodeBlock*, std::string>> active;
+  std::vector<ActiveValue> active;
   if (canvasActive) {
     axes_.ActiveVariables(viewport_, fonts_, &active);
     plots_.ActiveVariables(viewport_, fonts_, &active);
     shaders_.ActiveVariables(viewport_, fonts_, &active);
   }
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
-    std::vector<std::string> names;
-    for (const auto& [owner, name] : active) {
-      if (owner == block.get()) names.push_back(name);
+    std::vector<ActiveValue> mine;
+    for (const ActiveValue& value : active) {
+      if (value.block == block.get()) mine.push_back(value);
     }
-    block->SetHighlights(std::move(names));
+    block->SetHighlights(std::move(mine));
   }
 
   // The canvas pans on the right button wherever the pointer is; the wheel and
@@ -1117,7 +1159,7 @@ bool App::LoadCanvas(const std::string& path) {
   float   zoom = 1.0f;
   bool    grid = true;
   bool    inBlock = false;
-  float   aspect = 16.0f / 9.0f;
+  float   aspect = kDefaultSlideAspect;
   Vector2 newSlide = SlidePanel::DefaultButtonPosition();
   std::vector<Slide> slides;
 
@@ -1249,7 +1291,8 @@ bool App::LoadCanvas(const std::string& path) {
   selectionFrom_.clear();
   lassoActive_ = false;
   lasso_.clear();
-  pressActive_ = false;
+  textDrag_ = TextDrag::None;
+  textBlock_ = nullptr;
 
   slides_.Reset();
   axes_.Clear();
@@ -1336,7 +1379,7 @@ bool App::LoadCanvas(const std::string& path) {
   }
 
   options_.showGridDots = grid;
-  options_.slideAspect = (aspect > 0.05f) ? aspect : (16.0f / 9.0f);
+  options_.slideAspect = (aspect > 0.05f) ? aspect : kDefaultSlideAspect;
   slides_.Adopt(std::move(slides), newSlide);
   viewport_.Reset(centre, zoom);
 

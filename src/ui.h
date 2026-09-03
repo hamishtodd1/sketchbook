@@ -5,20 +5,26 @@
 
 namespace sb {
 
+// The shape a deck is made for unless it says otherwise, and the shape the app
+// window itself opens at -- the same number, so a slide seen at its own scale
+// fills a fresh window exactly.
+inline constexpr float kDefaultSlideAspect = 3.0f / 2.0f;
+
 // Canvas settings the menu can change.
 struct Options {
   bool  showGridDots = true;
   // The shape a slide is made for. Everything about a slide follows from it:
   // how wide it is, and what the camera has to be at for one to fill the
   // window.
-  float slideAspect = 16.0f / 9.0f;
+  float slideAspect = kDefaultSlideAspect;
 };
 
 // The shapes the menu offers. A deck is made for one of them, not for an
 // arbitrary number typed in.
-inline constexpr int   kAspectCount = 3;
-inline constexpr float kAspects[kAspectCount] = {16.0f / 9.0f, 4.0f / 3.0f, 1.0f};
-inline constexpr const char* kAspectNames[kAspectCount] = {"16:9", "4:3", "1:1"};
+inline constexpr int   kAspectCount = 4;
+inline constexpr float kAspects[kAspectCount] = {kDefaultSlideAspect, 16.0f / 9.0f,
+                                                 4.0f / 3.0f, 1.0f};
+inline constexpr const char* kAspectNames[kAspectCount] = {"3:2", "16:9", "4:3", "1:1"};
 
 // What the menu is asking the app to do this frame.
 enum class MenuAction { None, Save, Load, Insert };

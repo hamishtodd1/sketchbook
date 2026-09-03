@@ -64,7 +64,7 @@ class PlotPanel {
 
   // As AxisPanel::ActiveVariables.
   void ActiveVariables(const Viewport& viewport, FontStore& fonts,
-                       std::vector<std::pair<CodeBlock*, std::string>>* out) const;
+                       std::vector<ActiveValue>* out) const;
 
   // As AxisPanel::Dragging: a drag in flight gets the pointer first.
   bool Dragging() const { return drag_ != Drag::None; }

@@ -11,7 +11,10 @@
 namespace {
 
 struct Args {
-  int         width = 1280;
+  // The window opens at the shape a deck is made for, so a slide seen at its
+  // own scale is exactly a screenful of it. The height is what kSlideHeight
+  // means.
+  int         width = 1200;
   int         height = 800;
   std::string screenshot;   // when set, save a PNG and exit
   int         frames = 0;   // 0 means run until the window is closed

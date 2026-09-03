@@ -21,6 +21,22 @@
 
 namespace sb {
 
+class CodeBlock;
+
+// A variable whose window is being used, and the point on that window where it
+// is shown. Everything standing for a variable wears its colour; this is what
+// says *which* window is in use, so the name can be boxed where it is written
+// and joined to the window by a curve.
+//
+// `from` is the visualization of the value, not the pointer: the handle on a
+// number line, the picture on a plot. The one exception is a shader's preview,
+// where the pointer really is the value it is reporting.
+struct ActiveValue {
+  CodeBlock*  block = nullptr;
+  std::string name;
+  Vector2     from{};   // screen space
+};
+
 class CodeBlock {
  public:
   CodeBlock(Vector2 worldTopLeft, float worldEm, std::vector<std::string> lines);
@@ -112,6 +128,22 @@ class CodeBlock {
 
   void HandleInput();
   void InsertCodepoint(int codepoint);
+
+  // --- selecting text ------------------------------------------------------
+  //
+  // Dragging across a box's text selects it. That is worth having on its own,
+  // but the reason it exists is the gesture built on it: highlight part of
+  // where a variable is written and drag it out, and that variable gets a
+  // window of its own.
+  void        BeginSelection(Vector2 screenPoint, const Viewport& viewport, FontStore& fonts);
+  void        ExtendSelection(Vector2 screenPoint, const Viewport& viewport, FontStore& fonts);
+  bool        HasSelection() const;
+  void        SelectNone() { anchorLine_ = caretLine_; anchorCol_ = caretCol_; }
+  bool        PointInSelection(Vector2 screenPoint, const Viewport& viewport,
+                               FontStore& fonts) const;
+  // The variable the selection lies inside, if this box declares one by that
+  // name. Empty if the selection spans more than a name, or names nothing.
+  std::string SelectedVariable() const;
   std::string Text() const;
   const std::vector<std::string>& Lines() const { return lines_; }
 
@@ -172,7 +204,7 @@ class CodeBlock {
   Color VariableColor(const std::string& name) const;
   // The variables to draw a box round this frame -- set by whichever window is
   // being hovered or dragged, and refilled every frame.
-  void  SetHighlights(std::vector<std::string> names);
+  void  SetHighlights(std::vector<ActiveValue> values);
   void SetVariableValue(const std::string& name, float value);
   // Knob positions from a loaded canvas, adopted on the next rebuild.
   void RestoreValues(std::vector<std::pair<std::string, float>> values);
@@ -244,6 +276,10 @@ class CodeBlock {
   // 1-based line the current diagnostic points at, or 0 if there is none.
   int    ErrorLine() const;
   std::string Injection(int line) const;
+  // Which Clifford algebra this box works in, read off its own lines. It
+  // decides what counts as a type name, how one is written as mathematics, and
+  // what an example of one looks like -- so every one of those has to ask.
+  clifford::Signature Algebra() const;
   Chrome ChromeRects(const Geometry& g) const;
   // The bar just inside the right edge that sets the measure. Only a text box
   // has one; it is inset clear of the rim's grab band, like a picture's crop
@@ -287,6 +323,12 @@ class CodeBlock {
   void   MoveCaretByWord(int direction);
   void   ClampCaret();
   void   TouchEdit();
+  // The selection in reading order, whichever way round it was made.
+  void   SelectionRange(int* fromLine, int* fromCol, int* toLine, int* toCol) const;
+  // The slice of a row that is selected, as byte offsets, or false for none.
+  bool   SelectionInRow(const Row& row, std::size_t* from, std::size_t* to) const;
+  // Takes the selected text out. True if there was any.
+  bool   EraseSelection();
 
   Vector2                  origin_;
   float                    em_;
@@ -315,6 +357,10 @@ class CodeBlock {
   bool   shaderHidden_ = false;
   int    caretLine_ = 0;
   int    caretCol_ = 0;   // byte offset within lines_[caretLine_]
+  // The other end of the selection. Equal to the caret when there is none, so
+  // "is anything selected" is one comparison and needs no extra flag.
+  int    anchorLine_ = 0;
+  int    anchorCol_ = 0;
   double blinkAnchor_ = 0.0;
   bool   dirty_ = false;
   // Resolved during Draw, before the geometry that depends on it is measured.
@@ -322,7 +368,7 @@ class CodeBlock {
   mutable bool rimHot_ = false;
   bool         dragging_ = false;
 
-  std::vector<std::string> highlights_;
+  std::vector<ActiveValue> highlights_;
 
   std::vector<Snapshot> undo_;
   EditKind              lastEdit_ = EditKind::None;

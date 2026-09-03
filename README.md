@@ -39,6 +39,9 @@ it runs from anywhere.
 | `Ctrl`+`left`/`right` | Move the caret by word |
 | `Ctrl`+`S` / `Ctrl`+`O` | Save (back to the same file) / open a canvas |
 | Drag a number-line handle | Choose that variable's value |
+| Drag across a box's text | Highlight it |
+| `Shift`+arrows, `Shift`+`Home`/`End` | Extend the highlight |
+| Drag selected text out of the box | That variable gets an axis of its own |
 | Wheel over a number line or plot | Zoom that window only |
 | Wheel over a box or a picture | Resize it, about the corner nearest the pointer |
 | Drag a picture's corner | Crop it |
@@ -48,7 +51,7 @@ it runs from anywhere.
 | Drag a rim | Move that window; drop it on another of its kind to merge them |
 | Drag a window onto the cross | Close it |
 | Click a slide's rim | Glide the camera onto that slide |
-| Hover a slide's rim | A cross appears; click it to throw the slide away |
+| Hover a slide's rim | A *delete slide* button appears in its corner |
 | Drag the background | Lasso a selection |
 | Left-click anywhere | Put the selection down |
 | `Delete` | Throw the selection away |
@@ -156,17 +159,26 @@ name written beside either. Hover or grab one of those windows and the variable'
 name lights up in the box it came from, in that variable's colour, wherever it is
 written -- in the LaTeX or in the code, whichever that line is showing, and on
 every line that mentions it -- with a curve of the same colour running from the
-pointer to each one.
+**value itself** to each one: from that variable's handle on the number line,
+not from your pointer. The handle is the variable; the pointer is only where
+your hand is.
 
 Hovering a **shader's picture** lights up `fragTexCoord`, because that is what
 the pointer is: the point the shader is being evaluated at, and the point its
 number lines are read from. Colour says *which*
 variable; shape says whether it is yours to move.
 
-Every variable then gets a **number line** docked under the box: free variables
-get a handle you can drag, derived ones a marker that follows. Drop one line's
-rim onto another and they share a single axis — a way of seeing two values
-together, not a claim that they are equal. The merged axis **reframes itself**
+A box then gets **one number line** docked under it, carrying all of its reals
+on one scale: free variables get a handle you can drag, derived ones a marker
+that follows. The axis frames itself the first time everything on it has a
+value, so all of them are in view — a stack of one-value axes would say nothing
+about how they compare.
+
+To give a variable an axis of its own, **pull it out of the code**: select any
+part of any mention of it and drag it out of the box. It comes away carrying
+just that variable and lands where you let go. Drop one line's rim onto another
+and they share a single axis — a way of seeing values together, not a claim that
+they are equal. The merged axis **reframes itself**
 around every value now on it, so both are in view with room at the ends; seeing
 them together is the whole point of the gesture. The two need not come from the
 same box: an axis belongs to the canvas. Each axis zooms and pans on its own
@@ -177,12 +189,15 @@ wheel, independently of the canvas.
 A slide is a **region of the canvas with a permanent rim** round it, not a
 separate document. Click the **New slide** button (on the canvas, just left of
 where the camera opens) and a slide appears where the button was, with a title
-and some body text; the button glides down below it, so clicking again puts the
-next slide underneath and a deck grows as a column.
+and some body text; the camera glides to frame it, and the button glides down
+below it, so clicking again puts the next slide underneath and a deck grows as a
+column.
 
 Click a slide's rim and the camera glides until that slide fills the window --
 presenting is navigating. Its inside is left alone, so everything on a slide
-stays usable. The deck's shape is set in the Escape menu: 16:9, 4:3 or 1:1.
+stays usable. The deck's shape is set in the Escape menu: 3:2, 16:9, 4:3 or
+1:1. It starts at **3:2**, which is also the shape the app window opens at, so a
+slide seen at its own scale is exactly a screenful.
 
 A slide owns nothing but its rim: the title and the body it arrives with are
 ordinary **text boxes** on the canvas, which you can move, edit, resize and
@@ -190,10 +205,10 @@ throw away like anything else. A slide itself does not move -- it is a place,
 not a container -- so clicking one does the only thing it does, which is take
 the camera there.
 
-Point at a slide's rim and a small **cross** appears beside the pointer. Click
-it and the slide goes, taking everything whose middle is on it -- the same test
-the lasso uses. The deck then closes the gap: every slide below comes up by one
-slide, with its contents and with the **New slide** button.
+Point at a slide's rim and a **delete slide** button appears in its bottom-right
+corner. Click it and the slide goes, taking everything whose middle is on it --
+the same test the lasso uses. The deck then closes the gap: every slide below
+comes up by one slide, with its contents and with the **New slide** button.
 
 ## Words, pictures and video
 
@@ -244,6 +259,49 @@ resized offers its height and its width, and if either is close to the size
 being asked for it is taken exactly. That is how two pictures come to be exactly
 the same height, or a caption exactly as wide as the box above it. Code boxes
 resize without snapping, but are offered as targets.
+
+## Clifford algebras
+
+A box can work in a geometric algebra, generated as plain C++ -- concrete
+structs and concrete products, unrolled, no templates. `Algebra(3,0,1);` on a
+line of its own chooses the signature (p squaring to +1, q to -1, r to 0); with
+nothing said it is Cl(3,0,1), 3D projective geometric algebra, with `e0` null.
+
+Types are named by grade: `Una` (grade 1), `Bi`, `Tri`, `Even`, `Odd`,
+`Multivector`, and compounds like `ScalarQuad`, written ascending.
+
+The `Algebra` line reads as the sentence that names the algebra -- **A =
+Cl^{3,0,1}**, in a script A -- and every type after it is said in terms of that
+name: an exterior power for a single grade, **A⁺** and **A⁻** for the even and
+odd halves, **A** for the whole of it, and a direct sum for a compound. Because a
+type is a set of *grades*, every product has an exact result type with a name --
+nothing is widened to `Multivector` to make things fit.
+
+| C++ | means | reads as |
+| --- | --- | --- |
+| `a * b` | geometric product | `ab` |
+| `a \| b` | inner product | `a · b` |
+| `a ^ b` | outer product | `a ∧ b` |
+| `a & b` | regressive product | `a ∨ b` |
+| `~a` | reverse | `ã` |
+| `!a` | dual | `a*` |
+
+`grade2(M)` takes the grade-2 part of a value, and reads as **⟨M⟩₂** -- with the
+subscript always shown, including `⟨M⟩₀` for the scalar part. Only the grades a
+type has get a selector, so asking an `Even` for its grade 3 is a compile error
+rather than a silent zero.
+
+C++ binds `|` and `^` looser than `+`, so `a + b | c` is `(a + b) | c`; write
+the brackets. Only the types a box mentions are written out, plus whatever the
+products between them need, so an ordinary box of floats pays nothing.
+
+```
+Algebra(3,0,1);
+Una p;
+Una q;
+Bi L = p ^ q;
+float d = p | q;
+```
 
 ## Two languages
 

@@ -30,9 +30,11 @@ class App {
   void Draw();
 
  private:
-  // A click (press and release without dragging) selects a block; a drag pans
-  // the canvas instead, so both gestures can start anywhere.
-  void HandlePointer();
+  // Pressing inside a box gives it the caret and starts selecting its text; a
+  // press on text already selected picks that text up instead, and pulling it
+  // out of the box gives its variable a window of its own. Returns true while
+  // it owns the pointer.
+  bool HandleTextGesture();
   void HandleTyping();
   // Moving focus away is one of the two triggers for a rebuild.
   void SetFocus(CodeBlock* block);
@@ -116,8 +118,14 @@ class App {
   CodeBlock* dragBlock_ = nullptr;
   Vector2    dragBlockGrab_{};   // world offset from the box origin to the pointer
   bool       dragBlockMoved_ = false;
-  bool       pressActive_ = false;
-  Vector2    pressOrigin_{};
+  // Selecting text in a box, and pulling a variable out of it. `Arming` is the
+  // moment between pressing on a selection and having moved far enough for it
+  // to be a drag rather than a click.
+  enum class TextDrag { None, Selecting, Arming };
+  TextDrag    textDrag_ = TextDrag::None;
+  CodeBlock*  textBlock_ = nullptr;
+  std::string pullName_;
+  Vector2     pullFrom_{};
   // True while the system cursor is hidden because a hand is being drawn in its
   // place. Kept so the two can never get out of step.
   bool       cursorHidden_ = false;

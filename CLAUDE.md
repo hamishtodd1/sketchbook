@@ -213,6 +213,15 @@ whole thing into code, and hides the injected values throughout: while you are
 editing, what you see is your own text. A toggle on the focused box switches it
 back to reading as mathematics, with only the caret's line left as code.
 
+**Dragging across a box highlights its text**, and so does holding shift while
+the caret moves -- shift means only "leave the anchor where it is", which is one
+rule covering the arrows, word movement and Home/End alike. The caret and the
+anchor are the same kind of thing, so "is anything highlighted" is one
+comparison and needs no flag; typing over a highlight replaces it, and moving
+the caret without shift puts it down.
+It exists for its own sake, but the reason it was built is the gesture above:
+selecting part of a name is how you take hold of what that name refers to.
+
 **Every window sits on the grid, and boxes never overlap.** A window's top-left
 corner snaps to the nearest dot of the grid *as drawn*, so placement gets finer
 as you zoom in. That holds for boxes, number lines, plots and
@@ -274,13 +283,24 @@ box it came from, in that variable's colour, wherever it is written: in the
 LaTeX or in the code, whichever that line is currently showing, and on every
 line that mentions it rather than only its declaration.
 
-**And the pointer is joined to what it lights up**, by a curve in the same
+**And the value is joined to what it lights up**, by a curve in the same
 colour, drawn in the overlay pass so it runs over every window rather than being
 chopped in half by one. The box says *that* this is the same thing; the curve
-says which pointer it is the same thing as, which starts to matter as soon as
-two windows are open at once. It leaves both ends horizontally and lands on
-whichever side of the name the pointer is already on, so it never crosses the
+says which one it is the same thing as, which starts to matter as soon as two
+windows are open at once. It leaves both ends horizontally and lands on
+whichever side of the name the other end is already on, so it never crosses the
 thing it is pointing at.
+
+**The curve leaves the visualization, not the pointer.** The handle on a number
+line *is* the variable; the pointer is only where your hand happens to be. That
+matters now that a box's reals share one axis: three wires all setting off from
+the cursor would be a knot, where three wires each leaving their own marker are
+three separate statements. A plot's wire leaves the middle of the plot, since a
+curve is a whole function and has no one place it is.
+
+The exception is a **shader's picture**, which reports the pointer -- and for
+exactly the same reason. There the pointer is not where your hand is, it is the
+point the shader is being read at: it *is* the value.
 
 **The pointer over a shader's picture is `fragTexCoord`.** Not a metaphor: that
 is the value the shader is being evaluated at, and it is the value the probe
@@ -319,6 +339,11 @@ next click lands the next slide underneath. A deck is therefore a column you can
 scroll through and zoom out of, rather than a list beside the work -- and the
 button is always at the end of it.
 
+**And the camera goes to look at it**, on the same glide a click on the rim
+would have given. Making a slide is a way of saying "I am working here now", so
+the canvas takes you there rather than leaving you where you happened to be
+standing when you asked for it.
+
 **A slide owns nothing but its rim.** Its title and its body are ordinary text
 boxes, put on the canvas where the slide would have drawn them and thereafter
 belonging to the canvas: they move, they are edited, they resize, they are
@@ -342,11 +367,16 @@ was already there is what steps clear. The body is put under the title by the
 height the title actually turned out to be, rather than by a guess, since
 snapping can move either of them by half a dot.
 
-**Throwing a slide away.** Pointing at a slide's rim brings up a small cross
-beside the pointer -- the same cross the drop target wears, because it means the
-same thing. It rides along the rim under the pointer and freezes the moment the
-pointer leaves the rim for it, which is what makes it reachable: a button that
-ran away from the click meant to press it would be no button at all.
+**Throwing a slide away.** Pointing at a slide's rim brings up a button in that
+slide's **bottom-right corner**, just inside the rim's grab band so the two
+never want the same pixel. It says *delete slide*: this is the one thing on the
+canvas with no gesture to learn and nothing to undo it with, so it is spelled
+out rather than drawn. Going to the button keeps the offer open, since reaching
+for it would otherwise take it away.
+
+Like every other piece of chrome it is a fixed number of screen pixels at any
+zoom -- and a slide too small on screen to hold it is simply not offered one,
+rather than being buried under its own button.
 
 Clicking it takes the slide **and everything on it**. What counts as "on it" is
 decided by each window's middle, which is exactly how the lasso decides what it
@@ -356,8 +386,11 @@ middle, and there is one answer to that question rather than two. The deck then
 does everything standing on them, and so does the new-slide button. A deck is a
 column, and a column has no holes in it.
 
-The aspect is a deck-wide setting, chosen from the Escape menu as one of the
-three shapes a deck is ever made for.
+The aspect is a deck-wide setting, chosen from the Escape menu as one of the few
+shapes a deck is ever made for. It starts at **3:2**, which is also the shape
+the app window opens at -- the same number in both places, so that a slide seen
+at its own scale is exactly a fresh screenful of it and the cover zoom comes out
+at 1.
 
 ### Windows, and closing them
 
@@ -564,8 +597,25 @@ hands back bytes, and whoever wants a texture out of them owns the GPU.
 
 ### Number lines
 
-Every variable gets one: free variables get a draggable handle, derived ones a
-read-only marker that moves when its inputs do.
+**A box gets one, and all of its reals share it.** Not one axis per variable: a
+stack of one-value axes says nothing about how those values compare, and the
+values in a box are read together. So they go on one scale, and that scale
+**frames itself** the first time everything on it has a value, so that every one
+of them is in view. Free variables get a draggable handle, derived ones a
+read-only marker that moves when its inputs do; they are told apart by shape,
+and told from each other by colour, exactly as before.
+
+**A variable earns an axis of its own by being pulled out of the code.** Select
+part of where it is written -- any part of any mention of it -- and drag it out
+of the box. It comes away as an axis carrying just that variable, following the
+pointer, and is dropped wherever the button comes up. That is the same drop
+every carried row gets, so it can equally be dropped onto another axis to merge,
+or onto the cross to be thrown away.
+
+The gesture is worth stating as a rule, because it will be wanted for every kind
+of window eventually: **the code is where things come from.** A window is not
+asked for from a menu; it is pulled off the name of the thing it is about, and
+it lands where you let go.
 
 They start **docked** under their box and can be pulled off onto the canvas.
 Dropping one onto another **merges** them onto a single shared axis — this is a
@@ -598,6 +648,7 @@ A type is three concerns, and they are three files:
 | file | what it holds |
 | --- | --- |
 | `RealFunction.*` | the type itself: the C++ the app injects so `RealFunction f;` compiles, and the statement that prints one back |
+| `Clifford.*` | a whole family of types: it writes out the structs and products of Cl(p,q,r) on demand |
 | `RealFunctionViz.*` | how one is shown (the plot) and how an example of one is made |
 | `RealViz.*` | the same two things for a real: the number line, and a tidy number |
 
@@ -664,6 +715,129 @@ draws the polyline. A free *real* reaches the program through argv, so moving
 its knob is a re-run; a free *function* cannot, so its example is written into
 the source and changing it would be a rebuild. That is why a function has no
 knob yet.
+
+### Clifford algebras
+
+The third type, and the one the tool is most wanted for. It is the C++ answer to
+**GAmphetamine.js**, and it works the way GAmphetamine does: the algebra is not
+a library that gets included, it is **generated** -- concrete structs and
+concrete products between them, fully unrolled, no templates and no runtime
+dispatch. That is the same bargain everything else here makes, and it is why a
+box of geometric algebra still compiles in the time it takes to let go of a key.
+
+**A type is a set of grades.** Not an arbitrary set of basis blades: grades.
+That one restriction is the whole trick, because the product of two grade-sets
+is a grade-set -- so every product has an *exact* result type, and every result
+type has a name. `Bi` is grade 2, `Even` is every even grade,
+`ScalarQuad` is what it says (GAmphetamine calls that one a study). A name
+is a run of grade words, so a compound type needs no declaring: write it and it
+is a type. Nothing is ever widened to `Multivector` to make the types line up.
+
+The names are the count and nothing else. The "-vector" on the end of
+"bivector" says nothing that **Bi** does not, and a compound spells out every
+grade it holds -- `ScalarQuad` is a name where `ScalarQuadvector` is a sentence.
+They run **ascending**, because that is the order a name is written back out in
+and a type has to be spelled the way it was generated: `BiTri` is one, `TriBi`
+is not.
+
+**The signature is written the way it is spoken.** `Algebra(3,0,1);` on a line
+of its own says p generators squaring to +1, q to -1 and r to 0 -- and that line
+is a statement *about* the box rather than one *in* it, so it leaves a blank
+behind rather than being compiled, and it reads as the sentence that names the
+algebra rather than as code. A box that says nothing works in Cl(3,0,1),
+3D projective geometric algebra, which is what these tools are mostly for. The
+generators are indexed the way every PGA text indexes them, the null ones first,
+so Cl(3,0,1) has e0 null and e1 e2 e3 positive.
+
+**Degeneracy is not a special case.** A generator that squares to zero takes
+terms out of the products like any other metric, and the dual is a *complement*
+rather than a multiplication by the pseudoscalar -- which is the only way it can
+survive a pseudoscalar that squares to zero. That is what makes Cl(3,0,1) work
+at all, and it is the reason the dual is defined by `b ^ !b = I` rather than by
+a product.
+
+The operators are GAmphetamine's, because that is what the notation already is,
+and each has a reading as mathematics:
+
+| C++ | means | written |
+| --- | --- | --- |
+| `a * b` | geometric product | juxtaposition, `ab` |
+| `a | b` | inner product | `a \cdot b` |
+| `a ^ b` | outer product | `a \wedge b` |
+| `a & b` | regressive product | `a \vee b` |
+| `~a` | reverse | `\widetilde{a}` |
+| `!a` | dual | `a^{*}` |
+
+**Grade selection is `grade2(M)`**, and it reads as Hestenes writes it:
+`\langle M \rangle_{2}`. Written out per grade rather than as one
+function taking a number, because the *type* of the answer depends on which
+grade is asked for -- the grade-2 part of an even element is a bivector, and
+there is no single type that could stand for all of them.
+
+Only the grades a type actually has get a selector, so asking an `Even` for its
+grade 3 does not compile. That it would be zero is beside the point: it is a
+mistake, and it is one the type system can see.
+
+One departure from Hestenes: **the subscript is always there**, including on the
+scalar part. He drops the zero, and dropping it makes the most easily missed of
+the projections the one that looks like no projection at all.
+
+C++ binds `|` looser than `^`, and `^` looser than `+`, so `a + b | c` means
+`(a + b) | c`. That is a fact about C++ and not something to paper over: the
+parser here follows the same precedence the compiler will, because the compiler
+is what actually runs it. Write the brackets.
+
+**Only what a box uses is written out.** The default is the geometric and inner
+products for `Una`, `Bi` and `Even`; anything else a box mentions is
+added, and so is anything the products between them turn out to need. That
+closure is over *products* only. Closing over addition as well would ask for the
+union of every pair, which is the entire lattice of grade-sets -- 30 types and
+three and a half megabytes of code nobody wanted. A sum of two unlike things is
+written when it is wanted: name the type and the operator appears with it, and
+where the exact type was never asked for the sum widens to the nearest one that
+exists rather than going missing.
+
+**The algebra gets a name, and everything else is said in terms of it.** The
+line that chooses it is not a statement in the program, it is a statement of
+mathematics, and it is set as one: `Algebra(3,0,1);` reads
+
+>   A = Cl^{3,0,1}
+
+with a **script A**, chosen so that an ordinary variable called `A` is a
+different letter and there is nothing to collide with. After that the types need
+no signature of their own:
+
+| type | reads |
+| --- | --- |
+| `Una`, `Bi`, `Tri` | an exterior power, `\bigwedge^{k} A` |
+| `Even` | `A^{+}` |
+| `Odd` | `A^{-}` |
+| `Multivector` | `A` |
+| `ScalarQuad` and other compounds | the direct sum of their parts |
+
+The `+` and `-` are the Z/2 grading, which is what even and odd *are*. That
+superscript says something different from the one on `\bigwedge^{1} A`,
+which is why a single grade always wears its wedge rather than being shortened
+to `A`.
+
+**`A` is the algebra, and the exterior power is of the space underneath it.**
+Those are two different objects: the quadratic space has dimension p+q+r, the
+algebra over it has dimension 2^(p+q+r), and only the algebra has an even and an
+odd half. Naming `A` as the algebra is what makes `A^{+}` mean anything; the
+price is that `\bigwedge^{k} A` is then an exterior power of an algebra,
+which is not literally what is wanted.
+
+It is a standard abuse and the usual justification holds: a Clifford algebra is
+isomorphic to the exterior algebra of its space *as a graded vector space*,
+differing only in its product, so the grade-k part of one is the grade-k part of
+the other. The alternative that would need no excuse is Hestenes' grade
+projection -- which is now here as `grade2(M)` for taking a value apart, though
+the *types* are still named with the wedge.
+
+Known conventions, stated so they can be argued with: the inner product is the
+symmetric one, keeping grade |r - s|; the dual is the Poincare complement; and
+`a & b` is `undual(dual(a) ^ dual(b))`, which makes `^` the meet of planes and
+`&` the join of points, as in ganja.
 
 ### Two languages
 
@@ -873,6 +1047,31 @@ sections above.
 - A paragraph wraps to a measure, but nothing yet lets one **flow into the
   next** -- a body that outgrows its slide simply runs off the bottom of it.
   Nothing warns, either.
+
+- **A multivector has no window.** It compiles and it runs, but nothing shows
+  one: no number line, no picture, and so nothing reported back from the
+  program either. That is the next thing, and it is the whole reason for the
+  rest of it -- a bivector in Cl(3,0,1) is a line in space, and a motor is a
+  screw motion, and both of those are things one wants to *see*.
+
+- A multivector has no knob for the same reason a function has none: its chosen
+  value is written into the source rather than sent down argv, so changing one
+  is a rebuild. Several floats down argv would fix it.
+
+- **`Algebra(3,0,1);` is a guess at the syntax.** It reads well, it parses, and
+  now that it is set as `A = R^{3,0,1}` it no longer *looks* like a statement in
+  the program -- but it is still C++ that is silently not compiled, which is a
+  small lie. The alternative floated was to hang the signature on the type
+  names, `Una301` and `Bi301`, which would make the algebra a property of the
+  thing rather than of the box and would let two algebras share one canvas. A
+  deck of slides about one algebra would rather say it once, though.
+
+- **A multivector shows no injected value.** A real shows its number and a
+  function shows its lambda, but a multivector of Cl(3,0,1) has sixteen
+  components, and a box sized for the worst case across both readings would be
+  wider than the screen even with the injection hidden. So nothing is shown,
+  which is honest but unhelpful -- the answer is a window that displays one,
+  which is wanted anyway.
 
 - **Video has no sound.** Nothing plays audio, and a clip chosen for what
   someone says in it is not much use silent.

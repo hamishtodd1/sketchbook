@@ -138,7 +138,7 @@ void ShaderPanel::DrawSelectionRims(const Viewport& viewport, FontStore& fonts) 
 }
 
 void ShaderPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
-                                 std::vector<std::pair<CodeBlock*, std::string>>* out) const {
+                                 std::vector<ActiveValue>* out) const {
   if (out == nullptr) return;
   const Vector2 pointer = GetMousePosition();
   for (std::size_t i = 0; i < views_.size(); ++i) {
@@ -146,7 +146,9 @@ void ShaderPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
     // Inside the picture only: on the rim you are holding the window, not
     // pointing at a value.
     if (!CheckCollisionPointRec(pointer, RectFor(i, viewport, fonts))) continue;
-    out->emplace_back(views_[i].block, mathprogram::kShaderInput);
+    // The one window whose wire really does leave the pointer, because here the
+    // pointer *is* the value: it is the point the shader is being read at.
+    out->push_back({views_[i].block, mathprogram::kShaderInput, pointer});
     return;
   }
 }

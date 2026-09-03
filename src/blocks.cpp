@@ -111,6 +111,10 @@ std::string EncodeUtf8(int codepoint) {
 
 bool CtrlDown() { return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL); }
 
+// Holding shift while the caret moves leaves the anchor where it was, which is
+// what turns a movement into a highlight. One rule for every way of moving.
+bool ShiftDown() { return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT); }
+
 // Key repeat, so holding backspace behaves like every other editor.
 bool Triggered(int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); }
 
@@ -253,11 +257,23 @@ CodeBlock::~CodeBlock() {
   }
 }
 
+clifford::Signature CodeBlock::Algebra() const {
+  clifford::Signature signature = clifford::kDefaultSignature;
+  for (const std::string& line : lines_) clifford::ParseAlgebra(line, &signature);
+  return signature;
+}
+
 void CodeBlock::EnsureCache(FontStore& fonts, float emPx, float measurePx) const {
   const bool prose = IsText();
+  const clifford::Signature signature = Algebra();
   // Bold and italic change which face the words are set in, so they invalidate
-  // a line as surely as editing it does.
-  const unsigned styleSig = (bold_ ? 1u : 0u) | (italic_ ? 2u : 0u) | (prose ? 4u : 0u);
+  // a line as surely as editing it does -- and so does the algebra, which every
+  // line of a box is read in terms of. Changing it on one line has to re-read
+  // all of them.
+  const unsigned styleSig = (bold_ ? 1u : 0u) | (italic_ ? 2u : 0u) | (prose ? 4u : 0u) |
+                            (static_cast<unsigned>(signature.p) << 3) |
+                            (static_cast<unsigned>(signature.q) << 8) |
+                            (static_cast<unsigned>(signature.r) << 13);
 
   cache_.resize(lines_.size());
   for (std::size_t i = 0; i < lines_.size(); ++i) {
@@ -267,7 +283,7 @@ void CodeBlock::EnsureCache(FontStore& fonts, float emPx, float measurePx) const
       entry.styleSig = styleSig;
       // A text box has no mathematical reading and is not looked for one: its
       // lines are words, and words are not code that failed to parse.
-      entry.parsed = prose ? mathline::Line{} : mathline::Parse(lines_[i]);
+      entry.parsed = prose ? mathline::Line{} : mathline::Parse(lines_[i], signature);
       entry.latex = prose ? std::string() : entry.parsed.latex;
       entry.tex = entry.latex.empty() ? tex::Parsed{} : tex::Parse(entry.latex);
       entry.emPx = -1.0f;
@@ -386,6 +402,14 @@ std::string CodeBlock::Injection(int line) const {
   if (mathline::IsFunctionType(parsed.type)) {
     return " = " + types::ExampleRealFunction(parsed.name);
   }
+  // A multivector gets no injection shown at all. Not because there is nothing
+  // to show -- there is, and it is real code the way a function's is -- but
+  // because a box is sized for the worst case across both readings, and a
+  // multivector of Cl(3,0,1) has sixteen components. Showing it makes the box
+  // wider than the screen even while it is hidden. Better to show nothing than
+  // to show a nought that is not the value, and better than either would be a
+  // window that displays one; that is the next thing.
+  if (mathline::IsMultivectorType(parsed.type, Algebra())) return {};
 
   for (const mathprogram::Variable& variable : program_.variables()) {
     if (variable.name == parsed.name) return " = " + FormatInjected(variable.value);
@@ -404,8 +428,8 @@ Color CodeBlock::VariableColor(const std::string& name) const {
   return sb::VariableColor(static_cast<int>(variables.size()));
 }
 
-void CodeBlock::SetHighlights(std::vector<std::string> names) {
-  highlights_ = std::move(names);
+void CodeBlock::SetHighlights(std::vector<ActiveValue> values) {
+  highlights_ = std::move(values);
 }
 
 void CodeBlock::Hide(const std::string& name) {
@@ -864,6 +888,130 @@ void CodeBlock::PlaceCaret(Vector2 point, const Viewport& viewport, FontStore& f
   blinkAnchor_ = GetTime();
 }
 
+// ------------------------------------------------------------ selecting text
+
+bool CodeBlock::HasSelection() const {
+  return anchorLine_ != caretLine_ || anchorCol_ != caretCol_;
+}
+
+void CodeBlock::SelectionRange(int* fromLine, int* fromCol, int* toLine, int* toCol) const {
+  const bool forwards =
+      (anchorLine_ < caretLine_) || (anchorLine_ == caretLine_ && anchorCol_ <= caretCol_);
+  *fromLine = forwards ? anchorLine_ : caretLine_;
+  *fromCol = forwards ? anchorCol_ : caretCol_;
+  *toLine = forwards ? caretLine_ : anchorLine_;
+  *toCol = forwards ? caretCol_ : anchorCol_;
+}
+
+bool CodeBlock::SelectionInRow(const Row& row, std::size_t* from, std::size_t* to) const {
+  if (!HasSelection()) return false;
+  int fromLine = 0, fromCol = 0, toLine = 0, toCol = 0;
+  SelectionRange(&fromLine, &fromCol, &toLine, &toCol);
+  if (row.line < fromLine || row.line > toLine) return false;
+
+  const std::size_t begin =
+      (row.line == fromLine) ? std::max<std::size_t>(row.begin, fromCol) : row.begin;
+  const std::size_t end =
+      (row.line == toLine) ? std::min<std::size_t>(row.end, toCol) : row.end;
+  if (end <= begin) return false;
+  *from = begin;
+  *to = end;
+  return true;
+}
+
+void CodeBlock::BeginSelection(Vector2 screenPoint, const Viewport& viewport, FontStore& fonts) {
+  PlaceCaret(screenPoint, viewport, fonts);
+  SelectNone();
+}
+
+void CodeBlock::ExtendSelection(Vector2 screenPoint, const Viewport& viewport, FontStore& fonts) {
+  const int line = anchorLine_;
+  const int col = anchorCol_;
+  PlaceCaret(screenPoint, viewport, fonts);
+  anchorLine_ = line;
+  anchorCol_ = col;
+}
+
+bool CodeBlock::PointInSelection(Vector2 screenPoint, const Viewport& viewport,
+                                 FontStore& fonts) const {
+  if (!HasSelection()) return false;
+  const Geometry& g = Measure(viewport, fonts);
+  for (const Row& row : g.rows) {
+    if (screenPoint.y < row.y || screenPoint.y >= row.y + row.height) continue;
+    std::size_t from = 0;
+    std::size_t to = 0;
+    if (!SelectionInRow(row, &from, &to)) return false;
+
+    const std::string& line = lines_[static_cast<std::size_t>(row.line)];
+    const Face  face = row.asLatex ? ProseFace() : Face::Mono;
+    const float left =
+        row.x + text::Measure(fonts, face, std::string_view(line).substr(row.begin,
+                                                                        from - row.begin),
+                              g.emPx);
+    const float width =
+        text::Measure(fonts, face, std::string_view(line).substr(from, to - from), g.emPx);
+    return screenPoint.x >= left && screenPoint.x <= left + width;
+  }
+  return false;
+}
+
+std::string CodeBlock::SelectedVariable() const {
+  if (!HasSelection()) return {};
+  int fromLine = 0, fromCol = 0, toLine = 0, toCol = 0;
+  SelectionRange(&fromLine, &fromCol, &toLine, &toCol);
+  // A name is written on one line, and what is selected has to be part of it
+  // and nothing else -- otherwise "a + b" would name something.
+  if (fromLine != toLine) return {};
+  const std::string& line = lines_[static_cast<std::size_t>(fromLine)];
+  const auto isWord = [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+  };
+  for (int i = fromCol; i < toCol; ++i) {
+    if (!isWord(line[static_cast<std::size_t>(i)])) return {};
+  }
+
+  // Grown to the whole identifier: selecting one letter of a name is naming it.
+  std::size_t begin = static_cast<std::size_t>(fromCol);
+  std::size_t end = static_cast<std::size_t>(toCol);
+  while (begin > 0 && isWord(line[begin - 1])) --begin;
+  while (end < line.size() && isWord(line[end])) ++end;
+  if (end <= begin) return {};
+
+  const std::string word = line.substr(begin, end - begin);
+  for (const mathprogram::Variable& variable : program_.variables()) {
+    if (variable.name == word && variable.kind == mathprogram::Kind::Real) return word;
+  }
+  return {};
+}
+
+bool CodeBlock::EraseSelection() {
+  if (!HasSelection()) return false;
+  PushUndo(EditKind::Structural);
+
+  int fromLine = 0, fromCol = 0, toLine = 0, toCol = 0;
+  SelectionRange(&fromLine, &fromCol, &toLine, &toCol);
+  const std::size_t first = static_cast<std::size_t>(fromLine);
+  const std::size_t last = static_cast<std::size_t>(toLine);
+
+  if (first == last) {
+    lines_[first].erase(static_cast<std::size_t>(fromCol),
+                        static_cast<std::size_t>(toCol - fromCol));
+  } else {
+    const std::string head = lines_[first].substr(0, static_cast<std::size_t>(fromCol));
+    const std::string tail = lines_[last].substr(static_cast<std::size_t>(toCol));
+    lines_.erase(lines_.begin() + static_cast<std::ptrdiff_t>(first) + 1,
+                 lines_.begin() + static_cast<std::ptrdiff_t>(last) + 1);
+    lines_[first] = head + tail;
+  }
+  caretLine_ = fromLine;
+  caretCol_ = fromCol;
+  // Clamped before the edit is signed off, so the anchor lands wherever the
+  // caret actually ended up.
+  ClampCaret();
+  TouchEdit();
+  return true;
+}
+
 void CodeBlock::SetFocused(bool focused) {
   focused_ = focused;
   blinkAnchor_ = GetTime();
@@ -928,6 +1076,7 @@ void CodeBlock::Undo() {
   caretCol_ = snapshot.caretCol;
   if (lines_.empty()) lines_.emplace_back();
   ClampCaret();
+  SelectNone();
   dirty_ = true;
   lastEdit_ = EditKind::None;
   blinkAnchor_ = GetTime();
@@ -935,6 +1084,11 @@ void CodeBlock::Undo() {
 
 void CodeBlock::TouchEdit() {
   dirty_ = true;
+  // Every edit ends with nothing selected. The anchor is only ever the far end
+  // of a selection being made; left where it was, each keystroke would select
+  // everything typed since and the next one would replace it.
+  anchorLine_ = caretLine_;
+  anchorCol_ = caretCol_;
   blinkAnchor_ = GetTime();
 }
 
@@ -954,6 +1108,8 @@ void CodeBlock::ClampCaret() {
 }
 
 void CodeBlock::InsertCodepoint(int codepoint) {
+  // Typing over a selection replaces it, which is what a selection is for.
+  EraseSelection();
   PushUndo(EditKind::Insert);
   const std::string encoded = EncodeUtf8(codepoint);
   std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
@@ -963,6 +1119,7 @@ void CodeBlock::InsertCodepoint(int codepoint) {
 }
 
 void CodeBlock::InsertNewline() {
+  EraseSelection();
   PushUndo(EditKind::Structural);
   std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
   std::string tail = line.substr(static_cast<std::size_t>(caretCol_));
@@ -985,6 +1142,7 @@ void CodeBlock::InsertNewline() {
 }
 
 void CodeBlock::DeleteBefore() {
+  if (EraseSelection()) return;
   std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
   if (caretCol_ > 0) {
     PushUndo(EditKind::Delete);
@@ -1005,6 +1163,7 @@ void CodeBlock::DeleteBefore() {
 }
 
 void CodeBlock::DeleteAt() {
+  if (EraseSelection()) return;
   std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
   if (caretCol_ < static_cast<int>(line.size())) {
     PushUndo(EditKind::Delete);
@@ -1058,6 +1217,10 @@ void CodeBlock::MoveCaret(int dLine, int dChar) {
     }
     ClampCaret();
   }
+  // Moving the caret puts the highlight down -- unless shift is held, which is
+  // the whole of what shift means: keep the anchor, move the caret, and the
+  // stretch between them is highlighted.
+  if (!ShiftDown()) SelectNone();
   blinkAnchor_ = GetTime();
 }
 
@@ -1079,6 +1242,7 @@ void CodeBlock::MoveCaretByWord(int direction) {
     while (i < size && !IsWordChar(line[static_cast<std::size_t>(i)])) ++i;
     caretCol_ = i;
   }
+  if (!ShiftDown()) SelectNone();
   blinkAnchor_ = GetTime();
 }
 
@@ -1111,10 +1275,12 @@ void CodeBlock::HandleInput() {
   }
   if (IsKeyPressed(KEY_HOME)) {
     caretCol_ = 0;
+    if (!ShiftDown()) SelectNone();
     blinkAnchor_ = GetTime();
   }
   if (IsKeyPressed(KEY_END)) {
     caretCol_ = static_cast<int>(lines_[static_cast<std::size_t>(caretLine_)].size());
+    if (!ShiftDown()) SelectNone();
     blinkAnchor_ = GetTime();
   }
 }
@@ -1396,11 +1562,29 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
 
     // A window being used elsewhere lights up every place its variable is
     // written, in whichever reading this row happens to be showing.
-    for (const std::string& name : highlights_) {
-      const Color tint = VariableColor(name);
-      for (const Rectangle& box : MentionRects(r, name, g, fonts)) {
+    for (const ActiveValue& active : highlights_) {
+      const Color tint = VariableColor(active.name);
+      for (const Rectangle& box : MentionRects(r, active.name, g, fonts)) {
         DrawRectangleRounded(box, 0.30f, 6, Fade(tint, kMentionFillAlpha));
         DrawRectangleRoundedLinesEx(box, 0.30f, 6, std::max(1.0f, 1.1f * g.zoom), tint);
+      }
+    }
+
+    // What is selected, behind the letters.
+    if (focused_) {
+      std::size_t from = 0;
+      std::size_t to = 0;
+      if (SelectionInRow(row, &from, &to)) {
+        const std::string& source = lines_[i];
+        const Face  face = row.asLatex ? ProseFace() : Face::Mono;
+        const float left =
+            row.x + text::Measure(fonts, face,
+                                  std::string_view(source).substr(row.begin, from - row.begin),
+                                  g.emPx);
+        const float width = text::Measure(
+            fonts, face, std::string_view(source).substr(from, to - from), g.emPx);
+        DrawRectangleRec({left, row.y + row.height * 0.06f, width, row.height * 0.88f},
+                         Fade(kAccent, asWords ? 0.22f : 0.34f));
       }
     }
 
@@ -1557,32 +1741,37 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
 }
 
 void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
-  // A line from the pointer to every place the thing under it is written. The
-  // box round the name says *that* it is the same thing; the curve says which
-  // pointer it is the same thing as, which matters once two windows are open.
+  // A line from the window showing a value to every place that value is
+  // written. The box round the name says *that* it is the same thing; the curve
+  // says which window it is the same thing as, which matters once two are open.
+  //
+  // It leaves the *visualization* -- the handle on the number line, the picture
+  // on the plot -- and not the pointer. The pointer is only where your hand
+  // happens to be; the handle is the thing that is the variable. (A shader's
+  // preview is the exception, and it reports the pointer for exactly that
+  // reason: there the pointer really is the value.)
   //
   // Drawn in the overlay pass so it runs over every window, including the one
   // being pointed at -- a curve chopped in half by a card would say nothing.
   if (!highlights_.empty() && !absorbed_) {
     const Geometry& g = Measure(viewport, fonts);
     if (g.emPx >= 0.4f) {
-      const Vector2 pointer = GetMousePosition();
       const float thickness = std::max(1.4f, 1.8f * g.zoom);
-      for (const std::string& name : highlights_) {
-        const Color tint = VariableColor(name);
+      for (const ActiveValue& active : highlights_) {
+        const Color   tint = VariableColor(active.name);
+        const Vector2 from = active.from;
         for (std::size_t i = 0; i < g.rows.size(); ++i) {
-          for (const Rectangle& box : MentionRects(i, name, g, fonts)) {
-            // It lands on whichever side the pointer is already on, so the
-            // curve never crosses the name it is pointing at.
-            const bool fromLeft = pointer.x < box.x + box.width * 0.5f;
+          for (const Rectangle& box : MentionRects(i, active.name, g, fonts)) {
+            // It lands on whichever side the window is already on, so the curve
+            // never crosses the name it is pointing at.
+            const bool fromLeft = from.x < box.x + box.width * 0.5f;
             const Vector2 target = {fromLeft ? box.x : box.x + box.width,
                                     box.y + box.height * 0.5f};
             // Tangents leave both ends horizontally, which is what makes it
             // read as a cable rather than as a stray line.
-            const float reach =
-                std::clamp(std::abs(target.x - pointer.x) * 0.45f, 24.0f, 190.0f);
+            const float reach = std::clamp(std::abs(target.x - from.x) * 0.45f, 24.0f, 190.0f);
             const float direction = fromLeft ? 1.0f : -1.0f;
-            DrawSplineSegmentBezierCubic(pointer, {pointer.x + reach * direction, pointer.y},
+            DrawSplineSegmentBezierCubic(from, {from.x + reach * direction, from.y},
                                          {target.x - reach * direction, target.y}, target,
                                          thickness, Fade(tint, 0.8f));
           }

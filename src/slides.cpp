@@ -18,10 +18,15 @@ constexpr float kButtonSeconds = 0.55f;
 // How long the camera takes to arrive at a slide.
 constexpr float kGlideSeconds = 0.6f;
 
-// The button that throws a slide away: small, and offset from the pointer so
-// that pointing at the rim is never also pointing at it.
-constexpr float kDeleteSide = 30.0f;    // screen pixels
-constexpr float kDeleteReach = 22.0f;
+// The button that throws a slide away. It sits in the slide's bottom-right
+// corner, just inside the rim's grab band so the two never want the same pixel,
+// and it says what it does. Chrome, so it is a fixed number of screen pixels
+// however far the canvas is zoomed -- and it is simply not offered on a slide
+// too small on screen to hold it.
+constexpr const char* kDeleteLabel = "delete slide";
+constexpr float kDeleteEm = 15.0f;
+constexpr float kDeletePad = 11.0f;
+constexpr float kDeleteHeight = 27.0f;
 
 // Padding inside a slide, as a fraction of its height, and the size text is set
 // at. Both in the slide's own terms, so they hold at any zoom.
@@ -63,8 +68,13 @@ Rectangle SlidePanel::OnScreen(const Slide& slide, const Viewport& viewport, flo
   return {topLeft.x, topLeft.y, bounds.width * zoom, bounds.height * zoom};
 }
 
-Rectangle SlidePanel::DeleteButtonRect() const {
-  return {deleteAt_.x, deleteAt_.y, kDeleteSide, kDeleteSide};
+Rectangle SlidePanel::DeleteButtonRect(Rectangle rim, FontStore& fonts) {
+  const float width =
+      text::Measure(fonts, Face::MainRegular, kDeleteLabel, kDeleteEm) + 2.0f * kDeletePad;
+  // A slide too small on screen would be all button, so it gets none.
+  if (rim.width < width * 2.2f || rim.height < kDeleteHeight * 3.0f) return {};
+  return {rim.x + rim.width - kRimGrabInside - width,
+          rim.y + rim.height - kRimGrabInside - kDeleteHeight, width, kDeleteHeight};
 }
 
 void SlidePanel::RemoveSlide(int index, float aspect) {
@@ -149,7 +159,6 @@ void SlidePanel::Advance(float seconds) {
 
 bool SlidePanel::HandleInput(const Viewport& viewport, FontStore& fonts, float aspect,
                              Viewport* camera) {
-  (void)fonts;
   const Vector2 pointer = GetMousePosition();
 
   const Rectangle button = ButtonRect(viewport);
@@ -169,6 +178,13 @@ bool SlidePanel::HandleInput(const Viewport& viewport, FontStore& fonts, float a
       buttonTo_ = {buttonPos_.x, buttonPos_.y + kSlideHeight + kSlideGap};
       buttonElapsed_ = 0.0f;
       buttonMoving_ = true;
+
+      // And the camera goes to look at what was just made, exactly as it would
+      // if the slide's rim had been clicked. Making a slide is a way of saying
+      // "I am working here now".
+      if (camera != nullptr) {
+        camera->GlideTo(slide.centre, ZoomToFill(slide, aspect), kGlideSeconds);
+      }
     }
     return true;   // hovering claims it, so a click never falls through
   }
@@ -182,19 +198,23 @@ bool SlidePanel::HandleInput(const Viewport& viewport, FontStore& fonts, float a
     }
   }
 
-  // The delete button rides along the rim under the pointer, and freezes the
-  // moment the pointer leaves the rim -- which is what lets you reach it.
-  if (onRim >= 0) {
-    hoverSlide_ = onRim;
-    deleteAt_ = {pointer.x + kDeleteReach, pointer.y + kDeleteReach};
-  } else if (hoverSlide_ >= 0 && !CheckCollisionPointRec(pointer, DeleteButtonRect())) {
-    hoverSlide_ = -1;
+  // Pointing at a slide's rim offers its delete button, and going to the button
+  // keeps the offer open -- otherwise reaching for it would take it away.
+  int showing = onRim;
+  if (showing < 0 && hoverSlide_ >= 0 && hoverSlide_ < static_cast<int>(slides_.size())) {
+    const Rectangle rim =
+        OnScreen(slides_[static_cast<std::size_t>(hoverSlide_)], viewport, aspect);
+    if (CheckCollisionPointRec(pointer, DeleteButtonRect(rim, fonts))) showing = hoverSlide_;
   }
-  if (hoverSlide_ >= static_cast<int>(slides_.size())) hoverSlide_ = -1;
+  hoverSlide_ = showing;
 
-  if (hoverSlide_ >= 0 && CheckCollisionPointRec(pointer, DeleteButtonRect())) {
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) RemoveSlide(hoverSlide_, aspect);
-    return true;
+  if (hoverSlide_ >= 0) {
+    const Rectangle rim =
+        OnScreen(slides_[static_cast<std::size_t>(hoverSlide_)], viewport, aspect);
+    if (CheckCollisionPointRec(pointer, DeleteButtonRect(rim, fonts))) {
+      if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) RemoveSlide(hoverSlide_, aspect);
+      return true;
+    }
   }
 
   if (onRim >= 0) {
@@ -228,22 +248,22 @@ void SlidePanel::Draw(const Viewport& viewport, FontStore& fonts, float aspect) 
     DrawRim(rect, zoom, PointOnRim(rect, pointer));
   }
 
-  // The button that throws a slide away, while its rim is being pointed at. The
-  // cross is the one the drop target wears, since it means the same thing.
+  // The button that throws a slide away, in the corner of the slide whose rim
+  // is being pointed at. It says what it does: this one is not a gesture to
+  // learn, and there is nothing to undo it with.
   if (hoverSlide_ >= 0 && hoverSlide_ < static_cast<int>(slides_.size())) {
-    const Rectangle rim = OnScreen(slides_[static_cast<std::size_t>(hoverSlide_)], viewport,
-                                   aspect);
-    const Rectangle close = DeleteButtonRect();
-    if (PointOnRim(rim, pointer) || CheckCollisionPointRec(pointer, close)) {
+    const Rectangle rim =
+        OnScreen(slides_[static_cast<std::size_t>(hoverSlide_)], viewport, aspect);
+    const Rectangle close = DeleteButtonRect(rim, fonts);
+    if (close.width > 0.0f &&
+        (PointOnRim(rim, pointer) || CheckCollisionPointRec(pointer, close))) {
       const bool hot = CheckCollisionPointRec(pointer, close);
       DrawRectangleRounded(close, 0.3f, 8, hot ? kDropHot : kDropBg);
-      const float inset = close.width * 0.32f;
-      const float thickness = std::max(2.0f, close.width * 0.09f);
-      DrawLineEx({close.x + inset, close.y + inset},
-                 {close.x + close.width - inset, close.y + close.height - inset}, thickness,
-                 kDropMark);
-      DrawLineEx({close.x + close.width - inset, close.y + inset},
-                 {close.x + inset, close.y + close.height - inset}, thickness, kDropMark);
+      const float width = text::Measure(fonts, Face::MainRegular, kDeleteLabel, kDeleteEm);
+      text::Draw(fonts, Face::MainRegular, kDeleteLabel,
+                 {close.x + (close.width - width) * 0.5f,
+                  close.y + close.height * 0.5f + kDeleteEm * 0.34f},
+                 kDeleteEm, kDropMark);
     }
   }
 

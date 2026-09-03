@@ -25,6 +25,8 @@
 #include <string_view>
 #include <vector>
 
+#include "types/Clifford.h"
+
 namespace sb::mathline {
 
 enum class Kind {
@@ -32,6 +34,7 @@ enum class Kind {
   Unparsed,     // valid C++ perhaps, but no mathematical reading
   Declaration,  // `float a;` or `float c = <expr>;`
   Assignment,   // `c = <expr>;`
+  Algebra,      // `Algebra(3,0,1);` -- which algebra the box works in
 };
 
 struct Line {
@@ -50,7 +53,12 @@ struct Line {
 };
 
 // Never throws and never reports an error: anything unrecognised is Unparsed.
-Line Parse(std::string_view source);
+//
+// The signature says which algebra a box is working in, which decides both what
+// counts as a type name and how one is written down. It only matters for a box
+// that uses geometric algebra; everything else ignores it.
+Line Parse(std::string_view source,
+           const clifford::Signature& sig = clifford::kDefaultSignature);
 
 // Renders one identifier the way the line renderer would, so callers can label
 // a number line with the same glyphs the equation uses.
@@ -61,5 +69,7 @@ std::string NameToLatex(std::string_view name);
 // function from reals to reals.
 bool IsRealType(std::string_view type);
 bool IsFunctionType(std::string_view type);
+// An element of a Clifford algebra: Bi, Even, ScalarQuad, ...
+bool IsMultivectorType(std::string_view type, const clifford::Signature& sig);
 
 }  // namespace sb::mathline

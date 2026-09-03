@@ -31,6 +31,7 @@ add_executable(sketchbook
   src/compiler.cpp
   src/mathprogram.cpp
   src/mathline.cpp
+  src/types/Clifford.cpp
   src/types/RealFunction.cpp
   src/types/RealViz.cpp
   src/types/RealFunctionViz.cpp

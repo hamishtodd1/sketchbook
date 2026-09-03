@@ -13,7 +13,10 @@ namespace {
 // ------------------------------------------------------------------- tokens
 enum class Tok {
   End, Number, Ident, Plus, Minus, Star, Slash, LParen, RParen,
-  LBracket, RBracket, LBrace, RBrace, Comma, Assign, Semi, Amp
+  LBracket, RBracket, LBrace, RBrace, Comma, Assign, Semi, Amp,
+  // The geometric algebra operators. They are ordinary C++ operators; a
+  // Clifford algebra is what gives them these meanings.
+  Bar, Caret, Tilde, Bang
 };
 
 struct Token {
@@ -68,6 +71,10 @@ std::vector<Token> Tokenize(std::string_view source, bool* ok) {
       case '+': kind = Tok::Plus; break;
       case '-': kind = Tok::Minus; break;
       case '*': kind = Tok::Star; break;
+      case '|': kind = Tok::Bar; break;
+      case '^': kind = Tok::Caret; break;
+      case '~': kind = Tok::Tilde; break;
+      case '!': kind = Tok::Bang; break;
       case '/': kind = Tok::Slash; break;
       case '(': kind = Tok::LParen; break;
       case ')': kind = Tok::RParen; break;
@@ -91,7 +98,13 @@ std::vector<Token> Tokenize(std::string_view source, bool* ok) {
 }
 
 // --------------------------------------------------------------------- AST
-enum class NodeKind { Number, Ident, Call, Add, Sub, Mul, Div, Neg };
+enum class NodeKind {
+  Number, Ident, Call, Add, Sub, Mul, Div, Neg,
+  // Inner, outer and regressive products, and the two unary ones. Written the
+  // way a geometric algebra text writes them: a dot, a wedge, a vee, a tilde
+  // over the thing and a star after it.
+  Inner, Outer, Regressive, Reverse, Dual
+};
 
 struct Node;
 using NodePtr = std::unique_ptr<Node>;
@@ -106,12 +119,17 @@ struct Node {
 // Binding powers, used both to parse and to decide where LaTeX needs brackets.
 int Precedence(NodeKind kind) {
   switch (kind) {
+    case NodeKind::Inner: return 1;
+    case NodeKind::Outer: return 2;
+    case NodeKind::Regressive: return 3;
     case NodeKind::Add:
-    case NodeKind::Sub: return 1;
+    case NodeKind::Sub: return 4;
     case NodeKind::Mul:
-    case NodeKind::Div: return 2;
-    case NodeKind::Neg: return 3;
-    default: return 4;  // atoms
+    case NodeKind::Div: return 5;
+    case NodeKind::Neg:
+    case NodeKind::Reverse:
+    case NodeKind::Dual: return 6;
+    default: return 7;  // atoms
   }
 }
 
@@ -119,7 +137,7 @@ class Parser {
  public:
   explicit Parser(const std::vector<Token>& tokens) : tokens_(tokens) {}
 
-  NodePtr ParseExpression() { return ParseSum(); }
+  NodePtr ParseExpression() { return ParseInner(); }
   bool    ok() const { return ok_; }
   const Token& Peek() const { return tokens_[pos_]; }
   void    Advance() { if (tokens_[pos_].kind != Tok::End) ++pos_; }
@@ -130,6 +148,37 @@ class Parser {
   }
 
  private:
+  // C++ binds | looser than ^, ^ looser than &, and & looser than + -. That is
+  // why `a + b | c` means `(a + b) | c` and why the brackets are worth writing.
+  // Following C++ here rather than the convention of geometric algebra texts is
+  // the only honest choice: the compiler is what will actually run it.
+  NodePtr ParseInner() {
+    NodePtr node = ParseOuter();
+    while (ok_ && Peek().kind == Tok::Bar) {
+      Advance();
+      node = Combine(NodeKind::Inner, std::move(node), ParseOuter());
+    }
+    return node;
+  }
+
+  NodePtr ParseOuter() {
+    NodePtr node = ParseRegressive();
+    while (ok_ && Peek().kind == Tok::Caret) {
+      Advance();
+      node = Combine(NodeKind::Outer, std::move(node), ParseRegressive());
+    }
+    return node;
+  }
+
+  NodePtr ParseRegressive() {
+    NodePtr node = ParseSum();
+    while (ok_ && Peek().kind == Tok::Amp) {
+      Advance();
+      node = Combine(NodeKind::Regressive, std::move(node), ParseSum());
+    }
+    return node;
+  }
+
   NodePtr ParseSum() {
     NodePtr node = ParseProduct();
     while (ok_ && (Peek().kind == Tok::Plus || Peek().kind == Tok::Minus)) {
@@ -153,6 +202,14 @@ class Parser {
   }
 
   NodePtr ParseUnary() {
+    if (Peek().kind == Tok::Tilde || Peek().kind == Tok::Bang) {
+      const NodeKind kind = (Peek().kind == Tok::Tilde) ? NodeKind::Reverse : NodeKind::Dual;
+      Advance();
+      auto node = std::make_unique<Node>();
+      node->kind = kind;
+      node->lhs = ParseUnary();
+      return node;
+    }
     if (Peek().kind == Tok::Minus) {
       Advance();
       auto node = std::make_unique<Node>();
@@ -285,6 +342,16 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
         // A shader's `length` is the norm, and a norm is written with bars.
         return "\\left\\Vert " + Emit(*node.args[0], 0, marks) + " \\right\\Vert";
       }
+      // Grade selection, written the way Hestenes writes it. One departure: the
+      // subscript is always there, including on the scalar part -- Hestenes
+      // drops the zero, and dropping it makes the most easily missed of the
+      // projections the one that looks like no projection at all.
+      if (node.args.size() == 1 && node.text.size() > 5 &&
+          node.text.compare(0, 5, "grade") == 0 &&
+          node.text.find_first_not_of("0123456789", 5) == std::string::npos) {
+        return "\\langle " + Emit(*node.args[0], 0, marks) + " \\rangle_{" +
+               node.text.substr(5) + "}";
+      }
       if (node.text == "sqrt" && node.args.size() == 1) {
         return "\\sqrt{" + Emit(*node.args[0], 0, marks) + "}";
       }
@@ -306,6 +373,27 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
     }
     case NodeKind::Neg:
       out = "-" + Emit(*node.lhs, precedence, marks);
+      break;
+    // The geometric product is juxtaposition, so it is already what Mul emits;
+    // the other two get the symbols a geometric algebra text uses.
+    case NodeKind::Inner:
+      out = Emit(*node.lhs, precedence, marks) + " \\cdot " +
+            Emit(*node.rhs, precedence + 1, marks);
+      break;
+    case NodeKind::Outer:
+      out = Emit(*node.lhs, precedence, marks) + " \\wedge " +
+            Emit(*node.rhs, precedence + 1, marks);
+      break;
+    case NodeKind::Regressive:
+      out = Emit(*node.lhs, precedence, marks) + " \\vee " +
+            Emit(*node.rhs, precedence + 1, marks);
+      break;
+    // The reverse wears a tilde and the dual a star, both on the thing itself.
+    case NodeKind::Reverse:
+      out = "\\widetilde{" + Emit(*node.lhs, 0, marks) + "}";
+      return out;
+    case NodeKind::Dual:
+      out = Emit(*node.lhs, precedence, marks) + "^{*}";
       break;
     case NodeKind::Add:
       out = Emit(*node.lhs, precedence, marks) + " + " + Emit(*node.rhs, precedence + 1, marks);
@@ -405,6 +493,10 @@ bool MatchLambda(const std::vector<Token>& tokens, std::size_t index, std::strin
 
 bool IsRealType(std::string_view type) { return type == "float" || type == "double"; }
 
+bool IsMultivectorType(std::string_view type, const clifford::Signature& sig) {
+  return clifford::IsMultivectorType(type, sig);
+}
+
 bool IsFunctionType(std::string_view type) { return type == "RealFunction"; }
 
 std::string NameToLatex(std::string_view name) {
@@ -435,7 +527,7 @@ std::string NameToLatex(std::string_view name) {
   return out;
 }
 
-Line Parse(std::string_view source) {
+Line Parse(std::string_view source, const clifford::Signature& sig) {
   Line line;
 
   bool tokenizeOk = false;
@@ -445,10 +537,20 @@ Line Parse(std::string_view source) {
   line.kind = Kind::Unparsed;
   if (!tokenizeOk) return line;
 
+  // Choosing the algebra is a statement of mathematics, not a statement in the
+  // program: it names the setting everything after it is written in.
+  clifford::Signature chosen{};
+  if (clifford::ParseAlgebra(source, &chosen)) {
+    line.kind = Kind::Algebra;
+    line.latex = clifford::AlgebraLatex(chosen);
+    return line;
+  }
+
   std::size_t index = 0;
   std::string type;
   if (tokens[index].kind == Tok::Ident &&
-      (IsRealType(tokens[index].text) || IsFunctionType(tokens[index].text))) {
+      (IsRealType(tokens[index].text) || IsFunctionType(tokens[index].text) ||
+       mathline::IsMultivectorType(tokens[index].text, sig))) {
     type = tokens[index].text;
     ++index;
   }
@@ -463,10 +565,16 @@ Line Parse(std::string_view source) {
     line.type = type;
     line.name = name;
     line.hasInitialiser = false;
-    // A real is an element of a set; a function is an arrow between two.
-    line.latex = IsFunctionType(type)
-                     ? (Marked(name, &line.marks) + " : \\mathbb{R} \\to \\mathbb{R}")
-                     : (Marked(name, &line.marks) + " \\in \\mathbb{R}");
+    // A real is an element of a set, a function is an arrow between two, and a
+    // multivector is an element of whichever part of the algebra it belongs to.
+    if (IsFunctionType(type)) {
+      line.latex = Marked(name, &line.marks) + " : \\mathbb{R} \\to \\mathbb{R}";
+    } else if (mathline::IsMultivectorType(type, sig)) {
+      line.latex =
+          Marked(name, &line.marks) + " \\in " + clifford::TypeLatex(type, sig);
+    } else {
+      line.latex = Marked(name, &line.marks) + " \\in \\mathbb{R}";
+    }
     return line;
   }
 

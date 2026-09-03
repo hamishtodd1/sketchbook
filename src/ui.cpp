@@ -40,10 +40,12 @@ MenuLayout Compute() {
 
   // The slide shape, as the three it could sensibly be.
   const float aspectY = m.row.y + m.row.height + 34.0f;
-  const float aspectWidth = (m.panel.width - 48.0f - 16.0f) / kAspectCount;
+  constexpr float kAspectGap = 8.0f;
+  const float aspectWidth =
+      (m.panel.width - 48.0f - kAspectGap * static_cast<float>(kAspectCount - 1)) / kAspectCount;
   for (int i = 0; i < kAspectCount; ++i) {
-    m.aspect[i] = {m.panel.x + 24.0f + static_cast<float>(i) * (aspectWidth + 8.0f), aspectY,
-                   aspectWidth, 40.0f};
+    m.aspect[i] = {m.panel.x + 24.0f + static_cast<float>(i) * (aspectWidth + kAspectGap),
+                   aspectY, aspectWidth, 40.0f};
   }
 
   const float buttonWidth = (m.panel.width - 56.0f) * 0.5f;
