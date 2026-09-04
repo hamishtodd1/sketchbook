@@ -227,7 +227,10 @@ the caret without shift puts it down.
 It exists for its own sake, but the reason it was built is the gesture above:
 selecting part of a name is how you take hold of what that name refers to.
 
-**The grid is only up while it is being used.** The dots are a placement aid,
+**The grid is only up while it is being used.** There is therefore no switch for
+it: a control for something that already governs itself is a control that can
+only be wrong, and the one that used to be in the Escape menu could turn the
+dots off and leave a resize with nothing to aim at. The dots are a placement aid,
 not scenery, so the canvas is bare while you are reading it and the dots fade in
 while something is being placed: a window carried, a window resized, or the
 canvas zoomed -- zoom because it is what decides how fine the lattice is.
@@ -355,13 +358,73 @@ whichever side of the name the other end is already on, so it never crosses the
 thing it is pointing at.
 
 **A name written five times is still one variable, so the wires converge.**
-They gather at a junction just outside the card, on the side the window is on,
-level with the middle of the mentions -- and one wire runs from there to the
-window. The strands arrive at the junction along the same horizontal tangent, so
+They gather at a junction just clear of the *names* -- not of the card, which on
+a wide box would be a long way from anything, and a wire setting off for an edge
+nowhere near the thing it points at looks like it is avoiding it. Level with the
+middle of the mentions, on the side the window is on, and one wire runs from
+there to the window. The strands arrive at the junction along the same horizontal tangent, so
 near it they lie on top of one another and the bundle reads as a single cable
 fanning out. Five separate cables leaving the same handle would say there were
 five things to point at, when the whole claim being made is that there is one.
 A name written once needs no junction and gets none.
+
+**A derived value is the end of a little machine, and pointing at it draws the
+machine.** `float d = a + b * c;` is not one thing pointing at another: it is
+`b` and `c` meeting at a `*`, whose answer meets `a` at a `+`, whose answer is
+`d`. So that is what appears -- wires out of the windows of `a`, `b` and `c`,
+each in its own colour, converging on a little bullet with the operator written
+in it, and out of the last bullet wires in `d`'s colour running to every place
+`d` is written and to `d`'s own windows.
+
+Three rules make it read:
+
+- **The wires leave the vizes, not the mentions.** The window *is* the value; a
+  mention is only where it is spoken of. This is the same rule the plain wire
+  already followed, and it matters more here: a diagram drawn between mentions
+  would be a diagram of the text rather than of what the text computes.
+- **A wire out of an operator is black.** Colour is identity, and the working is
+  not any one variable's -- it belongs to nothing in particular until it arrives
+  somewhere that does. So the intermediate wires have no identity, and the last
+  one takes the result's colour.
+- **The operator is written as the code writes it**: `*`, `+`, `/`, `|`, `^`.
+  A call gets a bullet with its own name in it, `sin` or `grade0`. A wiring
+  diagram is about what the machine does, so it is spelled the way the machine
+  is.
+- **A bullet has a front.** It is flat at the back and pointed at the front, and
+  it points at whatever it feeds -- so the wires coming in arrive square against
+  the flat end and the one it produces leaves the point. A shape with a front
+  says which way the working is going without anything being labelled, which is
+  the whole reason it is not a circle.
+- **What it made is one thing**, so one wire leaves the point and runs a little
+  way before it forks to the places that thing turns up. Several wires leaving
+  the point at once would say several things had been made.
+
+The chain is laid out with the **deepest at the bottom and the last bullet
+nearest the box**, because the working runs *towards* what it makes. Rungs the
+other way up have every bullet pointing back over its own inputs.
+
+A **literal is not a node**. `c = (a + b) / 2` has no wire for the `2`, because a
+number has nowhere to come from; the `/` simply has one input. That is honest
+rather than a gap: the thing you might want to point at is not there to point at.
+
+**It hangs below the box and everything docked to it**, in the free canvas,
+rather than in the space between the values and the result. Tempting as
+"between" is, a number line sits directly under its own box, so between is a few
+pixels and the bullets would land on top of the very markers they are wired to.
+Each operator gets a rung by how deep it is, and sits across at the mean of what
+feeds it.
+
+**And whatever feeds a highlighted value is in scope.** The rule that stands a
+box's other windows down while the caret is in it would otherwise take away the
+inputs' markers the moment you highlighted the result -- leaving a machine with
+nothing coming into it. Being made of something is a way of being what you are
+looking at.
+
+What this is drawn from is **not the parser's own tree** but a small graph made
+for it (`mathline::Wiring`): leaves that name variables, and operator nodes fed
+by other nodes. Nothing outside the parser needs to know about precedence, or
+about the difference between a call and a product -- only what feeds what, and
+what to write in the bullet where two things meet.
 
 **The curve leaves the visualization, not the pointer.** The handle on a number
 line *is* the variable; the pointer is only where your hand happens to be. That
@@ -673,6 +736,13 @@ the app window opens at -- the same number in both places, so that a slide seen
 at its own scale is exactly a fresh screenful of it and the cover zoom comes out
 at 1.
 
+It is **folded away** in the menu. A deck's shape is chosen once and then left
+alone, so four buttons permanently taking a quarter of the panel would be four
+buttons in the way of the things that are pressed every day. The header carries
+the shape it is currently set to, so folding the choice away never folds away
+which one it is -- and whether it is folded is a fact about the menu rather than
+about the canvas, so nothing saves it.
+
 ### Windows, and closing them
 
 Everything on the canvas is a **window**: a code box, a box of prose, a number
@@ -720,6 +790,21 @@ holds boxes -- their text, their size, and the values their knobs were at. The
 copies get their own windows when they compile, which is what was wanted anyway.
 They paste where the pointer is, and arrive selected, so a paste can be put
 where it belongs without hunting for it.
+
+**The caret decides which clipboard.** Those same three keys copy *text* when
+there is a caret in a box, and windows when there is not -- one key, two
+clipboards, and no third chord to learn. There is nothing ambiguous to resolve:
+a caret means you are writing, and what you are writing is what Ctrl+C is about.
+
+It is the **system** clipboard rather than one of our own, so a line of this
+canvas can go into a message and a paragraph from somewhere else can come back.
+That is the whole reason to have prose here that other people will read. A
+newline in what arrives splits the line, so pasted paragraphs come in as
+paragraphs; the caret is a byte offset and the text is UTF-8, so it goes in as
+bytes and whole sequences stay whole.
+
+The windows clipboard stays our own, since a box with its knob values is not
+something another program has a use for.
 
 **Closing is remembered.** Otherwise the next Sync would put the window straight
 back. What is closed is kept on the box, since it is a fact about one of its
@@ -785,6 +870,16 @@ The caret is a byte offset in the source either way, so it survives the toggle:
 switch to the source and it is still between the same two letters.
 
 **Boldness, italics and justification belong to the box, not to the text.**
+Justification is **one control, not three**: left, centred and right are one
+choice, and a choice with three states is a thing you press until it says what
+you want. The icon is the state it is in -- which side is ragged is the whole of
+it -- so it is also its own label. Every control in the strip is one gap from
+the next, since a strip with a rhythm reads as one strip.
+
+**The strip is drawn after every box**, not with the box it belongs to. It sits
+outside the card, in the gap above, which is exactly where a neighbour's card or
+a neighbour's number line can land on top of it -- and a control you cannot press
+is not a control.
 There is no markup to learn, nothing to get half-applied to a phrase, and
 nothing to escape. The controls sit in a strip **above** the box, and they
 appear when you go looking for them -- on the box, on its rim, or in the strip
@@ -904,7 +999,51 @@ there, in the code of the box that axis belongs to. Pointing at that spot first
 says where: the box blinks a caret at the line the declaration would land on,
 which is what makes the gesture aimable rather than a surprise.
 
-So the two gestures are each other's inverse. A variable is pulled *out* of the
+**And two values are made into a third by holding both.** A finger on each of two
+vizes means *these two, together* -- and that is a different sentence from what
+either finger means alone, so the first thing it does is stop them being what
+they were about to be.
+
+- **Holding two freezes them.** One finger on a handle drags it; two fingers on
+  two handles is not two drags. So whatever the first finger had already started
+  doing to a value is *undone* -- it had not chosen anything yet -- and neither
+  value moves for as long as both are held.
+- **A wire follows each finger back to its viz**, in that value's colour, so
+  what is being held is never in doubt. It leaves the viz rather than the
+  finger, by the rule that already governs every other wire here: the window is
+  the value, and a finger is only where your hand is.
+- **Bring the fingers together and a little menu appears where they met**, with
+  `+` and `*` in it, and both wires now run to it rather than to the fingers.
+  **Keep a finger down**: slide it onto an option and lift, and the line is
+  written -- `float c = a * b;`, at the caret, by the same rule that puts a
+  value on an axis. Lift with the finger nowhere in particular and the menu
+  goes. The menu belongs to the gesture that raised it, so letting go of the
+  gesture puts it away.
+
+**"Together" is relative, and generous.** Two fingertips side by side already
+report their centres forty or fifty pixels apart, so a threshold in the tens is
+one no hand can reach -- it was 46 to begin with, and the gesture could not be
+finished. What is asked for now is that the distance be *halved*, floored at 90
+pixels and capped at 200, so it is the same squeeze whatever the screen and
+whatever the hands.
+
+**And a lost contact does not lose the gesture.** A digitizer asked to track two
+fingertips that are nearly touching will drop one and hand it back under a new
+id -- which is to say it does this exactly when the gesture is succeeding. So a
+finger is followed by its id where that still exists and by where it last was
+otherwise, and the question "have they met" is asked *before* the question "are
+both still there", so that losing one at the moment they meet still counts as
+meeting.
+
+**Both values must be of the same box.** Values from two different boxes are
+values of two different programs, and no line could name them both -- so two
+fingers spanning boxes are not a gesture, they are a pinch. Lifting before the
+fingers meet is likewise nothing: it was not said.
+
+The name is the first letter nothing in the box is using, and the type is `float`
+unless one of the two is a function, in which case the answer is one too.
+
+So these gestures are each other's inverse. A variable is pulled *out* of the
 code onto the canvas; a variable is pushed *into* the code from the canvas.
 Neither the text nor the windows is the place things are made -- they are two
 views of one program and you can work in either.
@@ -1320,14 +1459,45 @@ of its own, axes merge by dragging one grip onto another, and each zooms on its
 own wheel.
 
 Editing a box turns the *whole* box into Monokai-coloured code, with a
-math/code toggle shown only while the box has the caret. Undo is Ctrl+Z; Ctrl+left/right move by word. A line the compiler
+math/code toggle shown only while the box has the caret. Undo is Ctrl+Z;
+Ctrl+left/right move by word; Ctrl+C, Ctrl+X and Ctrl+V cut and paste the text
+through the system clipboard. A line the compiler
 complained about always reveals its code, so the red caret has real characters
 to point at; the message sits in a white balloon in a proportional face.
 
 Canvases save and load: Escape menu buttons, Ctrl+S (straight back to where the
 canvas came from) and Ctrl+O, plus `--open <file>` on the command line. The
 format is plain text, one record per line, in `App::SaveCanvas`.
-`C:\sketches\demo\demo.sketch` is a deck of six slides carrying one of
+
+**The menu lists the canvases opened lately**, most recent first, and one click
+goes back to one. The point is that going back to what you were just working on
+should not be a trip through a file dialog -- it is the commonest thing anyone
+does with this program and it was the slowest.
+
+Three things about the list. It is **a fact about you, not about a canvas**, so
+it lives with the user's settings (`%APPDATA%/sketchbook/recent.txt`) rather
+than in any `.sketch` -- a canvas has to stay movable, and a canvas carrying a
+list of other canvases would not be. It is **written the moment a canvas is
+opened or saved** rather than at exit, so a crash does not lose it. And a file
+that **is no longer there is left out** rather than offered and then failing: a
+place you cannot go back to is not a place. `recent.*` is raylib-free like the
+rest of the layer that talks to the outside world.
+
+**A press the menu acted on belongs to the menu**, including the press that
+closed it. Without that rule, choosing a recent canvas spends one click on two
+canvases: it closes the menu, and then the same press lands on whatever box of
+the *newly loaded* canvas happens to be under the pointer and puts a caret in
+it.
+
+**A picture beside a canvas is named relative to it.** A canvas and the pictures
+on it are one thing, and one thing has to be movable -- a folder of them carried
+somewhere else, or a canvas lifted out of the folder it was in, should still find
+what is on it. So a file under the canvas's own folder is written down as where
+it is *relative to the canvas*; anything further afield keeps its absolute path,
+because there is nothing else it could be said relative to. Absolute paths in a
+canvas written before this still load, since an absolute path is recognised as
+one and left alone.
+`C:\sketches\demo.sketch` is a deck of six slides carrying one of
 everything -- reals and their knobs, functions and their plots, a shader, an
 algebra, prose, a picture and a video -- and is the quickest way to see whether
 a change has broken something.
@@ -1351,7 +1521,12 @@ of axes in different colours. Reals and functions mix in one box: `float a;` wit
 still without recompiling.
 
 Every window is moved by the **rim** around its edge, which appears on hover.
-Boxes are sized for the worst case across both readings, so nothing changes
+Boxes are sized for the worst case across both readings -- **in height as well
+as width**, so flipping a single line never makes the box taller. A row's height
+is the taller of its two readings whether or not it is the one showing, which
+takes the LaTeX extent from the cache rather than from what happens to be drawn.
+(Prose is exempt: there the two readings are of the whole box rather than of a
+line, and they do not even have the same number of rows.) So nothing changes
 shape when a line flips or a value changes width. They snap to the grid and
 push each other apart rather than overlapping.
 

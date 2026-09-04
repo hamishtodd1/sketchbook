@@ -63,6 +63,58 @@ inline Color Blink(Color base, bool active) {
   return (active && BlinkOn()) ? Color{255, 255, 255, base.a} : base;
 }
 
+// -------------------------------------------------------------- wiring nodes
+// Where two wires meet, an operator: a little rounded box with the operator as
+// it is written in the code. Black, because what comes out of it is not any one
+// variable's value -- it is the working, and the working has no colour until it
+// arrives somewhere that does.
+inline constexpr Color kOperatorFill = {  28,  28,  30, 245 };
+inline constexpr Color kOperatorEdge = { 232, 232, 236, 255 };
+inline constexpr Color kOperatorWire = {  22,  22,  24, 220 };
+inline constexpr float kOperatorHeight = 26.0f;   // screen pixels, across the flat
+inline constexpr float kOperatorPadX = 7.0f;
+// How far the point sticks out past the body, and how far the single wire runs
+// from that point before it forks.
+inline constexpr float kOperatorPoint = 18.0f;
+inline constexpr float kOperatorRun = 34.0f;
+
+// A bullet: the shape a wire runs into and out of. Flat at the back, pointed at
+// the front, and pointed *wherever its output goes* -- so the wires feeding it
+// arrive square against the flat end and the one it produces leaves the point.
+// That is the whole reason it has an orientation: a shape with a front says
+// which way the working is going without anything having to be labelled.
+inline void DrawBullet(Vector2 at, Vector2 forward, float halfLength, float halfWidth,
+                       Color fill, Color edge) {
+  const float length = std::sqrt(forward.x * forward.x + forward.y * forward.y);
+  const Vector2 f = (length > 1e-4f) ? Vector2{forward.x / length, forward.y / length}
+                                     : Vector2{1.0f, 0.0f};
+  const Vector2 s = {-f.y, f.x};   // across it
+
+  const float body = halfLength - kOperatorPoint * 0.5f;
+  const auto  local = [&](float along, float across) {
+    return Vector2{at.x + f.x * along + s.x * across, at.y + f.y * along + s.y * across};
+  };
+  const Vector2 corners[5] = {local(-halfLength, -halfWidth), local(body, -halfWidth),
+                              local(halfLength, 0.0f), local(body, halfWidth),
+                              local(-halfLength, halfWidth)};
+
+  // Back-face culling is on, and which way round these come out depends on
+  // which way the bullet is pointing, so each triangle is wound to face us
+  // rather than trusting the order they were listed in.
+  const auto face = [&](Vector2 a, Vector2 b, Vector2 c) {
+    const float twice = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+    if (twice < 0.0f) DrawTriangle(a, b, c, fill);
+    else DrawTriangle(a, c, b, fill);
+  };
+  face(corners[0], corners[1], corners[2]);
+  face(corners[0], corners[2], corners[3]);
+  face(corners[0], corners[3], corners[4]);
+
+  for (int i = 0; i < 5; ++i) {
+    DrawLineEx(corners[i], corners[(i + 1) % 5], 2.0f, edge);
+  }
+}
+
 // ----------------------------------------------------------- the drop target
 // Carrying a window by its rim brings up a cross at the foot of the app window.
 // Drag onto it and the window is absorbed -- it stops being drawn, and letting

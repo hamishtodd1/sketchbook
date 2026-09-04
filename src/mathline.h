@@ -53,6 +53,44 @@ struct Line {
   std::vector<std::string> marks;
 };
 
+// --------------------------------------------------------------- wiring
+//
+// The shape of what a line computes, as a little graph: leaves that name
+// variables, and operator nodes fed by other nodes. `d = a + b * c` is a `*` fed
+// by b and c, feeding a `+` fed by a, feeding d.
+//
+// Deliberately *not* the parser's own tree. Nothing outside needs to know about
+// precedence, or about the difference between a call and a product; a wiring
+// diagram needs only what feeds what, and what to write in the little box where
+// two things meet. Numbers are not nodes at all -- a literal has nothing to come
+// from, so the operator it feeds simply has one input.
+struct FlowNode {
+  std::string op;         // "+", "*", "|", ... empty for a leaf
+  std::string name;       // a leaf naming a variable; empty for an operator
+  int         lhs = -1;   // which node feeds it, or -1 for nothing
+  int         rhs = -1;
+};
+
+struct Flow {
+  std::string           result;   // the variable this line defines
+  std::vector<FlowNode> nodes;    // the root is the last
+  int                   root = -1;
+
+  // Worth drawing: it computes something from something, rather than being a
+  // bare value or a copy.
+  bool Interesting() const {
+    if (root < 0 || nodes.empty()) return false;
+    for (const FlowNode& node : nodes) {
+      if (!node.op.empty()) return true;
+    }
+    return false;
+  }
+};
+
+// The wiring of one line, or an empty Flow if it has none.
+Flow Wiring(std::string_view source,
+            const clifford::Signature& sig = clifford::kDefaultSignature);
+
 // Never throws and never reports an error: anything unrecognised is Unparsed.
 //
 // The signature says which algebra a box is working in, which decides both what

@@ -47,6 +47,7 @@ add_executable(sketchbook
   src/touch.cpp
   src/touch_win32.cpp
   src/process_win32.cpp
+  src/recent.cpp
   src/ui.cpp
   src/viewport.cpp
   src/viz.cpp

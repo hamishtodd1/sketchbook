@@ -97,6 +97,17 @@ class AxisPanel {
   // leaves its own right-button pan alone for as long as that lasts.
   bool Scrolling() const { return drag_ == Drag::Pan; }
 
+  // The value a point on screen is on, if it is on one. Used by the gesture
+  // that takes hold of two values at once, which has to know what a finger has
+  // landed on before it can freeze it.
+  bool ValueAt(Vector2 point, const Viewport& viewport, FontStore& fonts, AxisRef* out) const;
+
+  // Gives up whatever drag is running and puts back the value it had changed.
+  // A handle taken hold of by one finger has not been *chosen* yet, so when a
+  // second finger arrives and the two together mean something else, the first
+  // one's effect has to be undone rather than kept.
+  void AbandonDrag();
+
   // Where a named variable's marker is, if this panel is showing one. Taking
   // hold of a name in the text lights up the same things as taking hold of its
   // window, and this is what says where the other end of the wire goes.
@@ -214,6 +225,7 @@ class AxisPanel {
   std::size_t dragLine_ = 0;
   AxisRef     dragRef_;     // the handle being moved, for Drag::Handle
   Vector2     dragGrab_{};  // pointer offset within the row, for Drag::Move
+  float       dragValueBefore_ = 0.0f;   // what a handle was on when it was taken
   // Where a row being carried is drawn. It keeps its slot in the stack until
   // it is dropped, so the row you are aiming at does not slide out from under
   // the pointer as you pick this one up.

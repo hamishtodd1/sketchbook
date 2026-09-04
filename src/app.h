@@ -67,6 +67,33 @@ class App {
   // the pointer is, and a .sketch opens.
   void HandleDroppedFiles();
 
+  // --- taking hold of two values at once -----------------------------------
+  //
+  // A finger on each of two vizes means "these two, together". While they are
+  // held they are **frozen** -- a finger on a handle would otherwise drag it,
+  // and what the two fingers mean is not what either means alone -- and a wire
+  // follows each finger back to the value it came from. Bring the fingers
+  // together and a little menu of operators appears where they met; touch one
+  // and a line defining the two of them that way is written at the caret.
+  //
+  // Returns true while the gesture owns the input.
+  bool HandleCompose();
+  void DrawCompose();
+  // Writes `float <fresh> = <a> <op> <b>;` into the box the two came from.
+  void ComposeInto(const std::string& op);
+
+  // A value defined out of other values is the end of a little machine, and
+  // pointing at it draws the machine: wires out of the windows of the values it
+  // is made from, through a box for each operator, to every place this one is
+  // written and to its own windows. Returns true if it drew one, in which case
+  // the box must not also draw its plain wire.
+  bool DrawWiring(const ActiveValue& active);
+  // Whether there is a machine worth drawing for this value: it is made out of
+  // other values, and at least one of them is on screen somewhere.
+  bool CanWire(const ActiveValue& active);
+  // Where a named variable of a box is shown, across every kind of window.
+  std::vector<Vector2> WindowsOf(const CodeBlock* block, const std::string& name);
+
   // A new slide's title and body, which are ordinary text boxes.
   void FurnishSlide(Vector2 centre, const std::string& title,
                     const std::vector<std::string>& body);
@@ -140,6 +167,21 @@ class App {
   // gesture runs out; `gridShow_` chases it, so the dots fade rather than blink.
   float      gridShow_ = 0.0f;
   double     gridUntil_ = 0.0;
+
+  // What is in use this frame, decided while updating and drawn afterwards.
+  std::vector<ActiveValue> active_;
+
+  // The two-finger gesture that composes two values into a third.
+  enum class Compose { None, Holding, Menu };
+  Compose     compose_ = Compose::None;
+  CodeBlock*  composeBlock_ = nullptr;
+  std::string composeNames_[2];
+  Vector2     composeAt_[2]{};      // where each finger is
+  Vector2     composeMenu_{};       // where the two met
+  Vector2     composeTip_{};        // where the finger choosing from it is
+  float       composeApart_ = 0.0f; // how far apart they began
+  int         composeHot_ = -1;     // which option that finger is over
+  unsigned int composeIds_[2]{};
 
   // The loop being drawn, in screen points, while the background is dragged.
   std::vector<Vector2> lasso_;

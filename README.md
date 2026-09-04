@@ -27,12 +27,12 @@ and their plots, a shader, an algebra, prose, a picture and a video, laid out as
 a deck of six slides:
 
 ```sh
-./build/sketchbook.exe --open C:/sketches/demo/demo.sketch
+./build/sketchbook.exe --open C:/sketches/demo.sketch
 ```
 
 Click a slide's rim to go to it, then use the left and right arrow keys to go
-through the deck. `demo.sketch` names its picture and its video by absolute
-path, so keep the three files in the same folder or edit the two `media` lines.
+through the deck. Its picture and video sit beside it, and are named relative to
+it, so the three of them move together.
 
 ## Using it
 
@@ -52,6 +52,7 @@ path, so keep the three files in the same folder or edit the two `media` lines.
 | `Ctrl`+`S` / `Ctrl`+`O` | Save (back to the same file) / open a canvas |
 | Drag a number-line handle | Choose that variable's value |
 | Press a number line off its markers | Make a variable there and drag it |
+| Hold two vizes, bring the fingers together | Make a third from the two of them |
 | Right-drag a number line | Scroll that axis |
 | Drag across a box's text | Highlight it |
 | `Shift`+arrows, `Shift`+`Home`/`End` | Extend the highlight |
@@ -70,13 +71,16 @@ path, so keep the three files in the same folder or edit the two `media` lines.
 | Drag the background | Lasso a selection |
 | Left-click anywhere | Put the selection down |
 | `Delete` | Throw the selection away |
-| `Ctrl`+`C` / `X` / `V` | Copy, cut, paste the selected boxes |
+| `Ctrl`+`C` / `X` / `V` | With a caret: the text. Without one: the selected boxes |
 | Double-click a video's trim time | Type an exact time |
 | `Esc` | Open/close the options menu |
 
 Editing keys are the usual ones: arrows, `Home`, `End`, `Backspace`, `Delete`,
 `Enter` (which carries the current indentation onto the new line) and `Tab`
-(four spaces). A press that moves more than a few pixels is a drag rather than a
+(four spaces). `Ctrl`+`C`, `Ctrl`+`X` and `Ctrl`+`V` work on the highlighted
+text, through the system clipboard, so text moves between this and other
+applications; with no caret anywhere the same keys take the selected windows
+instead. A press that moves more than a few pixels is a drag rather than a
 click, so it does not move the caret.
 
 The **right button pans**, and it does so wherever the pointer is — including
@@ -95,7 +99,8 @@ for the same reason. A rim is chrome rather than content, so it keeps the same
 thickness in screen pixels at every zoom level and stays equally easy to hit.
 
 A focused box grows one button above it: a **math/code toggle**. A text box
-grows a strip instead -- bold, italic, the three justifications, and a toggle
+grows a strip instead -- bold, italic, one justification button that cycles
+through left, centred and right, and a toggle
 that shows its source -- and shows it whenever you reach for it rather than only
 while it has the caret.
 
@@ -146,6 +151,11 @@ a box count as part of it, since they travel with it. Dragging, typing a new box
 and loading a file all go through the same placement, so there is no way to end
 up with a canvas that breaks either rule.
 
+The Escape menu lists the canvases opened lately, most recent first; one click
+goes back to one. The list is kept with your settings rather than in any canvas,
+since it is a fact about you rather than about a canvas, and a file that has
+moved or gone is left out rather than offered.
+
 Canvases save and load from the Escape menu, or with `Ctrl`+`S` and `Ctrl`+`O`.
 `Ctrl`+`S` writes straight back to wherever the canvas came from and only asks
 when there is nowhere to go. A file can also be opened from the command line:
@@ -176,7 +186,9 @@ A line the compiler complained about always shows its code, so the red caret has
 real characters to point at.
 
 A box is sized for the **worst case across both readings**: the wider of its
-LaTeX and its code, and the taller of the two for every row. So flipping a line,
+LaTeX and its code, and the taller of the two for every row — whether or not
+that row is the one currently showing it, so flipping a line never makes the box
+taller. So flipping a line,
 focusing the box, or dragging a knob never changes its shape. The slot kept for
 an injected value is a fixed number of columns for the same reason -- sizing it
 to the current number would make the box breathe as you drag.
@@ -197,6 +209,18 @@ curve.
 It works from the other end too: **highlight a mention** of a variable in the
 text and the same things light up — the name wherever else it is written, the
 wires, and the viz blinking at the far end.
+
+A **derived** value gets more than a wire: it gets its whole derivation. Point at
+`d` where `float d = a + b * c;` and you see wires out of the *windows* of `a`,
+`b` and `c` in their own colours, `b` and `c` meeting at a bullet marked `*`, a
+black wire from there meeting `a` at a bullet marked `+`, and out of that, wires
+in `d`'s colour to every place `d` is written and to `d`'s own windows. A wire
+out of an operator is black because the working belongs to no one variable; a
+literal gets no wire, since a number has nowhere to come from; and a call gets a
+bullet with its own name in it. A bullet is flat at the back and pointed at the
+front, and points at whatever it feeds — wires in at the flat end, one wire out
+of the point, running a little way before it forks. The diagram hangs below the box and its windows,
+where there is room for it.
 
 Whichever it is, the variable's name lights up in the box it came from, in that
 variable's colour, wherever it is written -- in the LaTeX or in the code,
@@ -245,6 +269,17 @@ The press then **carries straight on into dragging it**, exactly as if the
 marker had been there all along and you had grabbed it — which is why the
 variable is declared free rather than written down as a number. Scroll the axis
 on the **right button**, since the left one is now busy everywhere along it.
+
+On a touchscreen, **hold two vizes at once** — a finger on each — and they
+freeze at the values they had: two fingers on two handles is not two drags, so
+whatever the first finger had started is undone. A wire follows each finger back
+to its viz, in that value's colour. Bring the fingers together — halving the distance is
+enough, since two fingertips can never report their centres closer than about
+fifty pixels — and a little menu of `+` and `*` appears where they met. Keep a
+finger down, slide it onto an option and lift, and `float c = a * b;` is written
+at the caret; lift it anywhere else and the menu goes. Both must belong to the same box, since values of two
+different programs could not be named on one line — two fingers spanning boxes
+are a pinch, not a gesture.
 
 To give a variable an axis of its own, **pull it out of the code**: select any
 part of any mention of it and drag it out of the box. It comes away carrying
@@ -320,9 +355,11 @@ will be.
 Click a slide's rim and the camera glides until that slide fills the window --
 presenting is navigating. Once it is framing one, **left and right flick through
 the deck**, instantly; which slide follows which is decided by nothing but where
-they sit. A slide's inside is left alone, so everything on one stays usable. The deck's shape is set in the Escape menu: 3:2, 16:9, 4:3 or
-1:1. It starts at **3:2**, which is also the shape the app window opens at, so a
-slide seen at its own scale is exactly a screenful.
+they sit. A slide's inside is left alone, so everything on one stays usable. The deck's
+shape is set in the Escape menu -- 3:2, 16:9, 4:3 or 1:1 -- under a heading that
+is folded away until asked for, since a deck's shape is chosen once and then
+left alone. It starts at **3:2**, which is also the shape the app window opens
+at, so a slide seen at its own scale is exactly a screenful.
 
 A slide owns nothing but its rim: the title and the body it arrives with are
 ordinary **text boxes** on the canvas, which you can move, edit, resize and
@@ -613,7 +650,6 @@ boxes for now.
 
 ## Other known gaps
 
-- Editing has no selection, clipboard or undo yet; it is caret-and-type.
 - Closing the window while a build is in flight leaves the process alive until
   the compiler exits, because the pending `std::future` is joined on shutdown.
   Builds are normally well under a second.
@@ -647,6 +683,7 @@ src/
   resize.*        the wheel-resize rule and how it snaps to neighbours
   selection.*     the lasso, and what it catches
   ui.*            the options menu
+  recent.*        the canvases opened lately, kept between runs
   fontstore.*     face registry, size-ladder atlas cache, TTF metrics
   text.*          plain-text measure/draw/wrap on top of FontStore
   tex/

@@ -260,6 +260,20 @@ bool PlotPanel::Shown(const Plot& plot) {
   return false;
 }
 
+bool PlotPanel::ValueAt(Vector2 point, const Viewport& viewport, FontStore& fonts,
+                        CurveRef* out) const {
+  for (std::size_t i = 0; i < plots_.size(); ++i) {
+    if (!Shown(plots_[i])) continue;
+    if (!CheckCollisionPointRec(point, RectFor(i, viewport, fonts))) continue;
+    for (const CurveRef& ref : plots_[i].refs) {
+      if (!Shown(ref)) continue;
+      if (out != nullptr) *out = ref;
+      return true;
+    }
+  }
+  return false;
+}
+
 bool PlotPanel::MarkerFor(const CodeBlock* block, const std::string& name,
                           const Viewport& viewport, FontStore& fonts, Vector2* out) const {
   for (std::size_t i = 0; i < plots_.size(); ++i) {

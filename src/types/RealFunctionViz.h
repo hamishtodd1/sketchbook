@@ -67,6 +67,11 @@ class PlotPanel {
   Rectangle DockedBounds(const CodeBlock* block, const Viewport& viewport,
                          FontStore& fonts) const;
 
+  // As AxisPanel::ValueAt. A plot stands for every curve on it, so what a finger
+  // has landed on is the first of them -- there is nothing finer to point at.
+  bool ValueAt(Vector2 point, const Viewport& viewport, FontStore& fonts,
+               CurveRef* out) const;
+
   // As AxisPanel::MarkerFor: where a named curve is, so that taking hold of its
   // name in the text can light up the same things.
   bool MarkerFor(const CodeBlock* block, const std::string& name, const Viewport& viewport,

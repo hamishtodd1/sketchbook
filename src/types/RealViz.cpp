@@ -487,6 +487,27 @@ const AxisRef* AxisPanel::MarkerNear(std::size_t index, Vector2 pointer,
                    /*freeOnly=*/false, *this);
 }
 
+bool AxisPanel::ValueAt(Vector2 point, const Viewport& viewport, FontStore& fonts,
+                        AxisRef* out) const {
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    if (!Shown(lines_[i])) continue;
+    const AxisRef* found = MarkerNear(i, point, viewport, fonts);
+    if (found == nullptr) continue;
+    if (out != nullptr) *out = *found;
+    return true;
+  }
+  return false;
+}
+
+void AxisPanel::AbandonDrag() {
+  if (drag_ == Drag::Handle && dragRef_.block != nullptr) {
+    dragRef_.block->SetVariableValue(dragRef_.name, dragValueBefore_);
+  }
+  drag_ = Drag::None;
+  dragRef_ = {};
+  dragMoved_ = false;
+}
+
 bool AxisPanel::MarkerFor(const CodeBlock* block, const std::string& name,
                           const Viewport& viewport, FontStore& fonts, Vector2* out) const {
   for (std::size_t i = 0; i < lines_.size(); ++i) {
@@ -709,6 +730,10 @@ bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Bl
       dragLine_ = i;
       dragRef_ = *best;
       dragMoved_ = false;
+      // Remembered so a second finger arriving can put it back: one finger on a
+      // handle has not chosen anything yet.
+      const mathprogram::Variable* held = Resolve(*best);
+      dragValueBefore_ = (held != nullptr) ? held->value : 0.0f;
       return true;
     }
 

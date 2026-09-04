@@ -428,6 +428,35 @@ std::string CodeBlock::Injection(int line) const {
   return " = " + FormatInjected(types::ExampleReal(parsed.name));
 }
 
+std::vector<Rectangle> CodeBlock::MentionsOf(const std::string& name, const Viewport& viewport,
+                                             FontStore& fonts) const {
+  std::vector<Rectangle> found;
+  if (absorbed_) return found;
+  const Geometry& g = Measure(viewport, fonts);
+  if (g.emPx < 0.4f) return found;
+  for (std::size_t r = 0; r < g.rows.size(); ++r) {
+    for (const Rectangle& box : MentionRects(r, name, g, fonts)) found.push_back(box);
+  }
+  return found;
+}
+
+mathline::Flow CodeBlock::FlowFor(const std::string& name) const {
+  mathline::Flow            latest;
+  const clifford::Signature sig = Algebra();
+  for (const std::string& raw : lines_) {
+    const mathline::Line parsed = mathline::Parse(raw, sig);
+    if (parsed.name != name || !parsed.hasInitialiser) continue;
+    if (parsed.kind != mathline::Kind::Declaration && parsed.kind != mathline::Kind::Assignment) {
+      continue;
+    }
+    mathline::Flow flow = mathline::Wiring(raw, sig);
+    // The *last* line that defines it wins, since a variable is mutable and
+    // what its window shows is what the block ended with.
+    if (flow.Interesting()) latest = std::move(flow);
+  }
+  return latest;
+}
+
 Color CodeBlock::VariableColor(const std::string& name) const {
   const std::vector<mathprogram::Variable>& variables = program_.variables();
   for (std::size_t i = 0; i < variables.size(); ++i) {
@@ -534,7 +563,28 @@ bool CodeBlock::InScope(const std::string& name) const {
   // it covers.
   const bool selected = HasSelection();
   if (selected) SelectionRange(&fromLine, &fromCol, &toLine, &toCol);
-  return MentionedBetween(name, fromLine, fromCol, toLine, toCol, /*wholeLines=*/!selected);
+  if (MentionedBetween(name, fromLine, fromCol, toLine, toCol, /*wholeLines=*/!selected)) {
+    return true;
+  }
+
+  // And whatever a highlighted value is *made of* is part of what you are
+  // looking at. Highlighting `d` in `d = a + b * c` draws the machine that
+  // makes it, and a machine with its inputs' windows stood down would be a
+  // diagram of nothing. Only asked when something is highlighted, which is
+  // rare, since it means reading the box's lines again.
+  if (!selected) return false;
+  for (const mathprogram::Variable& variable : program_.variables()) {
+    if (variable.name == name) continue;
+    if (!MentionedBetween(variable.name, fromLine, fromCol, toLine, toCol,
+                          /*wholeLines=*/false)) {
+      continue;
+    }
+    const mathline::Flow flow = FlowFor(variable.name);
+    for (const mathline::FlowNode& node : flow.nodes) {
+      if (node.op.empty() && node.name == name) return true;
+    }
+  }
+  return false;
 }
 
 void CodeBlock::SetInsertCaret(bool value) {
@@ -808,6 +858,17 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
         row.width = text::Measure(fonts, Face::Mono, lines_[i], g.emPx);
       }
 
+      // A line is the same height in *either* reading, so flipping one never
+      // changes the shape of the box -- the same rule the width already
+      // follows. Taken from the cached layout whether or not this row is the
+      // one showing it. Prose is exempt: there the two readings are not two
+      // readings of a line but of the whole box, and they do not even have the
+      // same number of rows.
+      if (!IsText() && !cache_[i].latex.empty()) {
+        const tex::Layout& both = cache_[i].layout;
+        latexExtent = std::max(latexExtent, both.height + both.depth + 6.0f * g.zoom);
+      }
+
       row.height = std::max(g.lineHeight, latexExtent);
       if (layout != nullptr) {
         row.baseline =
@@ -876,14 +937,15 @@ CodeBlock::Chrome CodeBlock::ChromeRects(const Geometry& g) const {
     const float side = height;
     const float gap = kChromeSpacing * g.zoom;
     float       x = g.rect.x;
+    // One gap between every control, whatever it is: a strip with a rhythm to
+    // it reads as one strip, and grouping by spacing was buying nothing now
+    // that the three justifications are one button.
     chrome.bold = {x, y, side, side};
     x += side + gap;
     chrome.italic = {x, y, side, side};
-    x += side + gap * 3.0f;   // a break, because the next three are one choice
-    for (int i = 0; i < 3; ++i) {
-      chrome.justify[i] = {x, y, side, side};
-      x += side + gap;
-    }
+    x += side + gap;
+    chrome.justify = {x, y, side, side};
+    x += side + gap;
     // Then the same control a code box has: show me what this really is. For
     // prose that means the source, sigil and all -- which is the only way to
     // take the sigil back out.
@@ -892,7 +954,7 @@ CodeBlock::Chrome CodeBlock::ChromeRects(const Geometry& g) const {
     // edge, because showing the source makes a wrapped paragraph as wide as its
     // longest unwrapped line, and a toggle that leaves the screen when pressed
     // is a toggle you cannot press again.
-    chrome.toggle = {x + gap * 2.0f, y, kToggleWidth * g.zoom, height};
+    chrome.toggle = {x, y, kToggleWidth * g.zoom, height};
     return chrome;
   }
 
@@ -1177,6 +1239,71 @@ bool CodeBlock::Empty() const {
   return true;
 }
 
+std::string CodeBlock::SelectedText() const {
+  if (!HasSelection()) return {};
+
+  int fromLine = 0;
+  int fromCol = 0;
+  int toLine = 0;
+  int toCol = 0;
+  SelectionRange(&fromLine, &fromCol, &toLine, &toCol);
+
+  std::string out;
+  for (int i = fromLine; i <= toLine && i < static_cast<int>(lines_.size()); ++i) {
+    const std::string& line = lines_[static_cast<std::size_t>(i)];
+    const std::size_t  begin =
+        (i == fromLine) ? std::min(static_cast<std::size_t>(fromCol), line.size()) : 0;
+    const std::size_t end =
+        (i == toLine) ? std::min(static_cast<std::size_t>(toCol), line.size()) : line.size();
+    if (i != fromLine) out += '\n';
+    if (begin < end) out += line.substr(begin, end - begin);
+  }
+  return out;
+}
+
+void CodeBlock::CopyText(bool cut) {
+  const std::string taken = SelectedText();
+  if (taken.empty()) return;   // nothing highlighted is nothing to take
+  SetClipboardText(taken.c_str());
+  if (!cut) return;
+  PushUndo(EditKind::Structural);
+  EraseSelection();
+}
+
+void CodeBlock::PasteText() {
+  const char* text = GetClipboardText();
+  if (text == nullptr || *text == '\0') return;
+
+  PushUndo(EditKind::Structural);
+  // Pasting over a highlight replaces it, which is what a highlight is for.
+  EraseSelection();
+
+  // Inserted as bytes rather than codepoint by codepoint: the caret is a byte
+  // offset and what arrives is UTF-8, so whole sequences go in as they are.
+  std::string chunk;
+  for (const char* c = text;; ++c) {
+    if (*c != '\0' && *c != '\n') {
+      if (*c != '\r') chunk += *c;
+      continue;
+    }
+    if (!chunk.empty()) {
+      std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
+      line.insert(static_cast<std::size_t>(caretCol_), chunk);
+      caretCol_ += static_cast<int>(chunk.size());
+      chunk.clear();
+      // The anchor comes with it. Left where it was, the text just inserted
+      // would be *highlighted* -- and the newline below erases a highlight
+      // before it splits the line, so each chunk would be deleted by the one
+      // after it.
+      SelectNone();
+    }
+    if (*c == '\0') break;
+    InsertNewline();
+  }
+  ClampCaret();
+  TouchEdit();
+}
+
 std::string CodeBlock::Text() const {
   std::string out;
   for (std::size_t i = 0; i < lines_.size(); ++i) {
@@ -1388,6 +1515,7 @@ void CodeBlock::MoveCaretByWord(int direction) {
     while (i > 0 && !IsWordChar(line[static_cast<std::size_t>(i - 1)])) --i;
     while (i > 0 && IsWordChar(line[static_cast<std::size_t>(i - 1)])) --i;
     caretCol_ = i;
+    ClampCaret();   // a word back from the first word is still not the sigil
   } else {
     if (caretCol_ >= size) { MoveCaret(0, +1); return; }
     int i = caretCol_;
@@ -1405,6 +1533,21 @@ void CodeBlock::HandleInput() {
 
   if (ctrl && Triggered(KEY_Z)) {
     Undo();
+    return;
+  }
+
+  // The caret is what says these are about the text rather than about the
+  // windows on the canvas.
+  if (ctrl && Triggered(KEY_C)) {
+    CopyText(/*cut=*/false);
+    return;
+  }
+  if (ctrl && Triggered(KEY_X)) {
+    CopyText(/*cut=*/true);
+    return;
+  }
+  if (ctrl && Triggered(KEY_V)) {
+    PasteText();
     return;
   }
 
@@ -1429,12 +1572,21 @@ void CodeBlock::HandleInput() {
   }
   if (IsKeyPressed(KEY_HOME)) {
     caretCol_ = 0;
+    // The start of the line is the start of what you are *writing*, which in a
+    // text box is past the sigil. Every other way of moving the caret went
+    // through this; Home did not, so Home could put it somewhere the caret is
+    // not allowed to be -- and a highlight made from there took the sigil with
+    // it when it was copied.
+    ClampCaret();
     if (!ShiftDown()) SelectNone();
+    caretUsed_ = true;
     blinkAnchor_ = GetTime();
   }
   if (IsKeyPressed(KEY_END)) {
     caretCol_ = static_cast<int>(lines_[static_cast<std::size_t>(caretLine_)].size());
+    ClampCaret();
     if (!ShiftDown()) SelectNone();
+    caretUsed_ = true;
     blinkAnchor_ = GetTime();
   }
 }
@@ -1475,9 +1627,9 @@ bool CodeBlock::HandleChrome(const Viewport& viewport, FontStore& fonts) {
       if (pressed) italic_ = !italic_;
       return true;
     }
-    for (int i = 0; i < 3; ++i) {
-      if (!CheckCollisionPointRec(pointer, chrome.justify[i])) continue;
-      if (pressed) justify_ = static_cast<Justify>(i);
+    if (CheckCollisionPointRec(pointer, chrome.justify)) {
+      // Pressed until it says what you want.
+      if (pressed) justify_ = static_cast<Justify>((static_cast<int>(justify_) + 1) % 3);
       return true;
     }
     if (CheckCollisionPointRec(pointer, chrome.toggle)) {
@@ -1829,6 +1981,37 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
     }
   }
 
+  // A text box being written in has no card to say so, so its rim does.
+  if (rimHot_ || dragging_ || selected_ || (asWords && focused_)) {
+    DrawRim(g.rect, g.zoom, dragging_ || selected_ || focused_);
+  }
+
+  // The legacy result square, only for a box that has no variables of its own.
+  if (outcome_.status != compiler::Status::NotRun) {
+    const float side = kSquareSide * g.zoom;
+    const Rectangle square = {g.rect.x + g.rect.width + kSquareGap * g.zoom,
+                              g.rect.y + (g.rect.height - side) * 0.5f, side, side};
+    switch (outcome_.status) {
+      case compiler::Status::True:
+        DrawCard(square, g.zoom, kResultTrue, Fade(BLACK, 0.18f), 1.0f);
+        break;
+      case compiler::Status::False:
+        DrawCard(square, g.zoom, kResultFalse, Fade(BLACK, 0.18f), 1.0f);
+        break;
+      default:
+        DrawCard(square, g.zoom, kResultUnknown, Fade(BLACK, 0.15f), 1.0f);
+        break;
+    }
+  }
+}
+
+void CodeBlock::DrawChrome(const Viewport& viewport, FontStore& fonts) const {
+  if (absorbed_) return;
+  const Geometry& g = Measure(viewport, fonts);
+  const Vector2   pointer = GetMousePosition();
+  const bool      asWords = IsText() && !showSource_;
+  (void)asWords;
+
   // Chrome: the box with the caret, or a text box being looked at.
   if (ChromeVisible(g, pointer)) {
     const Chrome chrome = ChromeRects(g);
@@ -1875,20 +2058,22 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
       DrawRectangleRec({margin.x + margin.width - kMarginBar, margin.y, kMarginBar, margin.height},
                        overMargin ? kAccent : Fade(kSlideInk, 0.35f));
 
-      for (int i = 0; i < 3; ++i) {
-        const Rectangle rect = chrome.justify[i];
-        button(rect, justify_ == static_cast<Justify>(i));
+      // One button showing the justification it is currently set to. Alternate
+      // lines are short, which is what makes one side look ragged and the other
+      // flush; which side is ragged is the whole of the icon.
+      {
+        const Rectangle rect = chrome.justify;
+        const int       which = static_cast<int>(justify_);
+        button(rect, /*on=*/false);
         const float pad = rect.width * 0.22f;
         const float full = rect.width - 2.0f * pad;
         const float thickness = std::max(1.0f, rect.height * 0.075f);
         const float gap = (rect.height - 2.0f * pad) / 3.0f;
         for (int line = 0; line < 4; ++line) {
-          // Alternate lines are short, which is what makes one side look ragged
-          // and the other flush.
           const float width = (line % 2 == 0) ? full : full * 0.62f;
           float x = rect.x + pad;
-          if (i == 1) x = rect.x + (rect.width - width) * 0.5f;
-          if (i == 2) x = rect.x + rect.width - pad - width;
+          if (which == 1) x = rect.x + (rect.width - width) * 0.5f;
+          if (which == 2) x = rect.x + rect.width - pad - width;
           DrawRectangleRec({x, rect.y + pad + gap * static_cast<float>(line), width, thickness},
                            kChromeText);
         }
@@ -1906,28 +2091,6 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
     }
   }
 
-  // A text box being written in has no card to say so, so its rim does.
-  if (rimHot_ || dragging_ || selected_ || (asWords && focused_)) {
-    DrawRim(g.rect, g.zoom, dragging_ || selected_ || focused_);
-  }
-
-  // The legacy result square, only for a box that has no variables of its own.
-  if (outcome_.status != compiler::Status::NotRun) {
-    const float side = kSquareSide * g.zoom;
-    const Rectangle square = {g.rect.x + g.rect.width + kSquareGap * g.zoom,
-                              g.rect.y + (g.rect.height - side) * 0.5f, side, side};
-    switch (outcome_.status) {
-      case compiler::Status::True:
-        DrawCard(square, g.zoom, kResultTrue, Fade(BLACK, 0.18f), 1.0f);
-        break;
-      case compiler::Status::False:
-        DrawCard(square, g.zoom, kResultFalse, Fade(BLACK, 0.18f), 1.0f);
-        break;
-      default:
-        DrawCard(square, g.zoom, kResultUnknown, Fade(BLACK, 0.15f), 1.0f);
-        break;
-    }
-  }
 }
 
 void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
@@ -1952,6 +2115,9 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
       const float gap = std::max(10.0f, 16.0f * g.zoom);
 
       for (const ActiveValue& active : highlights_) {
+        // Something else is drawing where this value comes from, and that ends
+        // at these same names. One cable, not two.
+        if (active.wired) continue;
         const Color   tint = VariableColor(active.name);
         const Vector2 from = active.from;
 
@@ -1989,13 +2155,18 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
           continue;
         }
 
-        // The junction: level with the middle of the mentions, and clear of the
-        // card so it reads as a place the strands meet rather than as a stain
-        // on the edge of the box.
+        // The junction sits just clear of the *names*, not of the card. A wide
+        // box would otherwise send every strand off to an edge a long way from
+        // anything, which looks like the wire is avoiding the thing it points
+        // at. Level with the middle of the mentions, as before.
         float meanY = 0.0f;
-        for (const Rectangle& box : mentions) meanY += box.y + box.height * 0.5f;
+        float edge = mentions.front().x;
+        for (const Rectangle& box : mentions) {
+          meanY += box.y + box.height * 0.5f;
+          edge = onLeft ? std::min(edge, box.x) : std::max(edge, box.x + box.width);
+        }
         meanY /= static_cast<float>(mentions.size());
-        const Vector2 junction = {onLeft ? g.rect.x - gap : g.rect.x + g.rect.width + gap, meanY};
+        const Vector2 junction = {edge + outward * gap, meanY};
 
         // Out to each mention. They arrive at the junction along the same
         // horizontal tangent, so near it they lie on top of one another and the

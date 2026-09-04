@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "recent.h"
 #include "text.h"
 #include "theme.h"
 
@@ -10,51 +11,95 @@ namespace sb {
 namespace {
 
 constexpr float kPanelWidth = 420.0f;
-constexpr float kPanelHeight = 420.0f;
 constexpr float kTitleEm = 27.0f;
 constexpr float kLabelEm = 19.0f;
 constexpr float kHintEm = 15.0f;
+
+constexpr float kRowHeight = 40.0f;
+constexpr float kRecentHeight = 32.0f;
+constexpr float kButtonHeight = 44.0f;
 
 // Both Update() and Draw() derive their geometry from here so the hit targets
 // can never drift away from the things on screen.
 struct MenuLayout {
   Rectangle panel;
-  Rectangle row;
-  Rectangle box;
+  Rectangle aspectHeader;
   Rectangle aspect[kAspectCount];
+  bool      aspectOpen = false;
+  float     recentLabelTop = 0.0f;
+  Rectangle recent[recent::kMaxRecent];
+  int       recentRows = 0;
   Rectangle save;
   Rectangle load;
   Rectangle insert;
 };
 
-MenuLayout Compute() {
-  const float w = static_cast<float>(GetScreenWidth());
-  const float h = static_cast<float>(GetScreenHeight());
-
+// The panel is as tall as what is in it, since what is in it changes: the slide
+// shapes fold away and the recent list is however long it is.
+MenuLayout Compute(bool aspectOpen, int recentCount) {
   MenuLayout m;
-  m.panel = {std::round((w - kPanelWidth) * 0.5f), std::round((h - kPanelHeight) * 0.5f),
-             kPanelWidth, kPanelHeight};
-  m.row = {m.panel.x + 20.0f, m.panel.y + 92.0f, m.panel.width - 40.0f, 46.0f};
-  const float boxSide = 24.0f;
-  m.box = {m.row.x + 12.0f, m.row.y + (m.row.height - boxSide) * 0.5f, boxSide, boxSide};
+  m.aspectOpen = aspectOpen;
+  m.recentRows = std::clamp(recentCount, 0, recent::kMaxRecent);
 
-  // The slide shape, as the three it could sensibly be.
-  const float aspectY = m.row.y + m.row.height + 34.0f;
-  constexpr float kAspectGap = 8.0f;
-  const float aspectWidth =
-      (m.panel.width - 48.0f - kAspectGap * static_cast<float>(kAspectCount - 1)) / kAspectCount;
-  for (int i = 0; i < kAspectCount; ++i) {
-    m.aspect[i] = {m.panel.x + 24.0f + static_cast<float>(i) * (aspectWidth + kAspectGap),
-                   aspectY, aspectWidth, 40.0f};
+  const float inset = 24.0f;
+  const float inner = kPanelWidth - inset * 2.0f;
+
+  // Laid out relative to the panel's top, so the height can be totalled before
+  // anywhere on screen has been decided.
+  float y = 92.0f;
+  m.aspectHeader = {inset, y, inner, kRowHeight};
+  y += kRowHeight;
+  if (aspectOpen) {
+    y += 10.0f;
+    constexpr float kAspectGap = 8.0f;
+    const float aspectWidth =
+        (inner - kAspectGap * static_cast<float>(kAspectCount - 1)) / kAspectCount;
+    for (int i = 0; i < kAspectCount; ++i) {
+      m.aspect[i] = {inset + static_cast<float>(i) * (aspectWidth + kAspectGap), y, aspectWidth,
+                     kRowHeight};
+    }
+    y += kRowHeight;
+  }
+  y += 22.0f;
+
+  if (m.recentRows > 0) {
+    m.recentLabelTop = y;
+    y += 22.0f;
+    for (int i = 0; i < m.recentRows; ++i) {
+      m.recent[i] = {inset, y, inner, kRecentHeight};
+      y += kRecentHeight + 2.0f;
+    }
+    y += 20.0f;
   }
 
-  const float buttonWidth = (m.panel.width - 56.0f) * 0.5f;
-  const float buttonY = aspectY + 40.0f + 30.0f;
-  m.save = {m.panel.x + 24.0f, buttonY, buttonWidth, 44.0f};
-  m.load = {m.save.x + buttonWidth + 8.0f, buttonY, buttonWidth, 44.0f};
+  const float buttonWidth = (inner - 8.0f) * 0.5f;
+  m.save = {inset, y, buttonWidth, kButtonHeight};
+  m.load = {inset + buttonWidth + 8.0f, y, buttonWidth, kButtonHeight};
+  y += kButtonHeight + 8.0f;
   // Dropping a file on the window does this too, but there is nothing to drop
   // with on a tablet.
-  m.insert = {m.panel.x + 24.0f, buttonY + 52.0f, m.panel.width - 48.0f, 44.0f};
+  m.insert = {inset, y, inner, kButtonHeight};
+  y += kButtonHeight;
+  y += 48.0f;   // the hint, and the panel's own bottom margin
+
+  const float w = static_cast<float>(GetScreenWidth());
+  const float h = static_cast<float>(GetScreenHeight());
+  m.panel = {std::round((w - kPanelWidth) * 0.5f), std::round((h - y) * 0.5f), kPanelWidth, y};
+
+  // Everything above was relative; move it onto the panel in one pass, so there
+  // is one place the offset is applied and nothing can be missed.
+  const Vector2 at = {m.panel.x, m.panel.y};
+  auto place = [at](Rectangle* r) {
+    r->x += at.x;
+    r->y += at.y;
+  };
+  place(&m.aspectHeader);
+  for (int i = 0; i < kAspectCount; ++i) place(&m.aspect[i]);
+  for (int i = 0; i < m.recentRows; ++i) place(&m.recent[i]);
+  place(&m.save);
+  place(&m.load);
+  place(&m.insert);
+  m.recentLabelTop += at.y;
   return m;
 }
 
@@ -68,23 +113,79 @@ void DrawButton(FontStore& fonts, Rectangle rect, const char* label, bool hovere
              kLabelEm, RAYWHITE);
 }
 
+// A chevron, drawn rather than set in a font so it needs no glyph coverage --
+// the same reasoning as the tick that used to sit beside the grid toggle. It
+// points at what it would do: right to open, down when already open.
+void DrawChevron(Vector2 centre, bool open, Color tint) {
+  constexpr float kArm = 5.0f;
+  if (open) {
+    DrawLineEx({centre.x - kArm, centre.y - kArm * 0.5f}, {centre.x, centre.y + kArm * 0.5f}, 2.4f,
+               tint);
+    DrawLineEx({centre.x, centre.y + kArm * 0.5f}, {centre.x + kArm, centre.y - kArm * 0.5f}, 2.4f,
+               tint);
+  } else {
+    DrawLineEx({centre.x - kArm * 0.5f, centre.y - kArm}, {centre.x + kArm * 0.5f, centre.y}, 2.4f,
+               tint);
+    DrawLineEx({centre.x + kArm * 0.5f, centre.y}, {centre.x - kArm * 0.5f, centre.y + kArm}, 2.4f,
+               tint);
+  }
+}
+
+const char* AspectName(float aspect) {
+  for (int i = 0; i < kAspectCount; ++i) {
+    if (std::abs(aspect - kAspects[i]) < 0.001f) return kAspectNames[i];
+  }
+  return "custom";
+}
+
+// What to call a canvas in the list. The name is what anyone recognises; the
+// folder is only there to tell two files of the same name apart.
+std::string FileName(const std::string& path) {
+  const std::size_t cut = path.find_last_of("/\\");
+  return (cut == std::string::npos) ? path : path.substr(cut + 1);
+}
+
+std::string FolderName(const std::string& path) {
+  const std::size_t cut = path.find_last_of("/\\");
+  return (cut == std::string::npos) ? std::string() : path.substr(0, cut);
+}
+
+float TextBaseline(FontStore& fonts, Rectangle rect, float em) {
+  return rect.y + (rect.height - text::LineHeight(fonts, Face::MainRegular, em)) * 0.5f +
+         text::Ascent(fonts, Face::MainRegular, em);
+}
+
 }  // namespace
+
+void OptionsMenu::Toggle() {
+  visible_ = !visible_;
+  if (visible_) recent_ = recent::List();
+  chosen_.clear();
+}
 
 MenuAction OptionsMenu::Update(Options* options) {
   if (!visible_) return MenuAction::None;
 
-  const MenuLayout m = Compute();
+  const MenuLayout m = Compute(aspectOpen_, static_cast<int>(recent_.size()));
   const Vector2 mouse = GetMousePosition();
   if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return MenuAction::None;
 
-  if (CheckCollisionPointRec(mouse, m.row)) {
-    options->showGridDots = !options->showGridDots;
+  if (CheckCollisionPointRec(mouse, m.aspectHeader)) {
+    aspectOpen_ = !aspectOpen_;
     return MenuAction::None;
   }
-  for (int i = 0; i < kAspectCount; ++i) {
-    if (CheckCollisionPointRec(mouse, m.aspect[i])) {
-      options->slideAspect = kAspects[i];
-      return MenuAction::None;
+  if (aspectOpen_) {
+    for (int i = 0; i < kAspectCount; ++i) {
+      if (CheckCollisionPointRec(mouse, m.aspect[i])) {
+        options->slideAspect = kAspects[i];
+        return MenuAction::None;
+      }
+    }
+  }
+  for (int i = 0; i < m.recentRows; ++i) {
+    if (CheckCollisionPointRec(mouse, m.recent[i])) {
+      chosen_ = recent_[static_cast<std::size_t>(i)];
+      return MenuAction::OpenRecent;
     }
   }
   if (CheckCollisionPointRec(mouse, m.save)) return MenuAction::Save;
@@ -96,7 +197,7 @@ MenuAction OptionsMenu::Update(Options* options) {
 void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
   if (!visible_) return;
 
-  const MenuLayout m = Compute();
+  const MenuLayout m = Compute(aspectOpen_, static_cast<int>(recent_.size()));
   DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), kScrim);
 
   DrawRectangleRounded(m.panel, 0.06f, 12, kPanelBg);
@@ -109,44 +210,71 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
   DrawRectangle(static_cast<int>(m.panel.x + 24.0f), static_cast<int>(m.panel.y + 74.0f),
                 static_cast<int>(m.panel.width - 48.0f), 1, kPanelBorder);
 
-  // Toggle row.
   const Vector2 mouse = GetMousePosition();
-  const bool hovered = CheckCollisionPointRec(mouse, m.row);
-  if (hovered) DrawRectangleRounded(m.row, 0.25f, 8, Fade(kAccent, 0.08f));
 
-  DrawRectangleRounded(m.box, 0.28f, 8,
-                       options.showGridDots ? (hovered ? kAccentHover : kAccent) : kBoxIdle);
-  DrawRectangleRoundedLines(m.box, 0.28f, 8, options.showGridDots ? kAccent : kBoxBorder);
+  // --- the slide shape, folded away until it is asked for --------------------
+  const bool overHeader = CheckCollisionPointRec(mouse, m.aspectHeader);
+  if (overHeader) DrawRectangleRounded(m.aspectHeader, 0.25f, 8, Fade(kAccent, 0.08f));
 
-  if (options.showGridDots) {
-    // A tick, drawn rather than set in a font so it needs no glyph coverage.
-    const Vector2 a = {m.box.x + m.box.width * 0.24f, m.box.y + m.box.height * 0.52f};
-    const Vector2 b = {m.box.x + m.box.width * 0.43f, m.box.y + m.box.height * 0.72f};
-    const Vector2 c = {m.box.x + m.box.width * 0.77f, m.box.y + m.box.height * 0.30f};
-    DrawLineEx(a, b, 2.6f, RAYWHITE);
-    DrawLineEx(b, c, 2.6f, RAYWHITE);
+  const float headerBaseline = TextBaseline(fonts, m.aspectHeader, kLabelEm);
+  text::Draw(fonts, Face::MainRegular, "Slide shape",
+             {m.aspectHeader.x + 26.0f, headerBaseline}, kLabelEm, kPanelText);
+  DrawChevron({m.aspectHeader.x + 11.0f, m.aspectHeader.y + m.aspectHeader.height * 0.5f},
+              aspectOpen_, overHeader ? kPanelText : kPanelMuted);
+
+  // The chosen shape is written on the header, so folding the four away does
+  // not fold away which one it is.
+  if (!aspectOpen_) {
+    const char* current = AspectName(options.slideAspect);
+    const float width = text::Measure(fonts, Face::MainRegular, current, kLabelEm);
+    text::Draw(fonts, Face::MainRegular, current,
+               {m.aspectHeader.x + m.aspectHeader.width - width - 12.0f, headerBaseline}, kLabelEm,
+               kPanelMuted);
+  } else {
+    for (int i = 0; i < kAspectCount; ++i) {
+      const bool chosen = std::abs(options.slideAspect - kAspects[i]) < 0.001f;
+      const bool over = CheckCollisionPointRec(mouse, m.aspect[i]);
+      DrawRectangleRounded(m.aspect[i], 0.25f, 8,
+                           chosen ? (over ? kAccentHover : kAccent) : kBoxIdle);
+      DrawRectangleRoundedLines(m.aspect[i], 0.25f, 8, chosen ? kAccent : kBoxBorder);
+      const float w = text::Measure(fonts, Face::MainRegular, kAspectNames[i], kLabelEm);
+      text::Draw(fonts, Face::MainRegular, kAspectNames[i],
+                 {m.aspect[i].x + (m.aspect[i].width - w) * 0.5f,
+                  m.aspect[i].y + m.aspect[i].height * 0.5f + kLabelEm * 0.34f},
+                 kLabelEm, chosen ? RAYWHITE : kPanelText);
+    }
   }
 
-  const float labelBaseline =
-      m.row.y + (m.row.height - text::LineHeight(fonts, Face::MainRegular, kLabelEm)) * 0.5f +
-      text::Ascent(fonts, Face::MainRegular, kLabelEm);
-  text::Draw(fonts, Face::MainRegular, "Show grid dots",
-             {m.box.x + m.box.width + 14.0f, labelBaseline}, kLabelEm, kPanelText);
+  // --- the canvases opened lately -------------------------------------------
+  if (m.recentRows > 0) {
+    text::Draw(fonts, Face::MainRegular, "Recent",
+               {m.panel.x + 24.0f, m.recentLabelTop + text::Ascent(fonts, Face::MainRegular,
+                                                                   kHintEm)},
+               kHintEm, kPanelMuted);
+  }
+  for (int i = 0; i < m.recentRows; ++i) {
+    const std::string& path = recent_[static_cast<std::size_t>(i)];
+    const bool over = CheckCollisionPointRec(mouse, m.recent[i]);
+    if (over) DrawRectangleRounded(m.recent[i], 0.25f, 8, Fade(kAccent, 0.12f));
 
-  const float aspectLabelBaseline = m.aspect[0].y - 12.0f;
-  text::Draw(fonts, Face::MainRegular, "Slide shape", {m.panel.x + 24.0f, aspectLabelBaseline},
-             kHintEm, kPanelMuted);
-  for (int i = 0; i < kAspectCount; ++i) {
-    const bool chosen = std::abs(options.slideAspect - kAspects[i]) < 0.001f;
-    const bool over = CheckCollisionPointRec(mouse, m.aspect[i]);
-    DrawRectangleRounded(m.aspect[i], 0.25f, 8,
-                         chosen ? (over ? kAccentHover : kAccent) : kBoxIdle);
-    DrawRectangleRoundedLines(m.aspect[i], 0.25f, 8, chosen ? kAccent : kBoxBorder);
-    const float w = text::Measure(fonts, Face::MainRegular, kAspectNames[i], kLabelEm);
-    text::Draw(fonts, Face::MainRegular, kAspectNames[i],
-               {m.aspect[i].x + (m.aspect[i].width - w) * 0.5f,
-                m.aspect[i].y + m.aspect[i].height * 0.5f + kLabelEm * 0.34f},
-               kLabelEm, chosen ? RAYWHITE : kPanelText);
+    const std::string name = FileName(path);
+    const float baseline = TextBaseline(fonts, m.recent[i], kLabelEm);
+    const float nameWidth =
+        text::Measure(fonts, Face::MainRegular, name.c_str(), kLabelEm);
+    text::Draw(fonts, Face::MainRegular, name.c_str(), {m.recent[i].x + 12.0f, baseline}, kLabelEm,
+               kPanelText);
+
+    // The folder only earns its place when there is room for it: it is there to
+    // tell two files of the same name apart, not to be read.
+    const std::string folder = FolderName(path);
+    if (folder.empty()) continue;
+    const float folderWidth =
+        text::Measure(fonts, Face::MainRegular, folder.c_str(), kHintEm);
+    const float room = m.recent[i].width - 24.0f - nameWidth - 16.0f;
+    if (folderWidth > room) continue;
+    text::Draw(fonts, Face::MainRegular, folder.c_str(),
+               {m.recent[i].x + m.recent[i].width - folderWidth - 12.0f, baseline}, kHintEm,
+               kPanelMuted);
   }
 
   DrawButton(fonts, m.save, "Save canvas", CheckCollisionPointRec(mouse, m.save));

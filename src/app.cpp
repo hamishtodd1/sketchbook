@@ -9,6 +9,7 @@
 #include "compiler.h"
 #include "filedialog.h"
 #include "grid.h"
+#include "recent.h"
 #include "resize.h"
 #include "text.h"
 #include "theme.h"
@@ -575,6 +576,430 @@ void App::HandleDroppedFiles() {
   UnloadDroppedFiles(dropped);
 }
 
+
+std::vector<Vector2> App::WindowsOf(const CodeBlock* block, const std::string& name) {
+  std::vector<Vector2> found;
+  Vector2              at{};
+  if (axes_.MarkerFor(block, name, viewport_, fonts_, &at)) found.push_back(at);
+  if (plots_.MarkerFor(block, name, viewport_, fonts_, &at)) found.push_back(at);
+  return found;
+}
+
+
+// ------------------------------------------------- two values, held together
+namespace {
+
+// How close the two fingers have to come before they count as having met.
+//
+// Proportional to how far apart they started, because "bringing them together"
+// is a relative gesture and screens differ. Two fingertips side by side already
+// report their centres a good forty or fifty pixels apart, so a threshold in
+// the tens is one no hand can ever reach: this asks for the distance to be
+// halved, with a floor and a ceiling so that starting very close or very far
+// apart still means something sensible.
+float ComposeMeet(float startedApart) {
+  return std::clamp(startedApart * 0.5f, 90.0f, 200.0f);
+}
+
+constexpr float kComposeButton = 60.0f;
+constexpr float kComposeGap = 10.0f;
+constexpr const char* const kComposeOps[] = {"+", "*"};
+constexpr int kComposeOpCount = 2;
+
+Rectangle ComposeButtonRect(Vector2 at, int index) {
+  const float width = kComposeOpCount * kComposeButton + (kComposeOpCount + 1) * kComposeGap;
+  const float left = at.x - width * 0.5f;
+  return {left + kComposeGap + static_cast<float>(index) * (kComposeButton + kComposeGap),
+          at.y - kComposeButton * 0.5f, kComposeButton, kComposeButton};
+}
+
+Rectangle ComposePanelRect(Vector2 at) {
+  const float width = kComposeOpCount * kComposeButton + (kComposeOpCount + 1) * kComposeGap;
+  const float height = kComposeButton + 2.0f * kComposeGap;
+  return {at.x - width * 0.5f, at.y - height * 0.5f, width, height};
+}
+
+float Apart(Vector2 a, Vector2 b) {
+  const float dx = a.x - b.x;
+  const float dy = a.y - b.y;
+  return std::sqrt(dx * dx + dy * dy);
+}
+
+}  // namespace
+
+void App::ComposeInto(const std::string& op) {
+  if (composeBlock_ == nullptr) return;
+  const mathprogram::Variable* left = composeBlock_->FindVariable(composeNames_[0]);
+  const mathprogram::Variable* right = composeBlock_->FindVariable(composeNames_[1]);
+  if (left == nullptr || right == nullptr) return;
+
+  // A function anywhere in it makes the answer a function; two reals make a
+  // real. Nothing else has a viz to have been touched.
+  const bool function = left->kind == mathprogram::Kind::Function ||
+                        right->kind == mathprogram::Kind::Function;
+  const std::string type = function ? std::string(types::realfunction::kName) : "float";
+  const std::string name = composeBlock_->FreshName();
+  composeBlock_->InsertDeclaration(type + " " + name + " = " + composeNames_[0] + " " + op +
+                                   " " + composeNames_[1] + ";");
+}
+
+bool App::HandleCompose() {
+  const int           count = std::min(touch::Count(), touch::kMaxPoints);
+  const touch::Point* points = touch::Points();
+
+  // ---- the menu, once the fingers have met --------------------------------
+  if (compose_ == Compose::Menu) {
+    // A finger has to stay down to choose with: the menu belongs to the gesture
+    // that raised it, and letting go of the gesture puts it away. Whichever
+    // contact is still down is the one pointing, wherever it now is.
+    composeHot_ = -1;
+    if (count > 0) {
+      composeTip_ = points[0].position;
+      for (int i = 0; i < kComposeOpCount; ++i) {
+        if (CheckCollisionPointRec(composeTip_, ComposeButtonRect(composeMenu_, i))) {
+          composeHot_ = i;
+        }
+      }
+      return true;
+    }
+
+    // Everything lifted. Where the last finger was is what it chose, and
+    // nowhere in particular chooses nothing.
+    int chosen = -1;
+    for (int i = 0; i < kComposeOpCount; ++i) {
+      if (CheckCollisionPointRec(composeTip_, ComposeButtonRect(composeMenu_, i))) chosen = i;
+    }
+    if (chosen >= 0) ComposeInto(kComposeOps[chosen]);
+    compose_ = Compose::None;
+    return true;
+  }
+
+  // ---- two fingers already down -------------------------------------------
+  if (compose_ == Compose::Holding) {
+    // Follow each finger, by its own id where that still exists and by where it
+    // was otherwise. A digitizer asked to track two fingertips that are nearly
+    // touching will happily drop one and hand the other back under a new id --
+    // which is to say it does this exactly when the gesture is succeeding.
+    bool held[2] = {false, false};
+    bool taken[touch::kMaxPoints] = {};
+    for (int k = 0; k < 2; ++k) {
+      for (int i = 0; i < count; ++i) {
+        if (taken[i] || points[i].id != composeIds_[k]) continue;
+        composeAt_[k] = points[i].position;
+        taken[i] = true;
+        held[k] = true;
+        break;
+      }
+    }
+    for (int k = 0; k < 2; ++k) {
+      if (held[k]) continue;
+      for (int i = 0; i < count; ++i) {
+        if (taken[i] || Apart(points[i].position, composeAt_[k]) > 90.0f) continue;
+        composeIds_[k] = points[i].id;
+        composeAt_[k] = points[i].position;
+        taken[i] = true;
+        held[k] = true;
+        break;
+      }
+    }
+
+    // Held means frozen: whatever else would have moved these values does not
+    // get the chance to.
+    axes_.AbandonDrag();
+
+    // Asked before the contacts are counted, so that losing one at the very
+    // moment they met still counts as having met.
+    if (Apart(composeAt_[0], composeAt_[1]) <= ComposeMeet(composeApart_)) {
+      composeMenu_ = {(composeAt_[0].x + composeAt_[1].x) * 0.5f,
+                      (composeAt_[0].y + composeAt_[1].y) * 0.5f};
+      composeTip_ = composeMenu_;
+      composeHot_ = -1;
+      compose_ = Compose::Menu;
+      return true;
+    }
+    if (!held[0] || !held[1]) {
+      // A finger lifted before they met: nothing was meant by it.
+      compose_ = Compose::None;
+      return false;
+    }
+    return true;
+  }
+
+  // ---- starting one --------------------------------------------------------
+  if (count != 2) return false;
+
+  CodeBlock*  block = nullptr;
+  std::string names[2];
+  for (int i = 0; i < 2; ++i) {
+    AxisRef  marker;
+    CurveRef curve;
+    if (axes_.ValueAt(points[i].position, viewport_, fonts_, &marker)) {
+      block = (block == nullptr) ? marker.block : block;
+      if (marker.block != block) return false;
+      names[i] = marker.name;
+    } else if (plots_.ValueAt(points[i].position, viewport_, fonts_, &curve)) {
+      block = (block == nullptr) ? curve.block : block;
+      if (curve.block != block) return false;
+      names[i] = curve.name;
+    } else {
+      return false;   // a finger on nothing: this is a pinch, not a gesture
+    }
+  }
+  // Two values of the same box, and two different ones. Values from different
+  // boxes are values of different programs, and no line could name them both.
+  if (block == nullptr || names[0].empty() || names[1].empty() || names[0] == names[1]) {
+    return false;
+  }
+
+  // Whatever one finger had started doing to a handle is undone: it had not
+  // chosen anything yet, and what the two fingers mean is something else.
+  axes_.AbandonDrag();
+
+  compose_ = Compose::Holding;
+  composeBlock_ = block;
+  for (int i = 0; i < 2; ++i) {
+    composeNames_[i] = names[i];
+    composeIds_[i] = points[i].id;
+    composeAt_[i] = points[i].position;
+  }
+  // How far apart they began, since what counts as together is relative to it.
+  composeApart_ = Apart(composeAt_[0], composeAt_[1]);
+  return true;
+}
+
+void App::DrawCompose() {
+  if (compose_ == Compose::None || composeBlock_ == nullptr) return;
+
+  const float thickness = std::max(1.6f, 2.0f * viewport_.Zoom());
+  const auto  cable = [&](Vector2 a, Vector2 b, Color tint) {
+    const float reach = std::clamp(std::abs(b.x - a.x) * 0.45f, 24.0f, 190.0f);
+    const float direction = (b.x > a.x) ? 1.0f : -1.0f;
+    DrawSplineSegmentBezierCubic(a, {a.x + reach * direction, a.y},
+                                 {b.x - reach * direction, b.y}, b, thickness, tint);
+  };
+
+  // A wire back to where each value actually is, so that what is being held is
+  // never in doubt -- the finger is only where your hand is.
+  const Vector2 ends[2] = {composeAt_[0], composeAt_[1]};
+  for (int i = 0; i < 2; ++i) {
+    Vector2 from{};
+    if (!axes_.MarkerFor(composeBlock_, composeNames_[i], viewport_, fonts_, &from) &&
+        !plots_.MarkerFor(composeBlock_, composeNames_[i], viewport_, fonts_, &from)) {
+      continue;
+    }
+    const Vector2 to = (compose_ == Compose::Menu) ? composeMenu_ : ends[i];
+    cable(from, to, Fade(composeBlock_->VariableColor(composeNames_[i]), 0.9f));
+  }
+
+  if (compose_ != Compose::Menu) return;
+
+  // And where they met, the two things they could be made into.
+  const Rectangle panel = ComposePanelRect(composeMenu_);
+  DrawRectangleRounded(panel, 0.3f, 10, kOperatorFill);
+  DrawRectangleRoundedLinesEx(panel, 0.3f, 10, 1.5f, kOperatorEdge);
+
+  for (int i = 0; i < kComposeOpCount; ++i) {
+    const Rectangle box = ComposeButtonRect(composeMenu_, i);
+    const bool      hot = (composeHot_ == i);
+    DrawRectangleRounded(box, 0.3f, 8, hot ? kAccentHover : kAccent);
+    const float em = kComposeButton * 0.5f;
+    const float width = text::Measure(fonts_, Face::Mono, kComposeOps[i], em);
+    text::Draw(fonts_, Face::Mono, kComposeOps[i],
+               {box.x + (box.width - width) * 0.5f, box.y + box.height * 0.5f + em * 0.36f}, em,
+               RAYWHITE);
+  }
+}
+
+bool App::CanWire(const ActiveValue& active) {
+  if (active.block == nullptr) return false;
+  const mathline::Flow flow = active.block->FlowFor(active.name);
+  if (!flow.Interesting()) return false;
+  for (const mathline::FlowNode& node : flow.nodes) {
+    if (node.op.empty() && !WindowsOf(active.block, node.name).empty()) return true;
+  }
+  return false;
+}
+
+bool App::DrawWiring(const ActiveValue& active) {
+  if (active.block == nullptr) return false;
+  const mathline::Flow flow = active.block->FlowFor(active.name);
+  if (!flow.Interesting()) return false;
+
+  // Where each leaf comes from: its own window, not the place its name is
+  // written. The window *is* the value; a mention is only where it is spoken of.
+  std::vector<Vector2> where(flow.nodes.size(), Vector2{0.0f, 0.0f});
+  std::vector<bool>    known(flow.nodes.size(), false);
+  for (std::size_t i = 0; i < flow.nodes.size(); ++i) {
+    if (!flow.nodes[i].op.empty()) continue;
+    const std::vector<Vector2> windows = WindowsOf(active.block, flow.nodes[i].name);
+    if (windows.empty()) continue;
+    where[i] = windows.front();
+    known[i] = true;
+  }
+
+  // Where it all ends up: every place the result is written, and its own
+  // windows too.
+  std::vector<Vector2> sinks;
+  for (const Rectangle& box : active.block->MentionsOf(flow.result, viewport_, fonts_)) {
+    sinks.push_back({box.x, box.y + box.height * 0.5f});
+  }
+  const std::vector<Vector2> resultWindows = WindowsOf(active.block, flow.result);
+  for (const Vector2& window : resultWindows) sinks.push_back(window);
+  if (sinks.empty()) return false;
+
+  Vector2 target{0.0f, 0.0f};
+  for (const Vector2& sink : sinks) { target.x += sink.x; target.y += sink.y; }
+  target.x /= static_cast<float>(sinks.size());
+  target.y /= static_cast<float>(sinks.size());
+
+  // Where the machine is drawn: under the box and everything docked to it, in
+  // the free canvas. Not between the values and the result, tempting as that
+  // is -- a number line sits right under its box, so "between" is a few pixels
+  // and the boxes would land on top of the very markers they are wired to.
+  const Rectangle card = active.block->Measure(viewport_, fonts_).rect;
+  float           baseY = card.y + card.height;
+  for (const Rectangle& docked : {axes_.DockedBounds(active.block, viewport_, fonts_),
+                                  plots_.DockedBounds(active.block, viewport_, fonts_)}) {
+    if (docked.height > 0.0f) baseY = std::max(baseY, docked.y + docked.height);
+  }
+  for (const Vector2& sink : sinks) baseY = std::max(baseY, sink.y);
+  baseY += kOperatorHeight * 1.4f;
+  const float rung = kOperatorHeight * 2.1f;
+
+  // How deep each operator is above the values it is made of, so the chain has
+  // a rung of its own. Barycentric across, so a box sits between what feeds it.
+  std::vector<int> depth(flow.nodes.size(), 0);
+  int              deepest = 0;
+  for (std::size_t i = 0; i < flow.nodes.size(); ++i) {
+    const mathline::FlowNode& node = flow.nodes[i];
+    if (node.op.empty()) continue;
+    int below = 0;
+    if (node.lhs >= 0) below = std::max(below, depth[static_cast<std::size_t>(node.lhs)]);
+    if (node.rhs >= 0) below = std::max(below, depth[static_cast<std::size_t>(node.rhs)]);
+    depth[i] = below + 1;
+    deepest = std::max(deepest, depth[i]);
+  }
+
+  for (std::size_t i = 0; i < flow.nodes.size(); ++i) {
+    const mathline::FlowNode& node = flow.nodes[i];
+    if (node.op.empty()) continue;
+
+    Vector2 mean{0.0f, 0.0f};
+    int     count = 0;
+    for (const int feed : {node.lhs, node.rhs}) {
+      if (feed < 0 || !known[static_cast<std::size_t>(feed)]) continue;
+      mean.x += where[static_cast<std::size_t>(feed)].x;
+      mean.y += where[static_cast<std::size_t>(feed)].y;
+      ++count;
+    }
+    // An operator with nothing known feeding it has nothing to say.
+    if (count == 0) continue;
+    mean.x /= static_cast<float>(count);
+    // Deepest at the bottom, the last one nearest the box: the working runs
+    // *towards* what it makes. Rungs the other way up would have every bullet
+    // pointing back over its own inputs.
+    where[i] = {mean.x, baseY + static_cast<float>(deepest - depth[i]) * rung};
+    known[i] = true;
+  }
+
+  if (flow.root < 0 || !known[static_cast<std::size_t>(flow.root)]) return false;
+
+  // Which way each bullet points: at whatever it feeds. A shape with a front
+  // says which way the working is going without anything being labelled.
+  std::vector<int> parent(flow.nodes.size(), -1);
+  for (std::size_t i = 0; i < flow.nodes.size(); ++i) {
+    for (const int feed : {flow.nodes[i].lhs, flow.nodes[i].rhs}) {
+      if (feed >= 0) parent[static_cast<std::size_t>(feed)] = static_cast<int>(i);
+    }
+  }
+
+  const float half = kOperatorHeight * 0.5f;
+  const auto  unit = [](Vector2 v) {
+    const float length = std::sqrt(v.x * v.x + v.y * v.y);
+    return (length > 1e-4f) ? Vector2{v.x / length, v.y / length} : Vector2{0.0f, -1.0f};
+  };
+
+  std::vector<Vector2> forward(flow.nodes.size(), Vector2{0.0f, -1.0f});
+  for (std::size_t i = 0; i < flow.nodes.size(); ++i) {
+    if (flow.nodes[i].op.empty() || !known[i]) continue;
+    const int up = parent[i];
+    const Vector2 toward = (up >= 0 && known[static_cast<std::size_t>(up)])
+                               ? where[static_cast<std::size_t>(up)]
+                               : target;
+    forward[i] = unit({toward.x - where[i].x, toward.y - where[i].y});
+  }
+
+  // Where a bullet's wires meet it: in at the flat end, out at the point.
+  const auto backOf = [&](std::size_t i) {
+    return Vector2{where[i].x - forward[i].x * (half + kOperatorPoint * 0.5f),
+                   where[i].y - forward[i].y * (half + kOperatorPoint * 0.5f)};
+  };
+  const auto tipOf = [&](std::size_t i) {
+    return Vector2{where[i].x + forward[i].x * (half + kOperatorPoint * 0.5f),
+                   where[i].y + forward[i].y * (half + kOperatorPoint * 0.5f)};
+  };
+
+  // ---- the wires ----------------------------------------------------------
+  const float thickness = std::max(1.4f, 1.8f * viewport_.Zoom());
+  const auto  cable = [&](Vector2 a, Vector2 leaving, Vector2 b, Vector2 arriving, Color tint) {
+    const float span = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+    const float reach = std::clamp(span * 0.4f, 16.0f, 150.0f);
+    DrawSplineSegmentBezierCubic(a, {a.x + leaving.x * reach, a.y + leaving.y * reach},
+                                 {b.x - arriving.x * reach, b.y - arriving.y * reach}, b,
+                                 thickness, tint);
+  };
+
+  for (std::size_t i = 0; i < flow.nodes.size(); ++i) {
+    const mathline::FlowNode& node = flow.nodes[i];
+    if (node.op.empty() || !known[i]) continue;
+    const Vector2 into = backOf(i);
+    for (const int feed : {node.lhs, node.rhs}) {
+      if (feed < 0 || !known[static_cast<std::size_t>(feed)]) continue;
+      const std::size_t at = static_cast<std::size_t>(feed);
+      const mathline::FlowNode& source = flow.nodes[at];
+      // A wire out of a value wears that value's colour; a wire out of a bullet
+      // is black, because the working belongs to nothing in particular until it
+      // arrives somewhere that does.
+      const bool    fromOp = !source.op.empty();
+      const Vector2 from = fromOp ? tipOf(at) : where[at];
+      const Vector2 leaving =
+          fromOp ? forward[at] : Vector2{(into.x > from.x) ? 1.0f : -1.0f, 0.0f};
+      const Color tint = fromOp ? kOperatorWire
+                                : Fade(active.block->VariableColor(source.name), 0.85f);
+      cable(from, leaving, into, forward[i], tint);
+    }
+  }
+
+  // Out of the last point, one wire -- and only then does it fork. What was
+  // made is one thing, however many places it turns up.
+  const std::size_t root = static_cast<std::size_t>(flow.root);
+  const Vector2     tip = tipOf(root);
+  const Vector2     fork = {tip.x + forward[root].x * kOperatorRun,
+                            tip.y + forward[root].y * kOperatorRun};
+  const Color       resultTint = Fade(active.block->VariableColor(flow.result), 0.85f);
+  DrawLineEx(tip, fork, thickness, resultTint);
+  for (const Vector2& sink : sinks) {
+    const Vector2 leaving{(sink.x > fork.x) ? 1.0f : -1.0f, 0.0f};
+    cable(fork, leaving, sink, leaving, resultTint);
+  }
+
+  // ---- the bullets --------------------------------------------------------
+  const float em = kOperatorHeight * 0.58f;
+  for (std::size_t i = 0; i < flow.nodes.size(); ++i) {
+    const mathline::FlowNode& node = flow.nodes[i];
+    if (node.op.empty() || !known[i]) continue;
+    const float width = text::Measure(fonts_, Face::Mono, node.op, em) + 2.0f * kOperatorPadX;
+    DrawBullet(where[i], forward[i], width * 0.5f + kOperatorPoint * 0.5f, half, kOperatorFill,
+               kOperatorEdge);
+    const float glyph = text::Measure(fonts_, Face::Mono, node.op, em);
+    text::Draw(fonts_, Face::Mono, node.op,
+               {where[i].x - glyph * 0.5f - forward[i].x * kOperatorPoint * 0.35f,
+                where[i].y + em * 0.36f - forward[i].y * kOperatorPoint * 0.35f},
+               em, kOperatorEdge);
+  }
+  return true;
+}
+
 void App::FurnishSlide(Vector2 centre, const std::string& title,
                        const std::vector<std::string>& body) {
   const float aspect = options_.slideAspect;
@@ -782,6 +1207,12 @@ void App::Update() {
     if (menu_.Visible()) SetFocus(nullptr);
   }
 
+  // A press that the menu acted on belongs to the menu, even when acting on it
+  // was what closed the menu. Otherwise choosing a recent canvas would put the
+  // caret into whatever box of the *new* canvas happened to be under the
+  // pointer -- the click would be spent twice, on two different canvases.
+  const bool menuOwnsPress = menu_.Visible();
+
   switch (menu_.Update(&options_)) {
     case MenuAction::Save: {
       const std::string path = filedialog::Save("canvas.sketch");
@@ -795,6 +1226,18 @@ void App::Update() {
       if (!path.empty()) {
         if (LoadCanvas(path)) menu_.Close();
         else TraceLog(LOG_WARNING, "CANVAS: could not load %s", path.c_str());
+      }
+      break;
+    }
+    case MenuAction::OpenRecent: {
+      const std::string path = menu_.Chosen();
+      if (LoadCanvas(path)) {
+        menu_.Close();
+      } else {
+        // It was there when the list was read. Say so rather than doing
+        // nothing, since a row that does nothing when pressed is worse than a
+        // row that was never offered.
+        TraceLog(LOG_WARNING, "CANVAS: could not load %s", path.c_str());
       }
       break;
     }
@@ -816,7 +1259,7 @@ void App::Update() {
       break;
   }
 
-  const bool canvasActive = !menu_.Visible();
+  const bool canvasActive = !menu_.Visible() && !menuOwnsPress;
 
   // Whatever is already being dragged owns the pointer until the button comes
   // up. Without this a window let go over another window's rim would never see
@@ -850,6 +1293,9 @@ void App::Update() {
       !grabbingSelection) {
     ClearSelection();
   }
+  // Two fingers on two values mean something neither means alone, so this is
+  // asked before anything that could move one of them.
+  if (canvasActive && !consumed) consumed = HandleCompose();
   if (canvasActive && textDrag_ != TextDrag::None) consumed = HandleTextGesture();
   if (canvasActive && !consumed && dragBlock_ != nullptr) consumed = HandleBlockDrag();
   if (canvasActive && !consumed && media_.Busy()) consumed = media_.HandleInput(viewport_);
@@ -983,6 +1429,12 @@ void App::Update() {
   // declaration would land, so the click has somewhere visible to be aimed.
   const CodeBlock* insertInto = canvasActive ? axes_.InsertTarget(viewport_, fonts_) : nullptr;
 
+  // A value made out of other values gets its whole derivation drawn instead of
+  // a plain wire from its window -- the wires end at the same names either way,
+  // and one cable is the point.
+  for (ActiveValue& value : active) value.wired = CanWire(value);
+  active_ = active;
+
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     std::vector<ActiveValue> mine;
     for (const ActiveValue& value : active) {
@@ -1039,7 +1491,7 @@ void App::Draw() {
   // is still drawing from.
   fonts_.BeginFrame();
 
-  if (options_.showGridDots) DrawDotGrid(viewport_, gridShow_);
+  DrawDotGrid(viewport_, gridShow_);
 
   // Under everything else: a slide is a region of the canvas, and whatever is
   // on it stands on top of it.
@@ -1052,6 +1504,21 @@ void App::Draw() {
   plots_.Draw(viewport_, fonts_, &vizes_);
   shaders_.Draw(viewport_, fonts_);
   media_.Draw(viewport_, fonts_);
+
+  // Every box's controls, after every box: a strip half under the card next to
+  // it is a strip you cannot press.
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    block->DrawChrome(viewport_, fonts_);
+  }
+
+  // Two values held together, and the choice of what to make of them.
+  DrawCompose();
+
+  // Where a value came from, over everything: a wiring diagram chopped in half
+  // by a card would say nothing.
+  for (const ActiveValue& value : active_) {
+    if (value.wired) DrawWiring(value);
+  }
 
   // Error balloons last, so they are never buried under a neighbouring card.
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
@@ -1084,6 +1551,66 @@ void App::Draw() {
 // Each record starts with a keyword, and a block's source lines are prefixed
 // with "> " so blank lines and leading spaces survive the round trip.
 
+
+// ------------------------------------------------------------- media paths
+//
+// A canvas and the pictures on it are one thing, and one thing has to be
+// movable. So a file that sits beside the canvas -- or under it -- is written
+// down as where it is *relative to the canvas*, and a canvas carried to another
+// folder with its pictures still finds them. Anything further afield keeps its
+// absolute path, because there is nothing else it could be said relative to.
+//
+// Hand-rolled rather than std::filesystem::relative, which resolves symlinks and
+// touches the disk; this is a question about two strings.
+namespace {
+
+std::string FolderOf(const std::string& path) {
+  const std::size_t cut = path.find_last_of("/\\");
+  return (cut == std::string::npos) ? std::string() : path.substr(0, cut);
+}
+
+// Same separators throughout, so the two can be compared at all. Forward
+// slashes, which Windows takes everywhere and which survive a text file.
+std::string Normalised(std::string path) {
+  for (char& c : path) {
+    if (c == '\\') c = '/';
+  }
+  return path;
+}
+
+bool IsAbsolute(const std::string& path) {
+  if (path.size() >= 2 && path[1] == ':') return true;             // C:/...
+  return !path.empty() && (path[0] == '/' || path[0] == '\\');     // /... or UNC
+}
+
+// The path to write into a canvas saved at `canvasPath`.
+std::string PathForSaving(const std::string& file, const std::string& canvasPath) {
+  const std::string folder = Normalised(FolderOf(canvasPath));
+  const std::string full = Normalised(file);
+  if (folder.empty() || full.size() <= folder.size() + 1) return full;
+
+  // Under the canvas's own folder? Then say so relatively. Compared without
+  // case on Windows, where two spellings of the same folder are the same
+  // folder.
+  for (std::size_t i = 0; i < folder.size(); ++i) {
+    if (std::tolower(static_cast<unsigned char>(folder[i])) !=
+        std::tolower(static_cast<unsigned char>(full[i]))) {
+      return full;
+    }
+  }
+  if (full[folder.size()] != '/') return full;
+  return full.substr(folder.size() + 1);
+}
+
+// And back again, when reading one.
+std::string PathForLoading(const std::string& written, const std::string& canvasPath) {
+  if (written.empty() || IsAbsolute(written)) return written;
+  const std::string folder = FolderOf(canvasPath);
+  return folder.empty() ? written : (folder + "/" + written);
+}
+
+}  // namespace
+
 bool App::SaveCanvas(const std::string& path) {
   std::ofstream file(path, std::ios::binary | std::ios::trunc);
   if (!file) return false;
@@ -1091,7 +1618,6 @@ bool App::SaveCanvas(const std::string& path) {
   file << "sketchbook " << kFileVersion << "\n";
   const Vector2 centre = viewport_.Centre();
   file << "view " << centre.x << " " << centre.y << " " << viewport_.Zoom() << "\n";
-  file << "grid " << (options_.showGridDots ? 1 : 0) << "\n";
   file << "aspect " << options_.slideAspect << "\n";
   const Vector2 newSlide = slides_.ButtonPosition();
   file << "newslide " << newSlide.x << " " << newSlide.y << "\n";
@@ -1146,7 +1672,8 @@ bool App::SaveCanvas(const std::string& path) {
     file << "media " << static_cast<int>(item->kind) << " " << item->worldPos.x << " "
          << item->worldPos.y << " " << item->worldWidth << " " << item->crop.x << " "
          << item->crop.y << " " << item->crop.width << " " << item->crop.height << " "
-         << item->trimStart << " " << item->trimEnd << " " << item->path << "\n";
+         << item->trimStart << " " << item->trimEnd << " "
+         << PathForSaving(item->path, path) << "\n";
   }
 
   for (const Plot& plot : plots_.Plots()) {
@@ -1159,6 +1686,7 @@ bool App::SaveCanvas(const std::string& path) {
   }
   if (!file.good()) return false;
   currentPath_ = path;
+  recent::Remember(path);
   return true;
 }
 
@@ -1237,7 +1765,6 @@ bool App::LoadCanvas(const std::string& path) {
   std::vector<LegacySlideText> legacy;
   Vector2 centre{0.0f, 0.0f};
   float   zoom = 1.0f;
-  bool    grid = true;
   bool    inBlock = false;
   float   aspect = kDefaultSlideAspect;
   Vector2 newSlide = SlidePanel::DefaultButtonPosition();
@@ -1265,10 +1792,6 @@ bool App::LoadCanvas(const std::string& path) {
 
     if (keyword == "view") {
       stream >> centre.x >> centre.y >> zoom;
-    } else if (keyword == "grid") {
-      int value = 1;
-      stream >> value;
-      grid = (value != 0);
     } else if (keyword == "block") {
       LoadedBlock block;
       int showMath = 0;
@@ -1374,6 +1897,9 @@ bool App::LoadCanvas(const std::string& path) {
   textDrag_ = TextDrag::None;
   textBlock_ = nullptr;
 
+  compose_ = Compose::None;
+  composeBlock_ = nullptr;
+
   slides_.Reset();
   axes_.Clear();
   plots_.Clear();
@@ -1449,7 +1975,7 @@ bool App::LoadCanvas(const std::string& path) {
   shaders_.Adopt(std::move(views));
 
   for (const LoadedMedia& loaded : media) {
-    media_.Add(loaded.path, loaded.position, loaded.width);
+    media_.Add(PathForLoading(loaded.path, path), loaded.position, loaded.width);
     if (media_.Items().empty()) continue;
     MediaItem& item = *media_.Items().back();
     item.crop = loaded.crop;
@@ -1459,7 +1985,6 @@ bool App::LoadCanvas(const std::string& path) {
     }
   }
 
-  options_.showGridDots = grid;
   options_.slideAspect = (aspect > 0.05f) ? aspect : kDefaultSlideAspect;
   slides_.Adopt(std::move(slides), newSlide);
   viewport_.Reset(centre, zoom);
@@ -1480,6 +2005,7 @@ bool App::LoadCanvas(const std::string& path) {
   }
 
   currentPath_ = path;
+  recent::Remember(path);
   return true;
 }
 

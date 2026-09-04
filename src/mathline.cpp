@@ -540,6 +540,114 @@ bool ParseVizSigil(std::string_view line, std::string* type) {
 
 }  // namespace
 
+
+// --------------------------------------------------------------------- wiring
+namespace {
+
+// The operator as it is written in the code, which is what goes in the little
+// box where two wires meet. The code's spelling rather than the mathematics':
+// a wiring diagram is about what the machine does.
+const char* OperatorGlyph(NodeKind kind) {
+  switch (kind) {
+    case NodeKind::Add: return "+";
+    case NodeKind::Sub: return "-";
+    case NodeKind::Mul: return "*";
+    case NodeKind::Div: return "/";
+    case NodeKind::Neg: return "-";
+    case NodeKind::Inner: return "|";
+    case NodeKind::Outer: return "^";
+    case NodeKind::Regressive: return "&";
+    case NodeKind::Reverse: return "~";
+    case NodeKind::Dual: return "!";
+    default: return "";
+  }
+}
+
+// Flattens the parser's tree into the graph. Returns the index of the node the
+// subtree feeds, or -1 for a subtree with nothing to draw -- a bare number.
+int Flatten(const Node& node, Flow* flow) {
+  switch (node.kind) {
+    case NodeKind::Number:
+      // A literal has nowhere to come from, so it contributes no wire and the
+      // operator it feeds simply has one input.
+      return -1;
+
+    case NodeKind::Ident: {
+      FlowNode leaf;
+      leaf.name = node.text;
+      flow->nodes.push_back(leaf);
+      return static_cast<int>(flow->nodes.size()) - 1;
+    }
+
+    case NodeKind::Call: {
+      // A call is one box fed by whatever its arguments are, named as it is
+      // written -- `sin`, `grade0`, `length`.
+      FlowNode op;
+      op.op = node.text;
+      std::vector<int> feeds;
+      for (const NodePtr& argument : node.args) {
+        if (argument != nullptr) feeds.push_back(Flatten(*argument, flow));
+      }
+      op.lhs = feeds.size() > 0 ? feeds[0] : -1;
+      op.rhs = feeds.size() > 1 ? feeds[1] : -1;
+      flow->nodes.push_back(op);
+      return static_cast<int>(flow->nodes.size()) - 1;
+    }
+
+    default: {
+      FlowNode op;
+      op.op = OperatorGlyph(node.kind);
+      if (op.op.empty()) return -1;
+      const int left = (node.lhs != nullptr) ? Flatten(*node.lhs, flow) : -1;
+      const int right = (node.rhs != nullptr) ? Flatten(*node.rhs, flow) : -1;
+      op.lhs = left;
+      op.rhs = right;
+      flow->nodes.push_back(op);
+      return static_cast<int>(flow->nodes.size()) - 1;
+    }
+  }
+}
+
+}  // namespace
+
+Flow Wiring(std::string_view source, const clifford::Signature& sig) {
+  Flow flow;
+
+  bool tokenizeOk = false;
+  const std::vector<Token> tokens = Tokenize(source, &tokenizeOk);
+  if (!tokenizeOk || tokens.empty()) return flow;
+
+  std::size_t index = 0;
+  if (tokens[index].kind == Tok::Ident &&
+      (IsRealType(tokens[index].text) || IsFunctionType(tokens[index].text) ||
+       mathline::IsMultivectorType(tokens[index].text, sig))) {
+    ++index;
+  }
+  if (tokens[index].kind != Tok::Ident) return flow;
+  const std::string name = tokens[index].text;
+  ++index;
+  if (tokens[index].kind != Tok::Assign) return flow;
+  ++index;
+
+  // A lambda defines a function pointwise rather than out of other values, so
+  // there is nothing to wire it to.
+  std::string parameter;
+  std::size_t bodyBegin = 0;
+  std::size_t bodyEnd = 0;
+  if (MatchLambda(tokens, index, &parameter, &bodyBegin, &bodyEnd)) return flow;
+
+  std::vector<Token> rest(tokens.begin() + static_cast<std::ptrdiff_t>(index), tokens.end());
+  Parser parser(rest);
+  NodePtr expression = parser.ParseExpression();
+  if (!parser.ok() || expression == nullptr) return flow;
+  parser.Accept(Tok::Semi);
+  if (parser.Peek().kind != Tok::End) return flow;
+
+  flow.result = name;
+  flow.root = Flatten(*expression, &flow);
+  return flow;
+}
+
 bool IsRealType(std::string_view type) { return type == "float" || type == "double"; }
 
 bool IsMultivectorType(std::string_view type, const clifford::Signature& sig) {

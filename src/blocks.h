@@ -35,6 +35,10 @@ struct ActiveValue {
   CodeBlock*  block = nullptr;
   std::string name;
   Vector2     from{};   // screen space
+  // The canvas is drawing this one's whole derivation -- the wires from the
+  // values it is made of, through the operators, to here -- so the box must not
+  // also draw the plain wire from its window. The names still light up.
+  bool        wired = false;
 };
 
 class CodeBlock {
@@ -155,6 +159,18 @@ class CodeBlock {
   // the other end. Empty when nothing is highlighted.
   std::vector<std::string> HighlightedVariables() const;
   std::string Text() const;
+  // What the highlight covers, as it is written -- newlines and all.
+  std::string SelectedText() const;
+
+  // --- cut, copy and paste, in the text ------------------------------------
+  //
+  // On the *system* clipboard rather than one of our own, so that a line of
+  // this canvas can go into a message and a paragraph from somewhere else can
+  // come in. Which clipboard Ctrl+C means is decided by the caret: a box being
+  // typed into copies its text, and a canvas with no caret in it copies the
+  // windows that are selected. One key, two clipboards, one rule.
+  void CopyText(bool cut);
+  void PasteText();
   const std::vector<std::string>& Lines() const { return lines_; }
 
   // The button that appears on a focused box. Returns true if it took the
@@ -261,6 +277,16 @@ class CodeBlock {
   const std::vector<mathprogram::Variable>& Variables() const { return program_.variables(); }
   const mathprogram::Variable* FindVariable(const std::string& name) const;
 
+  // --- wiring --------------------------------------------------------------
+  //
+  // Where this box writes a name, and how a value it defines is computed. A
+  // variable defined out of other values is not one thing pointing at another;
+  // it is the end of a little machine, and these are what that machine is drawn
+  // from.
+  std::vector<Rectangle> MentionsOf(const std::string& name, const Viewport& viewport,
+                                    FontStore& fonts) const;
+  mathline::Flow         FlowFor(const std::string& name) const;
+
   // Every variable in this box has a colour of its own, taken from where it
   // stands in the box. Everything that represents that variable wears it: the
   // handle on its number line, its curve on a plot, and the box drawn round its
@@ -284,6 +310,9 @@ class CodeBlock {
 
   // --- drawing ------------------------------------------------------------
   void Draw(const Viewport& viewport, FontStore& fonts) const;
+  // The strip of controls above a box. Drawn apart from the box, and after
+  // every box, so that a neighbouring card can never be on top of it.
+  void DrawChrome(const Viewport& viewport, FontStore& fonts) const;
   void DrawOverlay(const Viewport& viewport, FontStore& fonts) const;
 
  private:
@@ -327,7 +356,10 @@ class CodeBlock {
     Rectangle toggle{};
     Rectangle bold{};
     Rectangle italic{};
-    Rectangle justify[3]{};
+    // One control, not three: left, centred and right are one choice, and a
+    // choice with three states is a thing you press until it says what you
+    // want. The icon shows the state it is in, so it is also its own label.
+    Rectangle justify{};
   };
 
   void   EnsureCache(FontStore& fonts, float emPx, float measurePx) const;
