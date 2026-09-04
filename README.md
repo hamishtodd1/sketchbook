@@ -49,6 +49,7 @@ it, so the three of them move together.
 | Hover a line | Show it as code, with the injected value |
 | `Ctrl`+`Z` | Undo, in the box being edited |
 | `Ctrl`+`left`/`right` | Move the caret by word |
+| Two-finger swipe left/right | Go through the deck, as in a browser |
 | `Ctrl`+`S` / `Ctrl`+`O` | Save (back to the same file) / open a canvas |
 | Drag a number-line handle | Choose that variable's value |
 | Press a number line off its markers | Make a variable there and drag it |
@@ -354,7 +355,9 @@ will be.
 
 Click a slide's rim and the camera glides until that slide fills the window --
 presenting is navigating. Once it is framing one, **left and right flick through
-the deck**, instantly; which slide follows which is decided by nothing but where
+the deck**, instantly -- and so does a **two-finger swipe**, sweeping left to go
+forward, the way a browser goes back and forward. On a touchpad that is
+Windows' own horizontal-wheel signal rather than anything recognised here; which slide follows which is decided by nothing but where
 they sit. A slide's inside is left alone, so everything on one stays usable. The deck's
 shape is set in the Escape menu -- 3:2, 16:9, 4:3 or 1:1 -- under a heading that
 is folded away until asked for, since a deck's shape is chosen once and then

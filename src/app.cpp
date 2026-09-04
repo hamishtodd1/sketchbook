@@ -1446,7 +1446,15 @@ void App::Update() {
 
   // The canvas pans on the right button wherever the pointer is; the wheel and
   // touch belong to whatever window is under it.
-  viewport_.Update(canvasActive, !consumed, !axes_.Scrolling());
+  // A two-finger swipe turns a page, which is the same thing left and right
+  // do -- so it is offered on the same terms: only from a slide, since
+  // elsewhere the deck is not what the gesture would be about, and elsewhere
+  // two fingers are still the pan and the pinch.
+  const bool onSlide = slides_.SlideAtCamera(viewport_, options_.slideAspect) >= 0;
+  viewport_.Update(canvasActive, !consumed, !axes_.Scrolling(), onSlide);
+  if (const int swipe = viewport_.TakeSwipe(); swipe != 0) {
+    slides_.Step(swipe, &viewport_, options_.slideAspect);
+  }
 
   // The dots are what a window lands on, so they are only worth drawing while
   // something is being landed: a window carried, a window resized, or the

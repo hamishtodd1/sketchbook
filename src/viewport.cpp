@@ -55,6 +55,100 @@ void Viewport::ZoomAbout(Vector2 anchor, float factor) {
   target_.y += before.y - after.y;
 }
 
+// How far two fingers have to travel together before it is a page turn rather
+// than a wobble, and how much their separation may change before it is a pinch
+// instead. Both in screen pixels: a page turn is a deliberate sweep.
+constexpr float kSwipeTravel = 100.0f;
+constexpr float kSwipePinchSlop = 40.0f;
+
+// The same gesture on a touchpad, in wheel notches. One mouse notch is 1.0 and
+// a touchpad sends a stream of fractions, so this is the one number to turn if
+// a swipe feels too eager or too stubborn. `kSwipeScrollIdle` is how many
+// frames without any horizontal scroll count as the fingers having stopped.
+constexpr float kSwipeScroll = 2.0f;
+constexpr int   kSwipeScrollIdle = 6;
+
+int Viewport::TakeSwipe() {
+  const int out = swipe_;
+  swipe_ = 0;
+  return out;
+}
+
+void Viewport::UpdateSwipe(bool deckSwipes) {
+  if (!deckSwipes) {
+    swipeArmed_ = false;
+    swipeScroll_ = 0.0f;
+    swipeScrollSpent_ = false;
+    return;
+  }
+
+  // --- a touchpad -----------------------------------------------------------
+  //
+  // Nothing to recognise: Windows already reports a two-finger horizontal swipe
+  // as horizontal wheel, which is the very thing a browser turns into back and
+  // forward. It comes in as many small deltas rather than one, so they are
+  // piled up, and one sweep turns one page however far it runs -- the pile is
+  // only put down once the fingers have stopped.
+  const float sideways = GetMouseWheelMoveV().x;
+  if (sideways != 0.0f) {
+    swipeScrollIdle_ = 0;
+    if (!swipeScrollSpent_) {
+      // Turning back the other way is a new gesture, not a continuation.
+      if (sideways * swipeScroll_ < 0.0f) swipeScroll_ = 0.0f;
+      swipeScroll_ += sideways;
+      if (std::abs(swipeScroll_) >= kSwipeScroll) {
+        swipe_ = (swipeScroll_ < 0.0f) ? +1 : -1;
+        swipeScroll_ = 0.0f;
+        swipeScrollSpent_ = true;
+      }
+    }
+  } else if (++swipeScrollIdle_ > kSwipeScrollIdle) {
+    swipeScroll_ = 0.0f;
+    swipeScrollSpent_ = false;
+  }
+
+  // --- a touchscreen --------------------------------------------------------
+  const int           count = std::min(touch::Count(), touch::kMaxPoints);
+  const touch::Point* points = touch::Points();
+  if (count != 2) {
+    swipeArmed_ = false;
+    return;
+  }
+
+  const Vector2 centroid = {(points[0].position.x + points[1].position.x) * 0.5f,
+                            (points[0].position.y + points[1].position.y) * 0.5f};
+  const float   spread = Distance(points[0].position, points[1].position);
+
+  // The same two fingers, in whichever order they are reported this frame.
+  const bool same = swipeArmed_ && ((swipeIds_[0] == points[0].id && swipeIds_[1] == points[1].id) ||
+                                    (swipeIds_[0] == points[1].id && swipeIds_[1] == points[0].id));
+  if (!same) {
+    swipeArmed_ = true;
+    swipePinch_ = false;
+    swipeFired_ = false;
+    swipeFrom_ = centroid;
+    swipeFromSpread_ = spread;
+  }
+  swipeIds_[0] = points[0].id;
+  swipeIds_[1] = points[1].id;
+  if (swipePinch_ || swipeFired_) return;
+
+  if (std::abs(spread - swipeFromSpread_) > kSwipePinchSlop) {
+    // Their separation is changing: this was a pinch all along. Give the
+    // gesture back to the camera, from here rather than from the start, so what
+    // has already been read as a question is not also read as a zoom.
+    swipePinch_ = true;
+    return;
+  }
+  const Vector2 travel = {centroid.x - swipeFrom_.x, centroid.y - swipeFrom_.y};
+  if (std::abs(travel.x) > kSwipeTravel && std::abs(travel.x) > std::abs(travel.y) * 1.5f) {
+    // The deck runs left to right, so the fingers carry the canvas the way a
+    // pan would: sweeping left brings the next slide in from the right.
+    swipe_ = (travel.x < 0.0f) ? +1 : -1;
+    swipeFired_ = true;
+  }
+}
+
 void Viewport::UpdateTouch() {
   const int count = std::min(touch::Count(), touch::kMaxPoints);
   const touch::Point* points = touch::Points();
@@ -85,7 +179,13 @@ void Viewport::UpdateTouch() {
     spread = Distance(points[0].position, points[1].position);
   }
 
-  if (sameContacts) {
+  // Two fingers on a slide could be any of three things, and which one is not
+  // knowable until they have moved. So while the question is open the canvas
+  // holds still: drifting even slightly would take the camera off the slide it
+  // is about to step from, since being *on* a slide is a tight test.
+  const bool holdStill = swipeArmed_ && !swipePinch_;
+
+  if (sameContacts && !holdStill) {
     PanByScreenDelta({centroid.x - baselineCentroid_.x, centroid.y - baselineCentroid_.y});
     if (count >= 2 && baselineSpread_ > 1.0f && spread > 1.0f) {
       ZoomAbout(centroid, spread / baselineSpread_);
@@ -135,7 +235,7 @@ void Viewport::GlideTo(Vector2 worldCentre, float zoom, float seconds) {
   gliding_ = true;
 }
 
-void Viewport::Update(bool interactive, bool pointerFree, bool panFree) {
+void Viewport::Update(bool interactive, bool pointerFree, bool panFree, bool deckSwipes) {
   if (gliding_) {
     // Moving the canvas yourself wins. Being carried somewhere you did not ask
     // to go, with no way to stop, is the worst thing a camera can do.
@@ -168,6 +268,7 @@ void Viewport::Update(bool interactive, bool pointerFree, bool panFree) {
   if (!interactive) {
     mouseDragging_ = false;
     haveTouchBaseline_ = false;
+    swipeArmed_ = false;
     touchCount_ = touch::Count();
     if (touchCount_ > 0) touchCooldown_ = 8;
     return;
@@ -176,9 +277,16 @@ void Viewport::Update(bool interactive, bool pointerFree, bool panFree) {
   // A finger belongs to whatever is under it, so the canvas only takes the
   // gesture when nothing else wants it. Fingers also synthesise mouse events,
   // so the cooldown has to keep running even in the frames we ignore them.
+  // Before the pointer question, and regardless of how it is answered: a swipe
+  // is not something any window here competes for.
+  UpdateSwipe(deckSwipes);
+
   if (pointerFree) {
     UpdateTouch();
   } else {
+    // The pan gives way to whatever is under the fingers; the swipe does not,
+    // and must not be disarmed here. A slide is mostly covered by its own text,
+    // so a swipe that stood down for a window would stand down almost always.
     haveTouchBaseline_ = false;
     touchCount_ = touch::Count();
     if (touchCount_ > 0) touchCooldown_ = 8;

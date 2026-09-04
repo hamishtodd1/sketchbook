@@ -683,6 +683,33 @@ into several. Off a slide the arrows mean nothing yet, and inside a box they are
 the caret's. Which slide follows which is decided by nothing but **where they
 sit**: the order you can see is the order there is.
 
+**And a two-finger swipe does the same thing**, on the same terms: only from a
+slide, and sweeping left goes forward, exactly as it does in a browser. It is
+the gesture people already use to go back and forward through pages, and going
+through a deck is the same motion.
+
+On a **touchpad there is nothing to recognise**: Windows already reports a
+two-finger horizontal swipe as horizontal wheel, which is the very signal a
+browser turns into back and forward, and nothing else here uses that axis. It
+arrives as a stream of small deltas rather than one, so they are piled up until
+they are decisive, and **one sweep turns one page** however far it runs -- the
+pile is only put down once the fingers have stopped. (GLFW inverts this axis on
+the way through, so a Windows "scroll right" reaches us negative.)
+
+On a **touchscreen** it has to be told apart from the pan and the pinch that two
+fingers otherwise are, and it cannot be told apart until the fingers have
+travelled. So while the question is open the canvas **holds still**: being *on*
+a slide is a tight test, and drifting even slightly would take the camera off
+the very slide it is about to step from. If the fingers change their separation
+it was a pinch after all, and the gesture goes back to the camera from that
+moment rather than from the start.
+
+**A window under the fingers takes the pan, but never the swipe.** Everything
+else here gives way to whatever is under the pointer; a swipe cannot, because a
+slide is mostly covered by its own title and body, so a swipe that stood down
+for a window would stand down almost always. Nothing on this canvas does
+anything with two fingers, so there is nothing for it to be taking away.
+
 **And the camera goes to look at it**, on the same glide a click on the rim
 would have given. Making a slide is a way of saying "I am working here now", so
 the canvas takes you there rather than leaving you where you happened to be
