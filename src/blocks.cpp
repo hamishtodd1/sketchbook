@@ -1,5 +1,9 @@
 #include "blocks.h"
 
+#include <limits>
+
+#include "glext.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -257,7 +261,7 @@ CodeBlock::~CodeBlock() {
   // context, and a destructor can run after the window has gone. Whoever
   // destroys a box has to have released it first. Say so if they did not,
   // rather than leaking in silence.
-  if (haveShader_ || haveProbe_ || havePreviewSurface_ || haveProbeTarget_ ||
+  if (haveShader_ || haveShader_ || havePreviewSurface_ || haveProbeTarget_ ||
       haveVizShader_) {
     TraceLog(LOG_WARNING, "BLOCKS: a box was destroyed still holding GPU memory");
   }
@@ -552,8 +556,20 @@ std::vector<std::string> CodeBlock::HighlightedVariables() const {
 }
 
 bool CodeBlock::InScope(const std::string& name) const {
+  if (name.empty()) return true;
+
+  // Before its declaration a variable does not exist, so there is nothing to
+  // show: a window for it would be reporting a value it does not have yet.
+  // This holds however the box is being read -- by the caret or by the pointer
+  // -- because it is a fact about the program rather than about the reading.
+  const int at = ExecutedUpTo();
+  if (at >= 0) {
+    const mathprogram::Variable* variable = FindVariable(name);
+    if (variable != nullptr && variable->declaredLine > at) return false;
+  }
+
   // Nobody is reading this box a line at a time, so all of it counts.
-  if (!focused_ || name.empty()) return true;
+  if (!focused_) return true;
 
   int fromLine = caretLine_;
   int fromCol = caretCol_;
@@ -665,13 +681,16 @@ int CodeBlock::VizUniform(const char* name) const {
 void CodeBlock::DrawShaderInto(Rectangle rect) const {
   if (!haveShader_ || !havePreviewSurface_) return;
 
-  for (const auto& [name, location] : uniforms_) {
+  for (const auto& [uniform, location] : uniforms_) {
     if (location < 0) continue;
-    const mathprogram::Variable* variable = FindVariable(name);
-    if (variable == nullptr) continue;
-    const float value = variable->value;
-    SetShaderValue(shader_, location, &value, SHADER_UNIFORM_FLOAT);
+    const mathprogram::Literal* literal = program_.FindLiteral(uniform);
+    if (literal == nullptr) continue;
+    SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
   }
+  // Draw the picture, which is what this shader does when asked for nothing
+  // else.
+  const int drawMode = 0;
+  if (modeLoc_ >= 0) SetShaderValue(shader_, modeLoc_, &drawMode, SHADER_UNIFORM_INT);
 
   BeginShaderMode(shader_);
   // One white pixel stretched over the square: the source rectangle covers the
@@ -1324,7 +1343,11 @@ void CodeBlock::SetVariableValue(const std::string& name, float value) {
   const std::vector<mathprogram::Variable>& variables = program_.variables();
   for (std::size_t i = 0; i < variables.size(); ++i) {
     if (variables[i].name == name) {
-      program_.SetValue(i, value);
+      // Where the box is being read decides *which* literal a drag moves: the
+      // one responsible for the number on screen. Read above a reassignment and
+      // the knob moves the declaration's literal; read below it, the
+      // reassignment's.
+      program_.SetValue(i, value, ExecutedUpTo());
       return;
     }
   }
@@ -1678,10 +1701,22 @@ void CodeBlock::ReleaseGpu() {
     UnloadShader(vizShader_);
     haveVizShader_ = false;
   }
-  if (haveProbe_) {
-    UnloadShader(probeShader_);
-    haveProbe_ = false;
+  if (haveShader_) {
+    UnloadShader(shader_);
+    haveShader_ = false;
   }
+  if (traceBuffer_ != 0) {
+    rlUnloadShaderBuffer(traceBuffer_);
+    traceBuffer_ = 0;
+    traceFloats_ = 0;
+  }
+  if (vizMeshProgram_ != 0) {
+    rlUnloadShaderProgram(vizMeshProgram_);
+    vizMeshProgram_ = 0;
+  }
+  if (vizTriBuffer_ != 0) { rlUnloadShaderBuffer(vizTriBuffer_); vizTriBuffer_ = 0; }
+  if (vizLineBuffer_ != 0) { rlUnloadShaderBuffer(vizLineBuffer_); vizLineBuffer_ = 0; }
+  vizMeshRun_ = false;
   if (haveProbeTarget_) {
     UnloadRenderTexture(probeTarget_);
     haveProbeTarget_ = false;
@@ -1691,48 +1726,105 @@ void CodeBlock::ReleaseGpu() {
     havePreviewSurface_ = false;
   }
   uniforms_.clear();
-  probeUniforms_.clear();
+  uniforms_.clear();
   probeSignature_.clear();
 }
 
+void CodeBlock::RunVizMesh(float value) const {
+  if (vizMeshProgram_ == 0 || vizTriBuffer_ == 0 || vizLineBuffer_ == 0) return;
+  // The geometry only changes when the value does, so neither does the work.
+  if (vizMeshRun_ && value == vizMeshValue_) return;
+  vizMeshValue_ = value;
+  vizMeshRun_ = true;
+
+  // The counters lead each buffer, and start again every time.
+  const unsigned int zero = 0;
+  rlUpdateShaderBuffer(vizTriBuffer_, &zero, sizeof(zero), 0);
+  rlUpdateShaderBuffer(vizLineBuffer_, &zero, sizeof(zero), 0);
+
+  rlEnableShader(vizMeshProgram_);
+  if (vizMeshValueLoc_ >= 0) {
+    rlSetUniform(vizMeshValueLoc_, &value, RL_SHADER_UNIFORM_FLOAT, 1);
+  }
+  rlBindShaderBuffer(vizTriBuffer_, 1);
+  rlBindShaderBuffer(vizLineBuffer_, 2);
+  rlComputeShaderDispatch(1, 1, 1);
+  rlDisableShader();
+
+  // What compute wrote is not visible to the vertex fetch that reads it until
+  // this says so. Without it the only way to wait was to copy the whole mesh
+  // back to the CPU, which is the stall the buffer existed to avoid.
+  glext::Barrier(glext::kShaderStorage | glext::kVertexAttribArray | glext::kBufferUpdate);
+
+  // Only the counts come back -- four bytes each, and only when the value has
+  // moved. A draw call has to be told how many vertices there are, and short of
+  // an indirect draw there is nowhere else for that number to come from.
+  unsigned int counts[2] = {0, 0};
+  rlReadShaderBuffer(vizTriBuffer_, &counts[0], sizeof(unsigned int), 0);
+  rlReadShaderBuffer(vizLineBuffer_, &counts[1], sizeof(unsigned int), 0);
+  const int cap = mathprogram::Program::kVizVertexCap;
+  vizTriCount_ = std::min<int>(static_cast<int>(counts[0]), cap);
+  vizLineCount_ = std::min<int>(static_cast<int>(counts[1]), cap);
+}
+
+int CodeBlock::ExecutedUpTo() const {
+  // The caret first: if you are writing on a line, that line is where the box
+  // has got to. Then the pointer, which is the same question asked by hovering.
+  if (focused_ && caretUsed_) return caretLine_;
+  if (pointerRow_ >= 0) return pointerRow_;
+  if (everTouched_ && caretUsed_) return caretLine_;
+  return -1;   // the end
+}
+
 void CodeBlock::ProbeIfNeeded() {
-  if (!haveProbe_ || !haveProbeTarget_ || !havePreviewSurface_) return;
+  if (!haveShader_ || !haveProbeTarget_ || !havePreviewSurface_) return;
 
   // Nothing has moved, so the answer is the one already on screen.
   std::vector<float> signature;
-  signature.reserve(probeUniforms_.size() + 2);
+  signature.reserve(uniforms_.size() + 2);
   signature.push_back(probePoint_.x);
   signature.push_back(probePoint_.y);
-  for (const auto& [name, location] : probeUniforms_) {
-    const mathprogram::Variable* variable = FindVariable(name);
-    signature.push_back(variable == nullptr ? 0.0f : variable->value);
+  for (const auto& [uniform, location] : uniforms_) {
+    const mathprogram::Literal* literal = program_.FindLiteral(uniform);
+    signature.push_back(literal == nullptr ? 0.0f : literal->value);
   }
   if (signature == probeSignature_) return;
   probeSignature_ = signature;
 
-  for (const auto& [name, location] : probeUniforms_) {
+  for (const auto& [uniform, location] : uniforms_) {
     if (location < 0) continue;
-    const mathprogram::Variable* variable = FindVariable(name);
-    if (variable == nullptr) continue;
-    const float value = variable->value;
-    SetShaderValue(probeShader_, location, &value, SHADER_UNIFORM_FLOAT);
+    const mathprogram::Literal* literal = program_.FindLiteral(uniform);
+    if (literal == nullptr) continue;
+    SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
   }
-  if (probePointLocation_ >= 0) {
+  if (probePointLoc_ >= 0) {
     const float point[2] = {probePoint_.x, probePoint_.y};
-    SetShaderValue(probeShader_, probePointLocation_, point, SHADER_UNIFORM_VEC2);
+    SetShaderValue(shader_, probePointLoc_, point, SHADER_UNIFORM_VEC2);
   }
+  const int reportMode = 1;
+  if (modeLoc_ >= 0) SetShaderValue(shader_, modeLoc_, &reportMode, SHADER_UNIFORM_INT);
+
+  if (traceBuffer_ != 0) rlBindShaderBuffer(traceBuffer_, 0);
 
   const float width = static_cast<float>(probeTarget_.texture.width);
   BeginTextureMode(probeTarget_);
   // The pixels are data, not a picture: blending them with what was there
   // before would corrupt every byte.
   rlDisableColorBlend();
-  BeginShaderMode(probeShader_);
+  BeginShaderMode(shader_);
   DrawTexturePro(previewSurface_, {0.0f, 0.0f, 1.0f, 1.0f}, {0.0f, 0.0f, width, 1.0f},
                  {0.0f, 0.0f}, 0.0f, WHITE);
   EndShaderMode();
   rlEnableColorBlend();
   EndTextureMode();
+
+  if (traceBuffer_ != 0 && traceFloats_ > 0) {
+    std::vector<float> values(static_cast<std::size_t>(traceFloats_), 0.0f);
+    rlReadShaderBuffer(traceBuffer_, values.data(),
+                       static_cast<unsigned int>(traceFloats_ * static_cast<int>(sizeof(float))),
+                       0);
+    program_.TakeTrace(std::move(values));
+  }
 
   const Image pixels = LoadImageFromTexture(probeTarget_.texture);
   if (pixels.data != nullptr) {
@@ -1772,13 +1864,37 @@ void CodeBlock::CompileShader() {
       UnloadShader(vizShader_);
       haveVizShader_ = false;
     }
+
+    // The half that lays geometry down is a compute program, and it needs
+    // somewhere to lay it: two buffers, one for triangles and one for the
+    // segments of a path, each with its count in front of it.
+    if (!program_.glslMeshSource().empty()) {
+      if (vizMeshProgram_ != 0) { rlUnloadShaderProgram(vizMeshProgram_); vizMeshProgram_ = 0; }
+      const unsigned int compiled =
+          rlCompileShader(program_.glslMeshSource().c_str(), RL_COMPUTE_SHADER);
+      if (compiled != 0) vizMeshProgram_ = rlLoadComputeShaderProgram(compiled);
+      if (vizMeshProgram_ != 0) {
+        vizMeshValueLoc_ = rlGetLocationUniform(vizMeshProgram_, "value");
+        const unsigned int bytes = static_cast<unsigned int>(
+            sizeof(unsigned int) +
+            static_cast<std::size_t>(mathprogram::Program::kVizVertexCap) * 2u * sizeof(float));
+        if (vizTriBuffer_ == 0) vizTriBuffer_ = rlLoadShaderBuffer(bytes, nullptr, RL_DYNAMIC_COPY);
+        if (vizLineBuffer_ == 0) vizLineBuffer_ = rlLoadShaderBuffer(bytes, nullptr, RL_DYNAMIC_COPY);
+        vizMeshRun_ = false;
+      }
+      program_.ShaderCompiled(vizMeshProgram_ != 0,
+                              vizMeshProgram_ != 0 ? std::string() : "compute shader failed");
+      return;
+    }
+
     haveVizShader_ =
         CompileShaderHalf(program_.glslSource().c_str(), nullptr, &vizShader_, &log);
     program_.ShaderCompiled(haveVizShader_, log);
     return;
   }
 
-  const bool ok = CompileFragmentShader(program_.glslSource(), &shader_, &log);
+  const bool ok = CompileShaderHalf(program_.glslVertexSource().c_str(),
+                                    program_.glslSource().c_str(), &shader_, &log);
   haveShader_ = ok;
 
   if (ok) {
@@ -1786,8 +1902,10 @@ void CodeBlock::CompileShader() {
     // every frame: each one is a round trip to the driver.
     for (const mathprogram::Variable& variable : program_.variables()) {
       if (!variable.free || variable.kind != mathprogram::Kind::Real) continue;
-      uniforms_.emplace_back(variable.name,
-                             GetShaderLocation(shader_, variable.name.c_str()));
+      for (const mathprogram::Literal& literal : variable.literals) {
+        uniforms_.emplace_back(literal.uniform,
+                               GetShaderLocation(shader_, literal.uniform.c_str()));
+      }
     }
     if (!havePreviewSurface_) {
       // Something for the shader to cover. One white pixel stretched over the
@@ -1798,22 +1916,40 @@ void CodeBlock::CompileShader() {
       havePreviewSurface_ = true;
     }
 
-    // And the shader that answers rather than draws, with one pixel of target
-    // for each derived variable it has to report.
+    // The same shader answers the other two questions, so there is nothing
+    // else to compile -- only the rest of its slots to look up.
+    modeLoc_ = GetShaderLocation(shader_, "sbMode");
+    probePointLoc_ = GetShaderLocation(shader_, "sbProbe");
+    rangeLoc_ = GetShaderLocation(shader_, "sbRange");
+    verticalLoc_ = GetShaderLocation(shader_, "sbVertical");
+    indexLoc_ = GetShaderLocation(shader_, "sbIndex");
+    shapeLoc_ = GetShaderLocation(shader_, "sbShape");
+    thickLoc_ = GetShaderLocation(shader_, "sbThick");
+
+    // One pixel of target for each derived value it has to report.
     const std::vector<std::string>& probed = program_.probedNames();
-    if (!probed.empty()) {
-      std::string probeLog;
-      haveProbe_ = CompileFragmentShader(program_.glslProbeSource(), &probeShader_, &probeLog);
-      if (haveProbe_) {
-        for (const mathprogram::Variable& variable : program_.variables()) {
-          if (!variable.free || variable.kind != mathprogram::Kind::Real) continue;
-          probeUniforms_.emplace_back(variable.name,
-                                      GetShaderLocation(probeShader_, variable.name.c_str()));
-        }
-        probePointLocation_ = GetShaderLocation(probeShader_, "sbProbe");
-        probeTarget_ = LoadRenderTexture(static_cast<int>(probed.size()), 1);
-        haveProbeTarget_ = true;
-        probeSignature_.clear();
+    probeTarget_ = LoadRenderTexture(std::max<int>(1, static_cast<int>(probed.size())), 1);
+    haveProbeTarget_ = true;
+    probeSignature_.clear();
+
+    // One buffer for the whole trace: every real, after every line, written by
+    // the single invocation that runs the box. A shader storage buffer rather
+    // than a pixel each, because there is no packing to undo and no limit at
+    // four bytes.
+    {
+      const int floats = program_.tracedLines() *
+                         static_cast<int>(program_.tracedSlots().size());
+      if (floats > 0) {
+        if (traceBuffer_ != 0) rlUnloadShaderBuffer(traceBuffer_);
+        traceFloats_ = floats;
+        // Not zero: a slot for a variable that is not in scope yet has no
+        // value, and zero is a value. Left as a NaN, it is skipped rather than
+        // reported as nothing.
+        const std::vector<float> blank(static_cast<std::size_t>(floats),
+                                       std::numeric_limits<float>::quiet_NaN());
+        traceBuffer_ = rlLoadShaderBuffer(
+            static_cast<unsigned int>(floats * static_cast<int>(sizeof(float))), blank.data(),
+            RL_DYNAMIC_COPY);
       }
     }
   }
@@ -1821,8 +1957,53 @@ void CodeBlock::CompileShader() {
   program_.ShaderCompiled(ok, log);
 }
 
+bool CodeBlock::BeginField(const std::string& name, int mode, Vector2 range, Vector2 vertical,
+                           float halfWidth) const {
+  if (!haveShader_) return false;
+
+  const std::vector<std::string>& names = program_.functionNames();
+  int index = -1;
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    if (names[i] == name) { index = static_cast<int>(i); break; }
+  }
+  if (index < 0) return false;
+
+  // Whatever its knobs are at. A function's shape can depend on them, which is
+  // the whole reason it is drawn by being called.
+  for (const auto& [uniform, location] : uniforms_) {
+    if (location < 0) continue;
+    const mathprogram::Literal* literal = program_.FindLiteral(uniform);
+    if (literal == nullptr) continue;
+    SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
+  }
+  const float rangePair[2] = {range.x, range.y};
+  const float verticalPair[2] = {vertical.x, vertical.y};
+  const int functionMode = 2;
+  SetShaderValue(shader_, modeLoc_, &functionMode, SHADER_UNIFORM_INT);
+  SetShaderValue(shader_, rangeLoc_, rangePair, SHADER_UNIFORM_VEC2);
+  SetShaderValue(shader_, verticalLoc_, verticalPair, SHADER_UNIFORM_VEC2);
+  SetShaderValue(shader_, indexLoc_, &index, SHADER_UNIFORM_INT);
+  SetShaderValue(shader_, shapeLoc_, &mode, SHADER_UNIFORM_INT);
+  SetShaderValue(shader_, thickLoc_, &halfWidth, SHADER_UNIFORM_FLOAT);
+
+  BeginShaderMode(shader_);
+  return true;
+}
+
+void CodeBlock::EndField() const { EndShaderMode(); }
+
+bool CodeBlock::Draws() const {
+  for (const std::string& line : lines_) {
+    if (line.find("finalColor") != std::string::npos) return true;
+  }
+  return false;
+}
+
 void CodeBlock::Poll() {
   program_.Poll();
+
+  // What the windows show is what the values were where the box is being read.
+  program_.ApplyTrace(ExecutedUpTo());
 
   // The C++ compile runs on a worker thread, but a shader has to be compiled on
   // the thread holding the graphics context. So this half happens here.
@@ -1856,11 +2037,15 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
   if (probe.emPx < 0.4f) return;
   const Vector2 pointer = GetMousePosition();
   rimHot_ = PointOnRim(probe.rect, pointer);
+  pointerRow_ = -1;
   // Reaching for the rim should not flip the line underneath it to code.
   if (!rimHot_ && CheckCollisionPointRec(pointer, probe.rect)) {
     const int row = RowAt(pointer, viewport, fonts);
     if (row >= 0 && row < static_cast<int>(probe.rows.size())) {
       hoverLine_ = probe.rows[static_cast<std::size_t>(row)].line;
+      // Pointing at a line is asking what things were once it had run.
+      pointerRow_ = hoverLine_;
+      everTouched_ = true;
     }
   }
 
@@ -2192,12 +2377,16 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
   int         errorLine = 1;
   int         errorColumn = 1;
   std::string message;
+  // The next error after the one the caret points at. One mistake usually has
+  // another right behind it, and seeing both saves a round trip.
+  std::string secondary;
 
   if (program_.state() == mathprogram::State::Failed && program_.error().present) {
     failed = true;
     errorLine = program_.error().line;
     errorColumn = program_.error().column;
     message = program_.error().message;
+    secondary = program_.error().secondary;
   } else if (program_.state() == mathprogram::State::NoCompiler) {
     message = program_.detail();
   } else if (outcome_.status == compiler::Status::Failed && outcome_.error.present) {
@@ -2205,6 +2394,7 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
     errorLine = outcome_.error.line;
     errorColumn = outcome_.error.column;
     message = outcome_.error.message;
+    secondary = outcome_.error.secondary;
   } else if (outcome_.status == compiler::Status::NoCompiler ||
              outcome_.status == compiler::Status::Crashed) {
     message = outcome_.detail.empty() ? "the program did not run" : outcome_.detail;
@@ -2239,9 +2429,17 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
   // Deliberately not monospaced, at 75% of the code size, black on white.
   const float messageEm = g.emPx * kErrorEmScale;
   const float maxWidth = kErrorMaxWidth * g.zoom;
-  const std::vector<std::string> wrapped =
+  std::vector<std::string> wrapped =
       text::Wrap(fonts, Face::MainRegular, message, messageEm, maxWidth);
   if (wrapped.empty()) return;
+  // Wrapped on its own rather than joined on, so the two read as two rather
+  // than running into one sentence.
+  if (!secondary.empty()) {
+    for (const std::string& line :
+         text::Wrap(fonts, Face::MainRegular, secondary, messageEm, maxWidth)) {
+      wrapped.push_back(line);
+    }
+  }
 
   const float lineHeight = text::LineHeight(fonts, Face::MainRegular, messageEm);
   const float ascent = text::Ascent(fonts, Face::MainRegular, messageEm);

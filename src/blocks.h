@@ -246,9 +246,47 @@ class CodeBlock {
   // drawn inside a display window rather than declaring a value of its own. Its
   // C++ half lays down a mesh; its GLSL half is the vertex shader that places
   // one. See viz.h for the vocabulary and for how the two halves are paired.
+  // --- drawing one of this box's functions ---------------------------------
+  //
+  // A function is GLSL, so a window showing one *calls* it rather than reading
+  // samples of it. The box owns the shader because the box owns the functions;
+  // the window says which one, over what range, and in which of the two shapes
+  // a function is drawn in.
+  bool HasFieldShader() const { return haveShader_; }
+
+  // --- executed up to here -------------------------------------------------
+  //
+  // A variable is mutable, so a window showing one has to say *when*. This is
+  // that when: the line the box is being read at. It is where the caret is, or
+  // where the pointer is over the box, and for a box nobody has touched this
+  // session it is the end -- which is what the whole block came to.
+  int  ExecutedUpTo() const;
+  void SetPointerRow(int row) { pointerRow_ = row; }
+  // `mode` is 0 for a field across an axis and 1 for a curve on a plot.
+  // Returns false if there is nothing to draw with, in which case nothing was
+  // begun and EndField must not be called.
+  bool BeginField(const std::string& name, int mode, Vector2 range, Vector2 vertical,
+                  float halfWidth) const;
+  void EndField() const;
+
+  // Whether this box draws anything: a shader box that never writes the colour
+  // has no picture to show. That used to be the same question as whether the
+  // box was a shader at all, and stopped being so when functions became GLSL.
+  bool Draws() const;
+
   const std::string&        VizType() const { return program_.vizType(); }
-  const std::vector<float>& VizMesh() const { return program_.vizMesh(); }
-  const std::vector<float>& VizLines() const { return program_.vizLines(); }
+  // How much geometry the last run laid down, and where it is. The vertices
+  // never come back to the CPU: what is here is the count, which is all a draw
+  // call needs to know.
+  int          VizTriCount() const { return vizTriCount_; }
+  int          VizLineCount() const { return vizLineCount_; }
+  unsigned int VizTriBuffer() const { return vizTriBuffer_; }
+  unsigned int VizLineBuffer() const { return vizLineBuffer_; }
+  // A viz box whose half lays geometry down: it holds a compute program and the
+  // buffers that program writes into. Running it for a value is what produces
+  // the mesh; it only actually dispatches when the value has changed.
+  bool HasVizMesh() const { return vizMeshProgram_ != 0; }
+  void RunVizMesh(float value) const;
   // Whether C++ would have this box. A viz box that compiles is the mesh half;
   // one that does not is the shader half.
   bool BuildsAsCxx() const;
@@ -275,6 +313,11 @@ class CodeBlock {
   compiler::Status Status() const { return outcome_.status; }
 
   const std::vector<mathprogram::Variable>& Variables() const { return program_.variables(); }
+  // Which Clifford algebra this box works in, read off its own lines. It
+  // decides what counts as a type name, how one is written as mathematics, and
+  // what an example of one looks like -- so every one of those has to ask.
+  clifford::Signature Algebra() const;
+
   const mathprogram::Variable* FindVariable(const std::string& name) const;
 
   // --- wiring --------------------------------------------------------------
@@ -372,10 +415,6 @@ class CodeBlock {
   // 1-based line the current diagnostic points at, or 0 if there is none.
   int    ErrorLine() const;
   std::string Injection(int line) const;
-  // Which Clifford algebra this box works in, read off its own lines. It
-  // decides what counts as a type name, how one is written as mathematics, and
-  // what an example of one looks like -- so every one of those has to ask.
-  clifford::Signature Algebra() const;
   Chrome ChromeRects(const Geometry& g) const;
   // The bar just inside the right edge that sets the measure. Only a text box
   // has one; it is inset clear of the rim's grab band, like a picture's crop
@@ -501,10 +540,34 @@ class CodeBlock {
 
   // The second shader, the one that answers questions instead of drawing, and
   // the one-pixel-per-variable target it answers into.
-  Shader                                probeShader_{};
-  bool                                  haveProbe_ = false;
-  std::vector<std::pair<std::string, int>> probeUniforms_;
-  int                                   probePointLocation_ = -1;
+  // The shader that draws one of this box's functions.
+  // Where the box is being read. -1 for neither, which means the end.
+  mutable int                           pointerRow_ = -1;
+  mutable bool                          everTouched_ = false;
+  unsigned int                          traceBuffer_ = 0;
+  int                                   traceFloats_ = 0;
+
+  // The viz mesh half: a compute program, the two buffers it lays geometry
+  // into, and what came back.
+  unsigned int                          vizMeshProgram_ = 0;
+  unsigned int                          vizTriBuffer_ = 0;
+  unsigned int                          vizLineBuffer_ = 0;
+  int                                   vizMeshValueLoc_ = -1;
+  mutable int                           vizTriCount_ = 0;
+  mutable int                           vizLineCount_ = 0;
+  mutable float                         vizMeshValue_ = 0.0f;
+  mutable bool                          vizMeshRun_ = false;
+
+  bool                                  haveFieldSurface_ = false;
+  // One shader, three modes: it draws the picture, reports the values, and
+  // draws the box's functions. These say which, and with what.
+  int                                   modeLoc_ = -1;
+  int                                   rangeLoc_ = -1;
+  int                                   verticalLoc_ = -1;
+  int                                   indexLoc_ = -1;
+  int                                   shapeLoc_ = -1;
+  int                                   thickLoc_ = -1;
+  int                                   probePointLoc_ = -1;
   RenderTexture2D                       probeTarget_{};
   bool                                  haveProbeTarget_ = false;
   // Where in the picture the numbers are read: under the pointer while you are

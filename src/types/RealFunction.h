@@ -30,6 +30,11 @@ const char* Source();
 // other way to send a function to something that is going to draw it.
 std::string PrintStatement(const std::string& name);
 
+// A function the app chose, as the GLSL that defines it. The same four shapes
+// the C++ generator picks from and the same choice for a given name, so a box
+// reads the same whichever language it turns out to be.
+std::string ExampleGlsl(const std::string& name);
+
 // The window a function is sampled over, and how finely. Fixed at compile time
 // and wider than a plot shows by default, so zooming a plot out still has curve
 // to draw.

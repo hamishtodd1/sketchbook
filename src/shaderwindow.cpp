@@ -30,12 +30,12 @@ bool ShaderPanel::Sync(const Blocks& blocks) {
   views_.erase(std::remove_if(views_.begin(), views_.end(),
                               [](const ShaderView& view) {
                                 return view.block == nullptr || !view.block->HasShader() ||
-                                       view.block->ShaderHidden();
+                                       !view.block->Draws() || view.block->ShaderHidden();
                               }),
                views_.end());
 
   for (const std::unique_ptr<CodeBlock>& block : blocks) {
-    if (!block->HasShader() || block->ShaderHidden()) continue;
+    if (!block->HasShader() || !block->Draws() || block->ShaderHidden()) continue;
     bool present = false;
     for (const ShaderView& view : views_) {
       if (view.block == block.get()) { present = true; break; }

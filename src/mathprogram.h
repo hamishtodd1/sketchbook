@@ -34,18 +34,55 @@ enum class Kind {
 // only place a function can be sampled is the program that made it.
 using VizSources = std::map<std::string, std::vector<std::string>>;
 
+// One literal assignment to a variable, and the uniform standing behind it.
+//
+// A variable is not a uniform -- it is an ordinary, mutable GLSL local, so it
+// can be assigned over like any other. What is a uniform is each *literal* it
+// is assigned: `float foo;` on line 2 (where the app injects one), `foo = 3.5;`
+// on line 9, and so on, become `foo_2`, `foo_9`. The line then reads
+// `float foo = foo_2;` and `foo = foo_9;`.
+//
+// That is what makes a knob work on a mutable variable. Dragging one edits the
+// literal that *governs* the value being looked at -- the last one at or before
+// the line the box is being read at -- because that is the number responsible
+// for what is on screen. Read above line 9 and the knob moves `foo_2`; read
+// below it and the same knob moves `foo_9`.
+struct Literal {
+  int         line = 0;
+  std::string uniform;
+  float       value = 0.0f;
+};
+
 struct Variable {
   std::string name;
   std::string type;       // as the user spelled it, which is what a viz claims
   std::string latexName;
   Kind        kind = Kind::Real;
   bool        free = false;    // declared with no initialiser: yours to choose
+  // The line it is declared on. Before that line it does not exist, and a
+  // window for it would be reporting a value it does not have yet.
+  int         declaredLine = 0;
   float       example = 0.0f;  // what the type's example generator produced
   float       value = 0.0f;    // Real: what it currently is
   bool        known = false;   // has a value actually been computed yet
   // Function: what it evaluates to across the sample window below. A function
   // cannot be printed as a number, so this is how one gets back to the screen.
   std::vector<float> samples;
+  // Multivector: its components, in the order its struct declares them. A
+  // multivector is not one number, so it does not fit `value` -- but it is a
+  // fixed, short list of them, so it needs nothing cleverer than this.
+  std::vector<float> components;
+  // Every literal assigned to this variable, in the order they are written.
+  std::vector<Literal> literals;
+  // Which of them decides the value at `line`: the last at or before it, or -1.
+  int GoverningLiteral(int line) const {
+    int best = -1;
+    for (std::size_t i = 0; i < literals.size(); ++i) {
+      if (line >= 0 && literals[i].line > line) break;
+      best = static_cast<int>(i);
+    }
+    return best;
+  }
   // What the canvas's viz for this type drew for this value: triangles and
   // lines, x and y alternating, in the viz's own units. Empty unless the canvas
   // defines one.
@@ -88,7 +125,11 @@ class Program {
 
   // Sets a free variable and schedules a re-run. Repeated calls while a run is
   // in flight coalesce into a single follow-up, so dragging stays smooth.
-  void SetValue(std::size_t index, float value);
+  // Moves the literal governing `atLine`, which is the one responsible for what
+  // the window showing this variable is displaying. -1 means the end.
+  void SetValue(std::size_t index, float value, int atLine = -1);
+  // The literal a uniform of this name stands behind, or null.
+  const Literal* FindLiteral(const std::string& uniform) const;
 
   // Values to adopt on the next rebuild, for a canvas loaded from disk. They
   // lose to anything already on screen, and are consumed once.
@@ -117,16 +158,47 @@ class Program {
   // over: the host compiles it on the thread that owns the context and says
   // what happened.
   const std::string& glslSource() const { return glsl_; }
-  // A second shader, the same lines over again, whose job is to hand a value
-  // back rather than to draw. Each pixel of a one-row target reports one
-  // derived variable, packed into its four bytes.
-  const std::string&              glslProbeSource() const { return glslProbe_; }
+  // The vertex half. Ours rather than raylib's default, because the fragment
+  // half needs the texture coordinate under a private name: reporting a value
+  // asks about one given point rather than the point being drawn, and a varying
+  // cannot be shadowed by the local that chooses between them.
+  const std::string& glslVertexSource() const;
+
+  // --- a viz's mesh ---------------------------------------------------------
+  //
+  // The half of a viz box that lays geometry down is a *compute* shader now,
+  // writing its vertices into a buffer the drawing then reads. It used to be
+  // C++ injected into the program that owned the value, because a
+  // `std::function` could only be sampled in the process that made it -- and
+  // that reason went away when a function became GLSL.
+  const std::string& glslMeshSource() const { return glslMesh_; }
+  // How many vertices either half may lay down before it is cut off.
+  static constexpr int kVizVertexCap = 4096;
+  // In the order `sbIndex` picks them.
+  const std::vector<std::string>& functionNames() const { return functionNames_; }
+
+  // --- what every value was, after every line ------------------------------
+  //
+  // A variable is mutable, so "the value of a" is not a question until a *when*
+  // is given. The shader writes every real's value after every line into one
+  // buffer, so the when can be chosen afterwards -- by where the caret is --
+  // without anything being run again.
+  // One entry per number the trace carries: which variable it belongs to, and
+  // which of its components -- -1 for a real, which is only ever one number.
+  const std::vector<std::pair<std::string, int>>& tracedSlots() const { return tracedSlots_; }
+  int                             tracedLines() const { return tracedLines_; }
+  // `values` is tracedLines() * tracedNames().size() floats, line-major.
+  void TakeTrace(std::vector<float> values);
+  // Sets every real to what it was after `line`, which is what the windows then
+  // show. Out of range means the end, which is where a box with no caret in it
+  // is read from.
+  void ApplyTrace(int line);
   const std::vector<std::string>& probedNames() const { return probed_; }
   // What the probe read, in probedNames() order.
   void                            SetProbedValues(const std::vector<float>& values);
   // Lines of boilerplate before the user's first line in it, so a diagnostic
   // can be moved back into the box's own coordinates.
-  int                shaderLineOffset() const { return glslOffset_; }
+  int                shaderLineOffset() const { return glslLines_.bodyAt; }
   void               ShaderCompiled(bool ok, const std::string& log);
 
   State                        state() const { return state_; }
@@ -162,9 +234,14 @@ class Program {
   // The shader the box would be, assembled alongside the C++ and only used if
   // the C++ is refused.
   std::string              glsl_;
-  std::string              glslProbe_;
+
+  std::vector<std::string> functionNames_;
+  std::string              glslMesh_;
+  std::vector<std::pair<std::string, int>> tracedSlots_;
+  int                      tracedLines_ = 0;
+  std::vector<float>       trace_;
   std::vector<std::string> probed_;
-  int                      glslOffset_ = 0;
+  compiler::ShaderLines    glslLines_;
   // Whether the text mentions anything only GLSL has. It decides which of two
   // failures to report when neither language would take the box.
   bool                 looksLikeGlsl_ = false;

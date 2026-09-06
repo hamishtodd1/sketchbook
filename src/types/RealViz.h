@@ -38,6 +38,10 @@ struct AxisRef {
 
 struct NumberLine {
   std::vector<AxisRef> refs;
+  // Functions living on the same scale, drawn as an opacity field behind the
+  // markers rather than as points on the line -- a function has no one place to
+  // be, but it has a value everywhere, and this axis already says what x is.
+  std::vector<AxisRef> fields;
   float                centre = 0.0f;
   float                span = 4.0f;   // values across the full width
   // An axis frames itself once, when the values it carries first exist. Not
@@ -59,6 +63,11 @@ class AxisPanel {
   // whatever arrangement already exists for the ones that survived. Returns
   // true if lines came or went, which changes how much room a box takes up.
   bool Sync(const Blocks& blocks);
+
+  // The field is painted by a shader with the samples in a texture, so this
+  // panel owns GPU resources now. A destructor cannot free them, so whoever
+  // destroys the panel releases them first, by hand.
+  void ReleaseGpu();
   // Drops everything belonging to a box that is going away.
   void Forget(const CodeBlock* block);
 
@@ -167,6 +176,16 @@ class AxisPanel {
 
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
   static Rectangle AxisArea(Rectangle row);
+
+  // Painting one function's field across a row. Drawing is const here, and this
+  // is a cache rather than state, so the pieces are mutable: the shader and the
+  // one-row texture the samples are handed over in, made when the first field
+  // asks for them.
+  void EnsureField() const;
+  void DrawField(Rectangle area, const NumberLine& line, const AxisRef& ref) const;
+
+  mutable bool    haveField_ = false;
+  mutable Texture fieldSamples_{};
   // Whether a value still has anything to say. A box being read a line at a
   // time only talks about the variables written on that line, and the windows
   // for the rest of it stand down -- not drawn, and taking no pointer. Their

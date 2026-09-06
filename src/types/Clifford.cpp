@@ -855,6 +855,14 @@ std::string TypeLatex(std::string_view name, const Signature& sig) {
   return latex.empty() ? std::string("\\mathbb{R}") : latex;
 }
 
+std::vector<std::string> MemberNames(std::string_view type, const Signature& sig) {
+  const Grades grades = GradesOfName(type, sig);
+  if (grades == 0) return {};
+  std::vector<std::string> out;
+  for (int blade : BladesOf(grades, sig)) out.push_back(BladeName(blade));
+  return out;
+}
+
 std::string ExampleValue(std::string_view type, std::string_view name, const Signature& sig) {
   // Deterministic in the name, like every other example generator here: the
   // same variable gets the same value every time the box is built.

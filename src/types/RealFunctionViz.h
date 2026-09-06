@@ -55,6 +55,10 @@ class PlotPanel {
 
   // As AxisPanel::Sync. True if plots came or went.
   bool Sync(const Blocks& blocks);
+
+  // A curve is drawn by the box's own shader now, so this panel owns a texture.
+  // A destructor cannot free what is on the GPU, so it is released by hand.
+  void ReleaseGpu();
   void Forget(const CodeBlock* block);
 
   bool HandleInput(const Viewport& viewport, FontStore& fonts);
@@ -109,6 +113,10 @@ class PlotPanel {
 
  private:
   enum class Drag { None, Pan, Move };
+
+  void      EnsureCurveSurface() const;
+  mutable bool      haveCurveSurface_ = false;
+  mutable Texture2D curveSurface_{};
 
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
   // As AxisPanel::Shown: a box being read a line at a time only talks about the

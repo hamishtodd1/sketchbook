@@ -32,6 +32,11 @@ struct Diagnostic {
   int         line = 1;    // 1-based
   int         column = 1;  // 1-based, in bytes
   std::string message;     // just the text, with the file/line prefix stripped
+  // The next error after that one, if there was one, said with its own line.
+  // One mistake usually has another right behind it -- a missing semicolon
+  // reports twice, a misspelled name reports wherever it is used -- and seeing
+  // the second saves a round trip through the compiler to find it.
+  std::string secondary;
 };
 
 struct Outcome {
@@ -83,6 +88,16 @@ void Discard(const std::string& exePath);
 // words its log differently. The two shapes in the wild are `0(12) : error ...`
 // and `ERROR: 0:12: ...`; both are read here so a shader's mistake lands in the
 // same balloon as a C++ one. `lineOffset` is the boilerplate to subtract.
-Diagnostic ParseGlslLog(const std::string& log, int lineOffset);
+// Where the box's lines ended up in the assembled shader. A box's text appears
+// *twice*: once as the functions hoisted above main -- GLSL has nowhere else to
+// put a function -- and once as the body inside it. So mapping a driver's line
+// back to the line that was written needs both starts, not one offset.
+struct ShaderLines {
+  int functionsAt = 0;   // first line of the hoisted block
+  int bodyAt = 0;        // first line of main's body
+  int count = 0;         // how many lines the box has
+};
+
+Diagnostic ParseGlslLog(const std::string& log, const ShaderLines& where);
 
 }  // namespace sb::compiler

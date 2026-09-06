@@ -13,6 +13,7 @@
 #include "selection.h"
 #include "slides.h"
 #include "shaderwindow.h"
+#include "spacedw.h"
 #include "ui.h"
 #include "viewport.h"
 #include "viz.h"
@@ -132,6 +133,7 @@ class App {
   AxisPanel                               axes_;
   PlotPanel                               plots_;
   ShaderPanel                             shaders_;
+  SpacePanel                              spaces_;
   // Pictures and video. Not mathematics, so not in types/ -- but windows, and
   // so subject to every rule the others are.
   MediaPanel                              media_;

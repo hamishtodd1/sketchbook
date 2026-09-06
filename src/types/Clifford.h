@@ -99,6 +99,13 @@ std::string TypeLatex(std::string_view name, const Signature& sig);
 // works in is a statement of mathematics too, so it is set as one.
 std::string AlgebraLatex(const Signature& sig);
 
+// The members of a type, in the order its struct declares them -- `e012`,
+// `e123`, and so on, with `s` for the scalar. Empty if the name is not a type
+// of this algebra. What a value of it looks like from outside is exactly this
+// list of floats, which is how one is printed back from a program and how a
+// window reads it.
+std::vector<std::string> MemberNames(std::string_view type, const Signature& sig);
+
 // An example value of this type, as the C++ that makes one. Deterministic in
 // the variable's name, like every other example generator here.
 std::string ExampleValue(std::string_view type, std::string_view name,

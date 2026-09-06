@@ -32,6 +32,7 @@ struct MenuLayout {
   Rectangle save;
   Rectangle load;
   Rectangle insert;
+  Rectangle slide;
 };
 
 // The panel is as tall as what is in it, since what is in it changes: the slide
@@ -79,6 +80,10 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   // Dropping a file on the window does this too, but there is nothing to drop
   // with on a tablet.
   m.insert = {inset, y, inner, kButtonHeight};
+  y += kButtonHeight + 8.0f;
+  // A deck's first slide. After that the button on the canvas is where slides
+  // come from, since it stands at the end of the deck and there is one.
+  m.slide = {inset, y, inner, kButtonHeight};
   y += kButtonHeight;
   y += 48.0f;   // the hint, and the panel's own bottom margin
 
@@ -99,6 +104,7 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   place(&m.save);
   place(&m.load);
   place(&m.insert);
+  place(&m.slide);
   m.recentLabelTop += at.y;
   return m;
 }
@@ -191,6 +197,7 @@ MenuAction OptionsMenu::Update(Options* options) {
   if (CheckCollisionPointRec(mouse, m.save)) return MenuAction::Save;
   if (CheckCollisionPointRec(mouse, m.load)) return MenuAction::Load;
   if (CheckCollisionPointRec(mouse, m.insert)) return MenuAction::Insert;
+  if (CheckCollisionPointRec(mouse, m.slide)) return MenuAction::NewSlide;
   return MenuAction::None;
 }
 
@@ -281,6 +288,7 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
   DrawButton(fonts, m.load, "Load canvas", CheckCollisionPointRec(mouse, m.load));
   DrawButton(fonts, m.insert, "Insert picture or video",
              CheckCollisionPointRec(mouse, m.insert));
+  DrawButton(fonts, m.slide, "New slide", CheckCollisionPointRec(mouse, m.slide));
 
   const float hintBaseline = m.panel.y + m.panel.height - 22.0f;
   text::Draw(fonts, Face::MainRegular, "Esc to close", {m.panel.x + 24.0f, hintBaseline}, kHintEm,

@@ -90,6 +90,10 @@ class SlidePanel {
   // a deck is not travelling to it, and a glide per keypress would be seasick.
   // False if the camera is not on a slide, or there is no next one.
   bool Step(int direction, Viewport* camera, float aspect) const;
+  // Starts a deck where the button would have been. The button only stands at
+  // the *end* of a deck, so before there is one it has nowhere to stand and the
+  // first slide is asked for from the menu instead.
+  void AddSlide(float aspect, Viewport* camera);
   void Advance(float seconds);
   void Draw(const Viewport& viewport, FontStore& fonts, float aspect) const;
 

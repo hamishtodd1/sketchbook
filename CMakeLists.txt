@@ -16,6 +16,13 @@ include(FetchContent)
 set(BUILD_EXAMPLES   OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 
+# A 4.3 core context, not raylib's default 3.3. Compute shaders and shader
+# storage buffers are both 4.3, and both are load-bearing now: a viz builds its
+# mesh in a compute shader and hands it over in an SSBO, and the per-line values
+# a box reports come back the same way. Our own shaders still say `#version 330`
+# where 330 is enough -- it is forward compatible into a 4.3 context.
+set(OPENGL_VERSION "4.3" CACHE STRING "" FORCE)
+
 FetchContent_Declare(raylib
   GIT_REPOSITORY https://github.com/raysan5/raylib.git
   GIT_TAG        5.5
@@ -39,9 +46,12 @@ add_executable(sketchbook
   src/media.cpp
   src/video.cpp
   src/slides.cpp
+  src/spacedw.cpp
   src/filedialog_win32.cpp
   src/highlight.cpp
   src/fontstore.cpp
+  src/glext_win32.cpp
+  src/glslops.cpp
   src/grid.cpp
   src/text.cpp
   src/touch.cpp

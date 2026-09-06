@@ -471,17 +471,10 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
 // `[](float x) { return <expr>; }` -- a whole initialiser, which is the only
 // place a function is written out in full. Reports the parameter's name and the
 // token range of the body, or false if the line is not that shape.
-bool MatchLambda(const std::vector<Token>& tokens, std::size_t index, std::string* parameter,
-                 std::size_t* bodyBegin, std::size_t* bodyEnd) {
-  if (tokens[index].kind != Tok::LBracket) return false;
-  ++index;
-  // Whatever the capture list says is C++ bookkeeping, not mathematics.
-  while (tokens[index].kind != Tok::RBracket) {
-    if (tokens[index].kind == Tok::End) return false;
-    ++index;
-  }
-  ++index;
-
+// `(float x) { return <expression>; }` -- everything after the name of a
+// function, whichever way the function was introduced.
+bool MatchFunctionTail(const std::vector<Token>& tokens, std::size_t index,
+                       std::string* parameter, std::size_t* bodyBegin, std::size_t* bodyEnd) {
   if (tokens[index].kind != Tok::LParen) return false;
   ++index;
   if (tokens[index].kind != Tok::Ident || !IsRealType(tokens[index].text)) return false;
@@ -511,10 +504,24 @@ bool MatchLambda(const std::vector<Token>& tokens, std::size_t index, std::strin
   return tokens[index].kind == Tok::End;
 }
 
+// The older C++ spelling, kept only so a canvas written before functions became
+// GLSL still reads. The capture list is C++ bookkeeping, not mathematics.
+bool MatchLambda(const std::vector<Token>& tokens, std::size_t index, std::string* parameter,
+                 std::size_t* bodyBegin, std::size_t* bodyEnd) {
+  if (tokens[index].kind != Tok::LBracket) return false;
+  ++index;
+  while (tokens[index].kind != Tok::RBracket) {
+    if (tokens[index].kind == Tok::End) return false;
+    ++index;
+  }
+  ++index;
+  return MatchFunctionTail(tokens, index, parameter, bodyBegin, bodyEnd);
+}
+
 // `Viz(Real);` -- the line that says this box draws that type rather than using
 // one. Hand-parsed, like `Algebra(...)`, because it is a statement about the box
 // and never reaches a compiler.
-bool ParseVizSigil(std::string_view line, std::string* type) {
+bool ParseVizSigil(std::string_view line, std::string* type, std::string* window) {
   std::size_t at = line.find_first_not_of(" 	");
   if (at == std::string_view::npos) return false;
   if (line.compare(at, 4, "Viz(") != 0) return false;
@@ -527,6 +534,21 @@ bool ParseVizSigil(std::string_view line, std::string* type) {
   if (at == begin) return false;
   const std::string_view name = line.substr(begin, at - begin);
 
+  // An optional second name: which window this viz is for.
+  std::string_view where;
+  while (at < line.size() && line[at] == ' ') ++at;
+  if (at < line.size() && line[at] == ',') {
+    ++at;
+    while (at < line.size() && line[at] == ' ') ++at;
+    const std::size_t from = at;
+    while (at < line.size() && (IsIdentPart(line[at]) ||
+                                (at == from && IsIdentStart(line[at])))) {
+      ++at;
+    }
+    if (at == from) return false;
+    where = line.substr(from, at - from);
+  }
+
   while (at < line.size() && line[at] == ' ') ++at;
   if (at >= line.size() || line[at] != ')') return false;
   ++at;
@@ -535,6 +557,7 @@ bool ParseVizSigil(std::string_view line, std::string* type) {
   if (line.find_first_not_of(" 	", at) != std::string_view::npos) return false;
 
   if (type != nullptr) *type = std::string(name);
+  if (window != nullptr) *window = std::string(where);
   return true;
 }
 
@@ -696,10 +719,12 @@ Line Parse(std::string_view source, const clifford::Signature& sig) {
 
   // Saying what this box draws is a statement *about* the box rather than one
   // in it, exactly as choosing the algebra is.
-  if (std::string drawn; ParseVizSigil(source, &drawn)) {
+  if (std::string drawn, where; ParseVizSigil(source, &drawn, &where)) {
     line.kind = Kind::Viz;
-    line.name = std::move(drawn);
-    line.latex = "\\mathrm{viz}\\;" + NameToLatex(line.name);
+    line.latex = "\\mathrm{viz}\\;" + NameToLatex(drawn);
+    // The window rides along in the name, so nothing downstream needs a second
+    // field to carry it and two vizes for one type key apart on their own.
+    line.name = where.empty() ? drawn : (drawn + "@" + where);
     return line;
   }
 
@@ -741,6 +766,34 @@ Line Parse(std::string_view source, const clifford::Signature& sig) {
     } else {
       line.latex = Marked(name, &line.marks) + " \\in \\mathbb{R}";
     }
+    return line;
+  }
+
+  // A function is written the way GLSL writes one, because a function *is*
+  // GLSL now: `RealFunction w(float x) { return sin(x); }`. There is no `=` in
+  // it, so it is looked for before one is required.
+  if (IsFunctionType(type) && tokens[index].kind == Tok::LParen) {
+    std::string parameter;
+    std::size_t bodyBegin = 0;
+    std::size_t bodyEnd = 0;
+    if (!MatchFunctionTail(tokens, index, &parameter, &bodyBegin, &bodyEnd)) return line;
+
+    std::vector<Token> body(tokens.begin() + static_cast<std::ptrdiff_t>(bodyBegin),
+                            tokens.begin() + static_cast<std::ptrdiff_t>(bodyEnd));
+    body.push_back({Tok::End, {}});
+    Parser  bodyParser(body);
+    NodePtr expression = bodyParser.ParseExpression();
+    if (!bodyParser.ok() || expression == nullptr || bodyParser.Peek().kind != Tok::End) {
+      return line;
+    }
+
+    line.kind = Kind::Declaration;
+    line.type = type;
+    line.name = name;
+    line.hasInitialiser = true;
+    const std::string head = Marked(name, &line.marks) + "(" + NameToLatex(parameter) + ")";
+    const std::string shown = Emit(*expression, 0, &line.marks);
+    line.latex = head + Defines(line.marks.size() > 1) + shown;
     return line;
   }
 

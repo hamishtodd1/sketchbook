@@ -3,7 +3,12 @@
 #include <cstring>
 #include <string>
 
+#include <fstream>
+#include <sstream>
+
 #include "app.h"
+#include "glext.h"
+#include "glslops.h"
 #include "raylib.h"
 #include "rlgl.h"
 #include "touch.h"
@@ -17,6 +22,9 @@ struct Args {
   int         width = 1200;
   int         height = 800;
   std::string screenshot;   // when set, save a PNG and exit
+  // Dev only: print a file with its operators rewritten and exit, so the
+  // rewrite can be checked without a window or a GPU.
+  std::string rewrite;
   int         frames = 0;   // 0 means run until the window is closed
   std::string open;         // a .sketch canvas to load at startup
 };
@@ -31,6 +39,8 @@ Args ParseArgs(int argc, char** argv) {
     else if (flag == "--screenshot" && hasValue) args.screenshot = argv[++i];
     else if (flag == "--frames" && hasValue) args.frames = std::atoi(argv[++i]);
     else if (flag == "--open" && hasValue) args.open = argv[++i];
+    else if (flag == "--rewrite" && hasValue) args.rewrite = argv[++i];
+    else if (flag == "--overloads") args.rewrite = "-";
     else if (flag[0] != '-') args.open = flag;   // a file dropped on the exe
   }
   if (!args.screenshot.empty() && args.frames <= 0) args.frames = 6;
@@ -77,6 +87,29 @@ std::string ResolveAssetDir() {
 int main(int argc, char** argv) {
   const Args args = ParseArgs(argc, argv);
 
+  // Nothing graphical: read a file, rewrite its operators, print it.
+  if (!args.rewrite.empty()) {
+    if (args.rewrite == "-") {
+      std::printf("%s", sb::glslops::BuiltinOverloads().c_str());
+      return 0;
+    }
+    std::ifstream file(args.rewrite, std::ios::binary);
+    if (!file) {
+      std::fprintf(stderr, "sketchbook: cannot read %s\n", args.rewrite.c_str());
+      return 1;
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    std::string out;
+    std::string error;
+    if (!sb::glslops::Rewrite(buffer.str(), &out, &error)) {
+      std::fprintf(stderr, "sketchbook: %s\n", error.c_str());
+      return 1;
+    }
+    std::printf("%s", out.c_str());
+    return 0;
+  }
+
   // Deliberately no FLAG_WINDOW_HIGHDPI. GLFW is already per-monitor DPI aware,
   // so the window is sized in real pixels either way; turning the flag on adds
   // GLFW_SCALE_TO_MONITOR, which leaves the draw space scaled by the monitor
@@ -89,6 +122,22 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "sketchbook: could not create a window\n");
     return 1;
   }
+  // The GL entry points raylib does not wrap. After the window, because asking
+  // the driver for one needs a current context.
+  if (!sb::glext::Init()) {
+    TraceLog(LOG_WARNING, "GL: no glMemoryBarrier; compute results will be read back instead");
+  }
+  // Shaders are compiled on the thread that owns the context, and a box builds
+  // several of them at once. This lets the driver spread that over threads of
+  // its own instead.
+  if (sb::glext::ParallelCompile()) {
+    sb::glext::UseAllCompilerThreads();
+  } else {
+    TraceLog(LOG_WARNING, "GL: parallel shader compile unavailable (KHR advertised %d, ARB %d)",
+             sb::glext::HasExtension("GL_KHR_parallel_shader_compile") ? 1 : 0,
+             sb::glext::HasExtension("GL_ARB_parallel_shader_compile") ? 1 : 0);
+  }
+
   // Escape opens the options menu, so it must not also close the window.
   SetExitKey(KEY_NULL);
   SetTargetFPS(120);

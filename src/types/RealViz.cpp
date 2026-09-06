@@ -86,6 +86,74 @@ const mathprogram::Variable* AxisPanel::Resolve(const AxisRef& ref) const {
   return ref.block->FindVariable(ref.name);
 }
 
+namespace {
+
+// A function has no one place to be, so it is not a marker. It has a value
+// everywhere, though, and the axis already says what x is at every pixel -- so
+// it is painted as a field: how much there is of it, and which way.
+//
+// Zero is nothing at all, +1 is opaque viridis green and -1 is opaque viridis
+// yellow, with anything beyond clamped rather than allowed to run off the map.
+// Clamping rather than rescaling is what keeps two functions comparable: the
+// colour means the same number on every axis it is drawn on.
+const char* kFieldShader = R"(#version 330
+in vec2 fragTexCoord;
+in vec4 fragColor;
+out vec4 finalColor;
+
+uniform sampler2D texture0;   // the samples, one row
+uniform vec4 colDiffuse;
+uniform vec2 sbRange;         // value at the left and right edges of this row
+uniform vec2 sbWindow;        // the range the samples were taken over
+
+void main() {
+    float x = mix(sbRange.x, sbRange.y, fragTexCoord.x);
+    float t = (x - sbWindow.x) / (sbWindow.y - sbWindow.x);
+    // Off the end of what was sampled is not zero, it is unknown, so nothing is
+    // claimed there.
+    if (t < 0.0 || t > 1.0) discard;
+
+    float v = clamp(texture(texture0, vec2(t, 0.5)).r, -1.0, 1.0);
+
+    vec3 green  = vec3(109.0 / 255.0, 205.0 / 255.0,  89.0 / 255.0);
+    vec3 yellow = vec3(253.0 / 255.0, 231.0 / 255.0,  37.0 / 255.0);
+    vec3 tint = v >= 0.0 ? green : yellow;
+
+    finalColor = vec4(tint, abs(v) * colDiffuse.a);
+}
+)";
+
+}  // namespace
+
+void AxisPanel::EnsureField() const {
+  if (haveField_) return;
+  // One white pixel, stretched across the row. Everything about how the field
+  // looks is in the box's own shader; this only exists so that `fragTexCoord`
+  // runs 0..1 across the rectangle being painted.
+  Image white = GenImageColor(1, 1, WHITE);
+  fieldSamples_ = LoadTextureFromImage(white);
+  UnloadImage(white);
+  haveField_ = true;
+}
+
+void AxisPanel::ReleaseGpu() {
+  if (!haveField_) return;
+  UnloadTexture(fieldSamples_);
+  haveField_ = false;
+}
+
+void AxisPanel::DrawField(Rectangle area, const NumberLine& line, const AxisRef& ref) const {
+  if (ref.block == nullptr || !ref.block->HasFieldShader()) return;
+  EnsureField();
+
+  const Vector2 range = {line.centre - line.span * 0.5f, line.centre + line.span * 0.5f};
+  if (!ref.block->BeginField(ref.name, /*mode=*/0, range, {0.0f, 0.0f}, 0.0f)) return;
+
+  const Rectangle source = {0.0f, 0.0f, 1.0f, 1.0f};
+  DrawTexturePro(fieldSamples_, source, area, {0.0f, 0.0f}, 0.0f, WHITE);
+  ref.block->EndField();
+}
+
 bool AxisPanel::Shown(const AxisRef& ref) {
   return ref.block == nullptr || ref.block->InScope(ref.name);
 }
@@ -94,12 +162,17 @@ bool AxisPanel::Shown(const NumberLine& line) {
   for (const AxisRef& ref : line.refs) {
     if (Shown(ref)) return true;
   }
+  // A row carrying only functions is still a row worth drawing.
+  for (const AxisRef& ref : line.fields) {
+    if (Shown(ref)) return true;
+  }
   return false;
 }
 
 CodeBlock* AxisPanel::Owner(const NumberLine& line) const {
   if (line.dock != nullptr) return line.dock;
-  return line.refs.empty() ? nullptr : line.refs.front().block;
+  if (!line.refs.empty()) return line.refs.front().block;
+  return line.fields.empty() ? nullptr : line.fields.front().block;
 }
 
 void AxisPanel::Reframe(NumberLine& line) const {
@@ -151,11 +224,20 @@ bool AxisPanel::Sync(const Blocks& blocks) {
                                    [this](const AxisRef& ref) { return Resolve(ref) == nullptr; }),
                     line.refs.end());
   }
+  for (NumberLine& line : lines_) {
+    line.fields.erase(
+        std::remove_if(line.fields.begin(), line.fields.end(),
+                       [this](const AxisRef& ref) { return Resolve(ref) == nullptr; }),
+        line.fields.end());
+  }
   lines_.erase(std::remove_if(lines_.begin(), lines_.end(),
-                              [](const NumberLine& line) { return line.refs.empty(); }),
+                              [](const NumberLine& line) {
+                                return line.refs.empty() && line.fields.empty();
+                              }),
                lines_.end());
   for (NumberLine& line : lines_) {
-    if (line.dock == nullptr) line.dock = line.refs.front().block;
+    if (line.dock != nullptr) continue;
+    line.dock = line.refs.empty() ? line.fields.front().block : line.refs.front().block;
   }
 
   // Add a line for anything new.
@@ -222,6 +304,36 @@ bool AxisPanel::Sync(const Blocks& blocks) {
       }
       home->refs.push_back({block.get(), variable.name});
       if (!placed) home->framed = false;
+    }
+  }
+
+  // And the functions, which join the same axis rather than one of their own:
+  // the field is *about* x, and this is the row that says what x is.
+  for (const std::unique_ptr<CodeBlock>& block : blocks) {
+    for (const mathprogram::Variable& variable : block->Variables()) {
+      if (variable.kind != mathprogram::Kind::Function) continue;
+      if (block->IsHidden(variable.name)) continue;
+
+      bool present = false;
+      for (const NumberLine& line : lines_) {
+        for (const AxisRef& ref : line.fields) {
+          if (ref.block == block.get() && ref.name == variable.name) { present = true; break; }
+        }
+        if (present) break;
+      }
+      if (present) continue;
+
+      // A row of its own. Two fields on one row cannot both be read -- the
+      // second is simply painted over the first -- so each function starts
+      // alone, and dropping one row onto another is how they come to share a
+      // scale, exactly as it is for values.
+      NumberLine line;
+      line.dock = block.get();
+      line.centre = 0.0f;
+      line.span = 4.0f;
+      line.framed = true;   // a field has no position to frame around
+      line.fields.push_back({block.get(), variable.name});
+      lines_.push_back(line);
     }
   }
 
@@ -658,6 +770,7 @@ bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Bl
 
           NumberLine& host = lines_[i];
           for (const AxisRef& ref : lines_[dragLine_].refs) host.refs.push_back(ref);
+          for (const AxisRef& ref : lines_[dragLine_].fields) host.fields.push_back(ref);
           // Seeing them together is the whole point of the gesture, so the
           // axis reframes around every value now on it. Done before the erase,
           // while `host` is still a valid reference.
@@ -807,6 +920,13 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts,
     DrawRectangleRounded(row, 0.28f, 8, kAxisBg);
     DrawRectangleRoundedLinesEx(row, 0.28f, 8, 1.0f, kAxisBorder);
 
+    // The fields first: they are what the row is *made of* where they exist,
+    // and the axis, its ticks and its markers are read against them.
+    for (const AxisRef& ref : line.fields) {
+      if (!Shown(ref)) continue;
+      DrawField(area, line, ref);
+    }
+
     if (carried || PointOnRim(row, GetMousePosition())) DrawRim(row, zoom, carried);
 
 
@@ -863,17 +983,13 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts,
                      {clamped, axisY + 5.0f * scale}, Fade(tint, 0.55f));
       } else if (realViz != nullptr && realViz->Ready()) {
         // The canvas says how a real is drawn, so it is drawn that way. The
-        // geometry is this value's own, laid down by the viz's lines inside the
-        // program that has it; the example mesh stands in until that has run.
-        const std::vector<float>& tris =
-            variable->mesh.empty() && realViz->mesh != nullptr ? *realViz->mesh : variable->mesh;
-        const std::vector<float>& segs = variable->lines.empty() && realViz->lines != nullptr
-                                             ? *realViz->lines
-                                             : variable->lines;
+        // geometry is laid down for this value by the viz's own compute shader,
+        // which runs only when the value has moved.
+        //
         // The rectangle's middle is the axis line, so a viz that maps a value
         // straight through lands on it.
         const Rectangle box = {area.x, axisY - row.height * 0.5f, area.width, row.height};
-        realViz->Draw(tris, segs, variable->value, box,
+        realViz->Draw(variable->value, box,
                       {line.centre, 0.0f, line.span, row.height / std::max(area.width, 1.0f) *
                                                          line.span},
                       scale, tint);

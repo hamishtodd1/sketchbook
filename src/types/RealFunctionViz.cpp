@@ -479,6 +479,23 @@ bool PlotPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
   return false;
 }
 
+void PlotPanel::EnsureCurveSurface() const {
+  if (haveCurveSurface_) return;
+  // One white pixel stretched over the card: everything about how the curve
+  // looks is in the box's own shader, and this only exists so `fragTexCoord`
+  // runs 0..1 across the rectangle being painted.
+  Image white = GenImageColor(1, 1, WHITE);
+  curveSurface_ = LoadTextureFromImage(white);
+  UnloadImage(white);
+  haveCurveSurface_ = true;
+}
+
+void PlotPanel::ReleaseGpu() {
+  if (!haveCurveSurface_) return;
+  UnloadTexture(curveSurface_);
+  haveCurveSurface_ = false;
+}
+
 void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts, const VizStore* vizes) const {
   const float zoom = viewport.Zoom();
   if (zoom < 0.02f) return;
@@ -585,16 +602,36 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts, const VizStore*
       // The canvas says how a function is drawn, so it is drawn that way. Its
       // lines ran inside the program that owns the function -- the only place
       // one can be sampled -- so what arrives here is already this curve.
-      if (curveViz != nullptr && curveViz->Ready() &&
-          (!variable->lines.empty() || !variable->mesh.empty())) {
+      if (curveViz != nullptr && curveViz->Ready()) {
         rlSetLineWidth(thickness);
-        curveViz->Draw(variable->mesh, variable->lines, 0.0f, rect,
+        curveViz->Draw(0.0f, rect,
                        {plot.centre.x, plot.centre.y, plot.span * rect.width / rect.height,
                         plot.span},
                        scale, tint);
         rlSetLineWidth(1.0f);
         continue;
       }
+      // A function is GLSL, so the curve is where the shader says the output
+      // actually is -- evaluated per pixel rather than joined up between
+      // samples. Nothing runs out of curve when the plot is zoomed, and a knob
+      // reshapes it without anything being rebuilt.
+      const CodeBlock* owner = plot.refs[c].block;
+      if (owner != nullptr && owner->HasFieldShader()) {
+        const float wide = plot.span * rect.width / rect.height;
+        const Vector2 across = {plot.centre.x - wide * 0.5f, plot.centre.x + wide * 0.5f};
+        // Input runs *up* the vertical axis here, so the top of the rectangle is
+        // the larger input and the shader is told so.
+        const Vector2 up = {plot.centre.y + plot.span * 0.5f, plot.centre.y - plot.span * 0.5f};
+        // Half the line's width, in the value units the shader compares in.
+        const float halfWidth = thickness * 0.5f * wide / std::max(1.0f, rect.width);
+        if (owner->BeginField(plot.refs[c].name, /*mode=*/1, across, up, halfWidth)) {
+          EnsureCurveSurface();
+          DrawTexturePro(curveSurface_, {0.0f, 0.0f, 1.0f, 1.0f}, rect, {0.0f, 0.0f}, 0.0f, tint);
+          owner->EndField();
+          continue;
+        }
+      }
+
       if (variable->samples.empty()) continue;
 
       bool    havePrevious = false;

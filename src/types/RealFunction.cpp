@@ -13,27 +13,11 @@ const char* const kSource = R"CPP(
 struct RealFunction : std::function<float(float)> {
   using std::function<float(float)>::function;
 };
-inline RealFunction operator+(RealFunction a, RealFunction b) {
-  return [a, b](float x) { return a(x) + b(x); };
-}
-inline RealFunction operator-(RealFunction a, RealFunction b) {
-  return [a, b](float x) { return a(x) - b(x); };
-}
-inline RealFunction operator-(RealFunction a) {
-  return [a](float x) { return -a(x); };
-}
-inline RealFunction operator*(float k, RealFunction a) {
-  return [k, a](float x) { return k * a(x); };
-}
-inline RealFunction operator*(RealFunction a, float k) {
-  return [a, k](float x) { return a(x) * k; };
-}
-inline RealFunction operator*(RealFunction a, RealFunction b) {
-  return [a, b](float x) { return a(x) * b(x); };
-}
-inline RealFunction operator/(RealFunction a, float k) {
-  return [a, k](float x) { return a(x) / k; };
-}
+// There is deliberately no arithmetic on functions here any more. Making them
+// a vector space needed `RealFunction` to be a `std::function` with operators
+// over it, and a function is GLSL now: `h = f + 2 * g` is written
+// `RealFunction h(float x) { return f(x) + 2.0 * g(x); }`, which composes by
+// calling rather than by overloading and costs nothing at run time.
 static void sb_plot(const char* name, const RealFunction& f) {
   std::printf("%s=", name);
   for (int i = 0; i < SB_SAMPLES; ++i) {
@@ -76,6 +60,27 @@ const char* Source() {
   // stable pointer.
   static const std::string source = Substituted();
   return source.c_str();
+}
+
+std::string ExampleGlsl(const std::string& name) {
+  // Deterministic in the name, like every other example generator here.
+  unsigned int hash = 2166136261u;
+  for (char c : name) {
+    hash ^= static_cast<unsigned char>(c);
+    hash *= 16777619u;
+  }
+  const float coefficient = 0.6f + 0.1f * static_cast<float>((hash >> 8) % 12u);
+  char        number[32];
+  std::snprintf(number, sizeof(number), "%.4g", static_cast<double>(coefficient));
+
+  std::string expression;
+  switch (hash % 4u) {
+    case 0: expression = std::string("sin(") + number + " * x)"; break;
+    case 1: expression = std::string(number) + " * x * x - 1.0"; break;
+    case 2: expression = std::string("exp(-") + number + " * x * x)"; break;
+    default: expression = std::string(number) + " * x"; break;
+  }
+  return "float " + name + "(float x) { return " + expression + "; }";
 }
 
 std::string PrintStatement(const std::string& name) {

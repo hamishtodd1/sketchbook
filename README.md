@@ -59,6 +59,7 @@ it, so the three of them move together.
 | `Shift`+arrows, `Shift`+`Home`/`End` | Extend the highlight |
 | Drag selected text out of the box | That variable gets an axis of its own |
 | Wheel over a number line or plot | Zoom that window only |
+| Right-drag, or two-finger drag, a space window | Orbit its camera |
 | Wheel over a box or a picture | Resize it, about the corner nearest the pointer |
 | Drag a picture's corner | Crop it |
 | Drop a file on the window | A picture, a video, or a canvas to open |
@@ -517,13 +518,22 @@ A declaration with no initialiser gets an example the same way a real does, only
 the example is a lambda rather than a number -- a wave, a parabola, a bump or a
 line -- shown in blue when you hover the line.
 
-Each function gets a **plot** instead of a number line, drawn from samples the
+Each function gets a **plot** as well as a number line, drawn from samples the
 program prints back. **Input runs up the vertical axis and output along the
 horizontal one**: the transpose of the usual convention, chosen because these
 axes are going to become spacetime diagrams. Both axes share one scale, so the
 window is square and a slope of one is a diagonal. Drop one plot's rim onto
 another and both curves share a set of axes, each named in its own colour --
 which is what a vector space looks like.
+
+A function also gets a **row on a number line**, where it is drawn as an
+opacity field: transparent at zero, opaque viridis green at +1 and opaque
+viridis yellow at -1, clamped rather than rescaled beyond either, so the colour
+means the same number on every axis. Off the end of what was sampled nothing is
+drawn at all. Each function starts on a row of its own -- two fields on one row
+would paint over each other -- and dropping one row onto another puts them on
+one scale. That is a *second* viz for one type: a viz box can name the window it
+is for, `Viz(RealFunction, Axis)`, and the two are kept apart.
 
 Dragging a knob does **not** recompile. The box is built once, its free
 variables are passed in as arguments, and every value is printed back, so a drag
@@ -687,6 +697,8 @@ src/
   selection.*     the lasso, and what it catches
   ui.*            the options menu
   recent.*        the canvases opened lately, kept between runs
+  glslops.*       operator overloading for GLSL, which has none
+  glext.*         the few GL entry points raylib does not hand over
   fontstore.*     face registry, size-ladder atlas cache, TTF metrics
   text.*          plain-text measure/draw/wrap on top of FontStore
   tex/

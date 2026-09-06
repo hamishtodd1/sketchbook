@@ -27,6 +27,13 @@
 // boxes, paired by the type they name -- which needs no new language rule,
 // since a box is already C++ first and GLSL if C++ refuses it.
 //
+// **A type may have more than one viz, in more than one window.** A function is
+// a curve on a plot and a field of colour on a number line, and those are two
+// different answers to "how is one drawn" rather than one answer used twice. So
+// a viz box may name the window it is for -- `Viz(RealFunction, Axis)` -- and
+// the two are held apart under `Type@Window`. A box that names no window is the
+// viz a window gets when it asks for a type and nothing more.
+//
 // A type with no viz boxes on the canvas keeps the drawing the app was born
 // with. Nothing has to be authored for a canvas to work; authoring one is how
 // you take it over.
@@ -46,11 +53,10 @@ class CodeBlock;
 
 // One type's viz, as gathered from the boxes on the canvas.
 struct Viz {
-  // The example mesh: what the viz box drew standing alone, for an example
-  // value of its type. Used before any real value has one, and for a type whose
-  // shape does not depend on its value at all.
-  const std::vector<float>* mesh = nullptr;
-  const std::vector<float>* lines = nullptr;
+  // The box whose half lays this viz's geometry down. Its compute shader is run
+  // for the value being drawn -- which is why the mesh is not stored here: it
+  // belongs to the value, and there is a different one for every value.
+  const CodeBlock* meshBlock = nullptr;
   // The vertex shader that places it, and the slots the window fills in.
   Shader shader{};
   bool   haveShader = false;
@@ -58,16 +64,16 @@ struct Viz {
   int    areaLoc = -1;
   int    viewLoc = -1;
   int    scaleLoc = -1;
+  int    tintLoc = -1;
 
   // The shader has arrived, so this viz can place a mesh if it is given one.
-  bool Ready() const { return haveShader; }
+  bool Ready() const { return haveShader && meshBlock != nullptr; }
 
   // Draws one value's geometry. `area` is the rectangle the dw plots in, its
   // middle at the view's centre; `view` is what that rectangle spans, as
   // (centre.x, centre.y, wide, high). Both are the shader's to use or ignore.
   // `scale` is how big chrome is drawn at the current zoom.
-  void Draw(const std::vector<float>& tris, const std::vector<float>& segments, float value,
-            Rectangle area, Vector4 view, float scale, Color tint) const;
+  void Draw(float value, Rectangle area, Vector4 view, float scale, Color tint) const;
 };
 
 // Every viz the canvas currently defines. Rebuilt from the boxes each frame it
@@ -80,8 +86,13 @@ class VizStore {
   bool Sync(const std::vector<std::unique_ptr<CodeBlock>>& blocks);
   // What to inject into those programs, by type.
   const mathprogram::VizSources& Sources() const { return sources_; }
-  const Viz* Find(const std::string& type) const;
+  // `window` names which of a type's vizes is wanted; empty asks for the one
+  // that named no window.
+  const Viz* Find(const std::string& type, const std::string& window = {}) const;
   void       Clear() { vizes_.clear(); }
+  // The one empty vertex array every viz draws through. A destructor cannot
+  // free what is on the GPU, so it goes by hand.
+  static void ReleaseGpu();
 
  private:
   std::map<std::string, Viz>    vizes_;

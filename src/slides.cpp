@@ -212,6 +212,22 @@ Rectangle SlidePanel::ButtonRect(const Viewport& viewport) const {
           kButtonWidth * zoom, kButtonHeight * zoom};
 }
 
+void SlidePanel::AddSlide(float aspect, Viewport* camera) {
+  Slide slide;
+  slide.centre = NextCentre(aspect);
+  slides_.push_back(slide);
+  pending_ = {true, slide.centre};
+
+  buttonFrom_ = buttonPos_;
+  buttonTo_ = ButtonHome(aspect);
+  buttonElapsed_ = 0.0f;
+  buttonMoving_ = true;
+
+  // Making a slide is a way of saying "I am working here now", so the canvas
+  // takes you there.
+  if (camera != nullptr) camera->GlideTo(slide.centre, ZoomToFill(slide, aspect), 0.45f);
+}
+
 void SlidePanel::Advance(float seconds) {
   if (!buttonMoving_) return;
   buttonElapsed_ += seconds;
@@ -229,7 +245,7 @@ bool SlidePanel::HandleInput(const Viewport& viewport, FontStore& fonts, float a
   const Vector2 pointer = GetMousePosition();
 
   const Rectangle button = ButtonRect(viewport);
-  if (CheckCollisionPointRec(pointer, button)) {
+  if (!slides_.empty() && CheckCollisionPointRec(pointer, button)) {
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !buttonMoving_) {
       // The slide goes at the end of the deck, clear of the last one; the
       // button then walks along past it, so the next click lands the next slide
@@ -336,6 +352,10 @@ void SlidePanel::Draw(const Viewport& viewport, FontStore& fonts, float aspect) 
   }
 
   // The new-slide button last, so it is never behind a slide it stands next to.
+  // It marks where the deck *stops*, so a canvas with no deck has nothing for
+  // it to stand at the end of and it is not drawn: an empty canvas is empty.
+  // The first slide is asked for from the menu instead.
+  if (slides_.empty()) return;
   const Rectangle button = ButtonRect(viewport);
   if (button.width < 2.0f) return;
   const bool hovered = CheckCollisionPointRec(pointer, button);
