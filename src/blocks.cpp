@@ -1,5 +1,7 @@
 #include "blocks.h"
 
+#include "logging.h"
+
 #include <limits>
 
 #include "glext.h"
@@ -36,8 +38,6 @@ constexpr float kBaseEm = 26.0f;
 constexpr int kMinColumns = 14;
 
 // The result square, to the right of the card.
-constexpr float kSquareSide = 56.0f;
-constexpr float kSquareGap = 20.0f;
 // A shader preview goes in the same place, but a shader deserves more room.
 constexpr float kShaderSide = 220.0f;
 
@@ -149,7 +149,9 @@ bool CompileShaderHalf(const char* vertex, const char* fragment, Shader* shader,
   g_shaderLog = log;
   SetTraceLogCallback(CaptureTraceLog);
   const Shader compiled = LoadShaderFromMemory(vertex, fragment);
-  SetTraceLogCallback(nullptr);
+  // Back to the filter rather than to nothing: putting nothing back would let
+  // raylib narrate freely again from the next texture onwards.
+  SetTraceLogCallback(log::Filtered);
   g_shaderLog = nullptr;
 
   if (IsShaderValid(compiled)) {
@@ -158,10 +160,6 @@ bool CompileShaderHalf(const char* vertex, const char* fragment, Shader* shader,
   }
   UnloadShader(compiled);
   return false;
-}
-
-bool CompileFragmentShader(const std::string& source, Shader* shader, std::string* log) {
-  return CompileShaderHalf(nullptr, source.c_str(), shader, log);
 }
 
 void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float borderWidth) {
@@ -261,8 +259,8 @@ CodeBlock::~CodeBlock() {
   // context, and a destructor can run after the window has gone. Whoever
   // destroys a box has to have released it first. Say so if they did not,
   // rather than leaking in silence.
-  if (haveShader_ || haveShader_ || havePreviewSurface_ || haveProbeTarget_ ||
-      haveVizShader_) {
+  if (haveShader_ || haveFnTarget_ || havePreviewSurface_ || haveProbeTarget_ ||
+      haveVizShader_ || samplerProgram_ != 0 || samplerBuffer_ != 0) {
     TraceLog(LOG_WARNING, "BLOCKS: a box was destroyed still holding GPU memory");
   }
 }
@@ -274,26 +272,59 @@ clifford::Signature CodeBlock::Algebra() const {
 }
 
 void CodeBlock::EnsureCache(FontStore& fonts, float emPx, float measurePx) const {
-  const bool prose = IsText();
-  const clifford::Signature signature = Algebra();
+  const bool     prose = IsText();
+  const unsigned styleBits = (bold_ ? 1u : 0u) | (italic_ ? 2u : 0u) | (prose ? 4u : 0u);
+
+  // The cheapest question first, because it is nearly always the answer: has
+  // anything moved at all? The algebra is deliberately not asked for here. It
+  // is read off the lines themselves, so no line changing means it cannot have
+  // changed either -- and asking costs a parse of every line.
+  bool stale = cache_.size() != lines_.size() || cacheStyle_ != styleBits ||
+               cacheEmPx_ != emPx || (prose && cacheWrap_ != measurePx);
+  for (std::size_t i = 0; !stale && i < lines_.size(); ++i) {
+    stale = cache_[i].source != lines_[i];
+  }
+  if (!stale) return;
+
+  cacheStyle_ = styleBits;
+  cacheEmPx_ = emPx;
+  cacheWrap_ = measurePx;
+  ++cacheVersion_;
+
   // Bold and italic change which face the words are set in, so they invalidate
   // a line as surely as editing it does -- and so does the algebra, which every
   // line of a box is read in terms of. Changing it on one line has to re-read
   // all of them.
-  const unsigned styleSig = (bold_ ? 1u : 0u) | (italic_ ? 2u : 0u) | (prose ? 4u : 0u) |
-                            (static_cast<unsigned>(signature.p) << 3) |
+  const clifford::Signature signature = Algebra();
+  const unsigned styleSig = styleBits | (static_cast<unsigned>(signature.p) << 3) |
                             (static_cast<unsigned>(signature.q) << 8) |
                             (static_cast<unsigned>(signature.r) << 13);
+
+  // Which function each line is inside. A `return` is not a statement about
+  // anything until you know what it is the answer of, and a line on its own
+  // does not say -- the lines around it do, and this is the only place that can
+  // see them.
+  std::vector<mathline::Inside> inside(lines_.size());
+  if (!prose) {
+    for (const mathline::FunctionSpan& span : mathline::FindFunctions(lines_, signature)) {
+      for (int k = span.first + 1; k <= span.last; ++k) {
+        inside[static_cast<std::size_t>(k)] = {span.head.name, span.head.paramName,
+                                               k == span.last};
+      }
+    }
+  }
 
   cache_.resize(lines_.size());
   for (std::size_t i = 0; i < lines_.size(); ++i) {
     LineCache& entry = cache_[i];
-    if (entry.source != lines_[i] || entry.styleSig != styleSig) {
+    if (entry.source != lines_[i] || entry.styleSig != styleSig || entry.inside != inside[i]) {
       entry.source = lines_[i];
       entry.styleSig = styleSig;
+      entry.inside = inside[i];
       // A text box has no mathematical reading and is not looked for one: its
       // lines are words, and words are not code that failed to parse.
-      entry.parsed = prose ? mathline::Line{} : mathline::Parse(lines_[i], signature);
+      entry.parsed =
+          prose ? mathline::Line{} : mathline::Parse(lines_[i], signature, inside[i]);
       entry.latex = prose ? std::string() : entry.parsed.latex;
       entry.tex = entry.latex.empty() ? tex::Parsed{} : tex::Parse(entry.latex);
       entry.emPx = -1.0f;
@@ -375,13 +406,17 @@ std::string CodeBlock::TextLatex(std::string_view words) const {
 }
 
 int CodeBlock::ErrorLine() const {
-  if (program_.state() == mathprogram::State::Failed && program_.error().present) {
-    return program_.error().line;
-  }
-  if (outcome_.status == compiler::Status::Failed && outcome_.error.present) {
-    return outcome_.error.line;
-  }
-  return 0;
+  const bool failed = program_.state() == mathprogram::State::Failed;
+  return (failed && program_.error().present) ? program_.error().line : 0;
+}
+
+bool CodeBlock::ReadsAsCode() const {
+  if (reading_ == Reading::Code) return true;
+  if (reading_ == Reading::Maths) return false;
+  // Auto. Editing a box means editing all of it -- and a box that says how
+  // something is *drawn* is code all the way through even when nobody is
+  // editing it, since there is no mathematical reading of a mesh.
+  return focused_ || !program_.vizType().empty();
 }
 
 bool CodeBlock::ShowsCode(int line) const {
@@ -391,17 +426,11 @@ bool CodeBlock::ShowsCode(int line) const {
   // source -- and so at the sigil, which is how a text box stops being one --
   // is the toggle on its own strip.
   if (IsText()) return showSource_;
-  // A box that says how something is drawn is code all the way through: there
-  // is no mathematical reading of a mesh or of where to put it, and a viz is
-  // written to be read as what it is. The toggle still works, so a box can be
-  // made to show its LaTeX; this is only where it starts.
-  if (!program_.vizType().empty() && !showMath_) return true;
+  if (ReadsAsCode()) return true;
   if (cache_[static_cast<std::size_t>(line)].latex.empty()) return true;
   // A line the compiler complained about shows its code, so the red caret has
   // real characters to point at -- and so you can see what to fix.
   if (line + 1 == ErrorLine()) return true;
-  // Editing the box means editing all of it, unless the toggle says otherwise.
-  if (focused_ && !showMath_) return true;
   if (focused_ && line == caretLine_) return true;
   if (line == hoverLine_) return true;
   return false;
@@ -415,7 +444,7 @@ std::string CodeBlock::Injection(int line) const {
   // A function's chosen value is a piece of code rather than a number, and
   // unlike a real's it does not move under a knob -- there is nothing to drag.
   if (mathline::IsFunctionType(parsed.type)) {
-    return " = " + types::ExampleRealFunction(parsed.name);
+    return " = " + types::realfunction::ExampleBody(parsed.name);
   }
   // A multivector gets no injection shown at all. Not because there is nothing
   // to show -- there is, and it is real code the way a function's is -- but
@@ -669,17 +698,38 @@ void CodeBlock::InsertDeclaration(const std::string& declaration) {
   RequestCompile();
 }
 
-bool CodeBlock::BuildsAsCxx() const {
-  const mathprogram::State state = program_.state();
-  return state == mathprogram::State::Ready || state == mathprogram::State::Building;
-}
-
 int CodeBlock::VizUniform(const char* name) const {
   return haveVizShader_ ? GetShaderLocation(vizShader_, name) : -1;
 }
 
-void CodeBlock::DrawShaderInto(Rectangle rect) const {
-  if (!haveShader_ || !havePreviewSurface_) return;
+// Which function of a given kind this box is being read inside, or the first
+// one of that kind it defines. The same rule every other window follows about
+// where the box has got to.
+int CodeBlock::FunctionOfKind(int kind) const {
+  const std::vector<mathprogram::Function>& fns = program_.functions();
+  const auto wanted = [kind](const mathprogram::Function& fn) {
+    if (kind == 0) return fn.IsPicture() && !fn.IsSurface();
+    if (kind == 1) return fn.IsSurface();
+    return fn.IsVolume();
+  };
+  const int read = FunctionShown();
+  if (read >= 0 && wanted(fns[static_cast<std::size_t>(read)])) return read;
+  for (std::size_t i = 0; i < fns.size(); ++i) {
+    if (wanted(fns[i])) return static_cast<int>(i);
+  }
+  return -1;
+}
+
+int CodeBlock::FlatPictureFunction() const { return FunctionOfKind(0); }
+int CodeBlock::SurfaceFunction() const { return FunctionOfKind(1); }
+int CodeBlock::VolumeFunction() const { return FunctionOfKind(2); }
+
+// One drawing, whichever kind. The window says which function, which patch of
+// the input space, and where the eye is; the shader has all three marches in it
+// already and `shape` is which one to run.
+void CodeBlock::DrawFunctionInto(Rectangle rect, int which, int shape, Vector2 centre,
+                                 float span, Vector3 orbit) const {
+  if (!haveShader_ || !havePreviewSurface_ || which < 0) return;
 
   for (const auto& [uniform, location] : uniforms_) {
     if (location < 0) continue;
@@ -687,16 +737,43 @@ void CodeBlock::DrawShaderInto(Rectangle rect) const {
     if (literal == nullptr) continue;
     SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
   }
-  // Draw the picture, which is what this shader does when asked for nothing
-  // else.
-  const int drawMode = 0;
+
+  const int   drawMode = 2;
+  const float half = std::max(span, 1e-4f) * 0.5f;
+  // How far a surface may rise. The colour saturates at one either way, so a
+  // couple of units is every height the map can still tell apart -- and it
+  // keeps a function that runs away from taking the window with it.
+  const float lift = 2.0f;
+  const float eye[3] = {orbit.x, orbit.y, orbit.z};
+  const float across[2] = {centre.x - half, centre.x + half};
+  // Up is up: the top of the picture is the larger value, as it is on a plot.
+  const float down[2] = {centre.y + half, centre.y - half};
   if (modeLoc_ >= 0) SetShaderValue(shader_, modeLoc_, &drawMode, SHADER_UNIFORM_INT);
+  if (shapeLoc_ >= 0) SetShaderValue(shader_, shapeLoc_, &shape, SHADER_UNIFORM_INT);
+  if (indexLoc_ >= 0) SetShaderValue(shader_, indexLoc_, &which, SHADER_UNIFORM_INT);
+  if (rangeLoc_ >= 0) SetShaderValue(shader_, rangeLoc_, across, SHADER_UNIFORM_VEC2);
+  if (verticalLoc_ >= 0) SetShaderValue(shader_, verticalLoc_, down, SHADER_UNIFORM_VEC2);
+  if (orbitLoc_ >= 0) SetShaderValue(shader_, orbitLoc_, eye, SHADER_UNIFORM_VEC3);
+  if (liftLoc_ >= 0) SetShaderValue(shader_, liftLoc_, &lift, SHADER_UNIFORM_FLOAT);
 
   BeginShaderMode(shader_);
-  // One white pixel stretched over the square: the source rectangle covers the
-  // whole texture, so fragTexCoord runs 0..1 across it.
+  // One white pixel stretched over the square, so the varying runs 0..1 across.
   DrawTexturePro(previewSurface_, {0.0f, 0.0f, 1.0f, 1.0f}, rect, {0.0f, 0.0f}, 0.0f, WHITE);
   EndShaderMode();
+}
+
+void CodeBlock::DrawPictureInto(Rectangle rect, Vector2 centre, float span) const {
+  DrawFunctionInto(rect, FlatPictureFunction(), 2, centre, span, {0.0f, 0.0f, 0.0f});
+}
+
+void CodeBlock::DrawSurfaceInto(Rectangle rect, Vector2 centre, float span,
+                                Vector3 orbit) const {
+  DrawFunctionInto(rect, SurfaceFunction(), 3, centre, span, orbit);
+}
+
+void CodeBlock::DrawVolumeInto(Rectangle rect, Vector2 centre, float span,
+                               Vector3 orbit) const {
+  DrawFunctionInto(rect, VolumeFunction(), 4, centre, span, orbit);
 }
 
 std::vector<Rectangle> CodeBlock::MentionRects(std::size_t rowIndex, const std::string& name,
@@ -784,16 +861,66 @@ std::vector<Rectangle> CodeBlock::MentionRects(std::size_t rowIndex, const std::
 
 const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStore& fonts) const {
   Geometry& g = geometry_;
-  g.zoom = viewport.Zoom();
-  g.emPx = em_ * g.zoom;
+  const float zoom = viewport.Zoom();
+  const float emPx = em_ * zoom;
+  // The measure, in pixels: how far the words run before they wrap. A box that
+  // has never been given one takes a sensible measure from its own type size.
+  const float measure = (textWidth_ > 0.0f ? textWidth_ : em_ * kMeasureEms) * zoom;
+  EnsureCache(fonts, emPx, measure);
+
+  const Vector2 topLeft = viewport.ToScreen(origin_);
+
+  Shape now;
+  now.zoom = zoom;
+  now.emPx = emPx;
+  now.measure = measure;
+  now.left = topLeft.x;
+  now.top = topLeft.y;
+  now.cache = cacheVersion_;
+  // One field each, and no two sharing a bit: showSource at 0, reading at 1-2,
+  // focused at 3, justify at 4-5. Two fields overlapping here would be a box
+  // that quietly kept a stale layout in exactly one combination.
+  now.flags = (showSource_ ? 1u : 0u) | (static_cast<unsigned>(reading_) << 1) |
+              (focused_ ? 8u : 0u) | (static_cast<unsigned>(justify_) << 4);
+  now.caret = caretLine_;
+  now.hover = hoverLine_;
+  now.error = ErrorLine();
+  // What the injections would say. They are part of how wide a box is, and a
+  // knob moving is the one thing that changes them.
+  now.values = 2166136261u;
+  for (const mathprogram::Variable& variable : program_.variables()) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &variable.value, sizeof(bits));
+    now.values = (now.values ^ bits) * 16777619u;
+  }
+
+  if (now.SameShape(shape_)) {
+    // Panning moves a box without reshaping it, so the rows are shifted rather
+    // than measured again.
+    const float dx = now.left - shape_.left;
+    const float dy = now.top - shape_.top;
+    if (dx != 0.0f || dy != 0.0f) {
+      for (Row& row : g.rows) {
+        row.x += dx;
+        row.y += dy;
+        row.baseline += dy;
+      }
+      g.rect.x += dx;
+      g.rect.y += dy;
+      g.textLeftTop.x += dx;
+      g.textLeftTop.y += dy;
+      shape_ = now;
+    }
+    return g;
+  }
+  shape_ = now;
+
+  g.zoom = zoom;
+  g.emPx = emPx;
+  g.measure = measure;
   g.advance = fonts.Advance(Face::Mono, 'M', g.emPx);
   g.lineHeight = text::LineHeight(fonts, Face::Mono, g.emPx);
   g.ascent = text::Ascent(fonts, Face::Mono, g.emPx);
-
-  // The measure, in pixels: how far the words run before they wrap. A box that
-  // has never been given one takes a sensible measure from its own type size.
-  g.measure = (textWidth_ > 0.0f ? textWidth_ : em_ * kMeasureEms) * g.zoom;
-  EnsureCache(fonts, g.emPx, g.measure);
 
   // Padding is in proportion to the type, so growing a box grows the whole
   // card and not just what is written in it.
@@ -801,7 +928,6 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
   const float padX = kPadX * padScale * g.zoom;
   const float padY = kPadY * padScale * g.zoom;
 
-  const Vector2 topLeft = viewport.ToScreen(origin_);
   float y = topLeft.y + padY;
 
   g.rows.clear();
@@ -1446,7 +1572,7 @@ void CodeBlock::InsertNewline() {
 void CodeBlock::DeleteBefore() {
   if (EraseSelection()) return;
   std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
-  if (caretCol_ > 0) {
+  if (caretCol_ > FloorCol(caretLine_)) {
     PushUndo(EditKind::Delete);
     const int start = PrevBoundary(line, caretCol_);
     line.erase(static_cast<std::size_t>(start), static_cast<std::size_t>(caretCol_ - start));
@@ -1527,28 +1653,75 @@ void CodeBlock::MoveCaret(int dLine, int dChar) {
   blinkAnchor_ = GetTime();
 }
 
-void CodeBlock::MoveCaretByWord(int direction) {
+int CodeBlock::FloorCol(int line) const {
+  if (line < 0 || line >= static_cast<int>(lines_.size())) return 0;
+  if (!IsText() || showSource_) return 0;
+  return static_cast<int>(ProseOffset(static_cast<std::size_t>(line)));
+}
+
+int CodeBlock::WordBoundary(int direction) const {
   const std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
-  const int size = static_cast<int>(line.size());
+  const int          size = static_cast<int>(line.size());
+  int                i = caretCol_;
 
   if (direction < 0) {
-    if (caretCol_ == 0) { MoveCaret(0, -1); return; }
-    int i = caretCol_;
-    // Step back over any run of spaces, then over the word before it.
+    // Back over any run of spaces, then over the word before it.
     while (i > 0 && !IsWordChar(line[static_cast<std::size_t>(i - 1)])) --i;
     while (i > 0 && IsWordChar(line[static_cast<std::size_t>(i - 1)])) --i;
-    caretCol_ = i;
-    ClampCaret();   // a word back from the first word is still not the sigil
-  } else {
-    if (caretCol_ >= size) { MoveCaret(0, +1); return; }
-    int i = caretCol_;
-    while (i < size && IsWordChar(line[static_cast<std::size_t>(i)])) ++i;
-    while (i < size && !IsWordChar(line[static_cast<std::size_t>(i)])) ++i;
-    caretCol_ = i;
+    // A word back from the first word is still not the sigil.
+    return std::max(i, FloorCol(caretLine_));
   }
+  while (i < size && IsWordChar(line[static_cast<std::size_t>(i)])) ++i;
+  while (i < size && !IsWordChar(line[static_cast<std::size_t>(i)])) ++i;
+  return i;
+}
+
+void CodeBlock::MoveCaretByWord(int direction) {
+  if (direction < 0 && caretCol_ <= FloorCol(caretLine_)) {
+    MoveCaret(0, -1);
+    return;
+  }
+  if (direction > 0 && caretCol_ >= static_cast<int>(lines_[
+          static_cast<std::size_t>(caretLine_)].size())) {
+    MoveCaret(0, +1);
+    return;
+  }
+  caretCol_ = WordBoundary(direction);
+  ClampCaret();
   if (!ShiftDown()) SelectNone();
   caretUsed_ = true;
   blinkAnchor_ = GetTime();
+}
+
+// Ctrl and a delete take a whole word, which is what Ctrl and an arrow already
+// move by. At the start of a line there is no word to take, so the line break
+// is what goes -- the same thing the plain key would have done.
+void CodeBlock::DeleteWordBefore() {
+  if (EraseSelection()) return;
+  const int floor = FloorCol(caretLine_);
+  if (caretCol_ <= floor) {
+    DeleteBefore();
+    return;
+  }
+  PushUndo(EditKind::Delete);
+  const int    start = WordBoundary(-1);
+  std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
+  line.erase(static_cast<std::size_t>(start), static_cast<std::size_t>(caretCol_ - start));
+  caretCol_ = start;
+  TouchEdit();
+}
+
+void CodeBlock::DeleteWordAfter() {
+  if (EraseSelection()) return;
+  std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
+  if (caretCol_ >= static_cast<int>(line.size())) {
+    DeleteAt();
+    return;
+  }
+  PushUndo(EditKind::Delete);
+  const int end = WordBoundary(+1);
+  line.erase(static_cast<std::size_t>(caretCol_), static_cast<std::size_t>(end - caretCol_));
+  TouchEdit();
 }
 
 void CodeBlock::HandleInput() {
@@ -1584,8 +1757,8 @@ void CodeBlock::HandleInput() {
   // Ctrl+Enter is the compile shortcut, so it must not also insert a newline.
   if (Triggered(KEY_ENTER) && !ctrl) InsertNewline();
   if (Triggered(KEY_KP_ENTER) && !ctrl) InsertNewline();
-  if (Triggered(KEY_BACKSPACE)) DeleteBefore();
-  if (Triggered(KEY_DELETE)) DeleteAt();
+  if (Triggered(KEY_BACKSPACE)) ctrl ? DeleteWordBefore() : DeleteBefore();
+  if (Triggered(KEY_DELETE)) ctrl ? DeleteWordAfter() : DeleteAt();
   if (Triggered(KEY_LEFT)) MoveCaret(0, -1);
   if (Triggered(KEY_RIGHT)) MoveCaret(0, +1);
   if (Triggered(KEY_UP)) MoveCaret(-1, 0);
@@ -1663,33 +1836,16 @@ bool CodeBlock::HandleChrome(const Viewport& viewport, FontStore& fonts) {
   }
 
   if (!CheckCollisionPointRec(pointer, chrome.toggle)) return false;
-  if (pressed) showMath_ = !showMath_;
+  // Pressing it settles the question the other way, and it stays settled.
+  if (pressed) reading_ = ReadsAsCode() ? Reading::Maths : Reading::Code;
   return true;   // claim the hover too, so a click never falls through
 }
 
 void CodeBlock::RequestCompile() {
   dirty_ = false;
-
   // A text box is not a program. Nothing about words compiles, and trying
   // would put a diagnostic on a sentence.
-  if (IsText()) {
-    program_.Rebuild({});
-    outcome_ = {};
-    return;
-  }
-
-  // The mathematical reading comes first. Only a box that declares nothing
-  // falls back to the older `bool testFunc()` behaviour.
-  program_.Rebuild(lines_, vizSources_);
-  if (program_.state() != mathprogram::State::Empty) {
-    outcome_ = {};
-    return;
-  }
-
-  if (pending_.valid()) return;
-  outcome_.status = compiler::Status::Working;
-  pending_ = std::async(std::launch::async,
-                        [source = Text()] { return compiler::BuildAndRun(source); });
+  program_.Rebuild(IsText() ? std::vector<std::string>{} : lines_);
 }
 
 void CodeBlock::ReleaseGpu() {
@@ -1710,6 +1866,11 @@ void CodeBlock::ReleaseGpu() {
     traceBuffer_ = 0;
     traceFloats_ = 0;
   }
+  if (fnInBuffer_ != 0) { rlUnloadShaderBuffer(fnInBuffer_); fnInBuffer_ = 0; }
+  if (fnOutBuffer_ != 0) { rlUnloadShaderBuffer(fnOutBuffer_); fnOutBuffer_ = 0; }
+  if (haveFnTarget_) { UnloadRenderTexture(fnTarget_); haveFnTarget_ = false; }
+  if (samplerProgram_ != 0) { rlUnloadShaderProgram(samplerProgram_); samplerProgram_ = 0; }
+  if (samplerBuffer_ != 0) { rlUnloadShaderBuffer(samplerBuffer_); samplerBuffer_ = 0; }
   if (vizMeshProgram_ != 0) {
     rlUnloadShaderProgram(vizMeshProgram_);
     vizMeshProgram_ = 0;
@@ -1765,6 +1926,135 @@ void CodeBlock::RunVizMesh(float value) const {
   const int cap = mathprogram::Program::kVizVertexCap;
   vizTriCount_ = std::min<int>(static_cast<int>(counts[0]), cap);
   vizLineCount_ = std::min<int>(static_cast<int>(counts[1]), cap);
+}
+
+const std::vector<float>& CodeBlock::SamplerRun() const {
+  // The spread is a function of the box's lines and nothing else, so it is laid
+  // down once and then left alone.
+  if (samplerRan_ || samplerProgram_ == 0 || samplerBuffer_ == 0) return samplerRun_;
+  samplerRan_ = true;
+
+  const unsigned int zero = 0;
+  rlUpdateShaderBuffer(samplerBuffer_, &zero, sizeof(zero), 0);
+  rlEnableShader(samplerProgram_);
+  rlBindShaderBuffer(samplerBuffer_, 1);
+  rlComputeShaderDispatch(1, 1, 1);
+  rlDisableShader();
+  glext::Barrier(glext::kShaderStorage | glext::kBufferUpdate);
+
+  unsigned int laid = 0;
+  rlReadShaderBuffer(samplerBuffer_, &laid, sizeof(laid), 0);
+  const int count = std::min<int>(static_cast<int>(laid), program_.samplerCount());
+  const int floats = count * program_.samplerStride();
+  samplerRun_.assign(static_cast<std::size_t>(std::max(0, floats)), 0.0f);
+  if (floats > 0) {
+    // Past the counter, which leads the buffer.
+    rlReadShaderBuffer(samplerBuffer_, samplerRun_.data(),
+                       static_cast<unsigned int>(floats * static_cast<int>(sizeof(float))),
+                       static_cast<unsigned int>(sizeof(unsigned int)));
+  }
+  return samplerRun_;
+}
+
+std::vector<std::string> CodeBlock::SampledTypes() const {
+  std::vector<std::string> out;
+  for (const mathprogram::Function& fn : program_.functions()) {
+    if (!fn.sampled) continue;
+    for (const std::string& type : {fn.inputType, fn.outputType}) {
+      if (std::find(out.begin(), out.end(), type) == out.end()) out.push_back(type);
+    }
+  }
+  return out;
+}
+
+int CodeBlock::FunctionShown() const {
+  return program_.FunctionAt(ExecutedUpTo());
+}
+
+void CodeBlock::SetSampleInputs(const std::vector<float>& inputs, int count, int stride) {
+  const int room = mathprogram::Program::kMaxSamples;
+  const int many = std::clamp(count, 0, room);
+  if (static_cast<int>(inputs.size()) < many * stride) return;
+  if (sampling_.inputs.size() == static_cast<std::size_t>(many * stride) &&
+      std::equal(inputs.begin(), inputs.begin() + many * stride, sampling_.inputs.begin())) {
+    return;
+  }
+  sampling_.inputs.assign(inputs.begin(), inputs.begin() + many * stride);
+  sampling_.count = many;
+  sampling_.inStride = std::max(1, stride);
+  sampling_.ready = false;
+}
+
+// Putting the spread through the function. One fragment per sample, in a mode
+// that returns before the body -- what a function does is in its definition,
+// and the box's own lines have nothing to say about it.
+void CodeBlock::FeedFunction() {
+  const int which = FunctionShown();
+  if (which < 0) {
+    // Nothing is being read inside a function, so there is nothing to show.
+    // The spread itself is kept: it is the canvas's, not this moment's.
+    sampling_.ready = false;
+    return;
+  }
+  if (!haveShader_ || !haveFnTarget_ || !havePreviewSurface_) return;
+  const mathprogram::Function& fn = program_.functions()[static_cast<std::size_t>(which)];
+  sampling_.name = fn.name;
+  sampling_.inputType = fn.inputType;
+  sampling_.outputType = fn.outputType;
+  sampling_.inStride = fn.inStride;
+  sampling_.outStride = fn.outStride;
+  if (sampling_.count <= 0 || fnInBuffer_ == 0 || fnOutBuffer_ == 0) {
+    sampling_.ready = false;
+    return;
+  }
+
+  // Nothing has moved, so the answers on screen are still the answers.
+  std::vector<float> signature = sampling_.inputs;
+  signature.push_back(static_cast<float>(which));
+  for (const auto& [uniform, location] : uniforms_) {
+    const mathprogram::Literal* literal = program_.FindLiteral(uniform);
+    signature.push_back(literal == nullptr ? 0.0f : literal->value);
+  }
+  if (signature == fnSignature_ && sampling_.ready) return;
+  fnSignature_ = signature;
+
+  rlUpdateShaderBuffer(
+      fnInBuffer_, sampling_.inputs.data(),
+      static_cast<unsigned int>(sampling_.inputs.size() * sizeof(float)), 0);
+
+  for (const auto& [uniform, location] : uniforms_) {
+    if (location < 0) continue;
+    const mathprogram::Literal* literal = program_.FindLiteral(uniform);
+    if (literal == nullptr) continue;
+    SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
+  }
+  const int feedMode = 3;
+  if (modeLoc_ >= 0) SetShaderValue(shader_, modeLoc_, &feedMode, SHADER_UNIFORM_INT);
+  if (fnIndexLoc_ >= 0) SetShaderValue(shader_, fnIndexLoc_, &which, SHADER_UNIFORM_INT);
+  if (fnCountLoc_ >= 0) {
+    SetShaderValue(shader_, fnCountLoc_, &sampling_.count, SHADER_UNIFORM_INT);
+  }
+
+  rlBindShaderBuffer(fnInBuffer_, 3);
+  rlBindShaderBuffer(fnOutBuffer_, 4);
+
+  BeginTextureMode(fnTarget_);
+  rlDisableColorBlend();
+  BeginShaderMode(shader_);
+  DrawTexturePro(previewSurface_, {0.0f, 0.0f, 1.0f, 1.0f},
+                 {0.0f, 0.0f, static_cast<float>(sampling_.count), 1.0f}, {0.0f, 0.0f}, 0.0f,
+                 WHITE);
+  EndShaderMode();
+  rlEnableColorBlend();
+  EndTextureMode();
+
+  glext::Barrier(glext::kShaderStorage | glext::kBufferUpdate);
+
+  const int floats = sampling_.count * sampling_.outStride;
+  sampling_.outputs.assign(static_cast<std::size_t>(floats), 0.0f);
+  rlReadShaderBuffer(fnOutBuffer_, sampling_.outputs.data(),
+                     static_cast<unsigned int>(floats * static_cast<int>(sizeof(float))), 0);
+  sampling_.ready = true;
 }
 
 int CodeBlock::ExecutedUpTo() const {
@@ -1893,6 +2183,26 @@ void CodeBlock::CompileShader() {
     return;
   }
 
+  // A sampler box lays a spread of points down, so like a viz's mesh half it is
+  // a compute program writing into a buffer through an atomic counter.
+  if (!program_.samplerType().empty()) {
+    if (samplerProgram_ != 0) { rlUnloadShaderProgram(samplerProgram_); samplerProgram_ = 0; }
+    const unsigned int compiled =
+        rlCompileShader(program_.glslSampleSource().c_str(), RL_COMPUTE_SHADER);
+    if (compiled != 0) samplerProgram_ = rlLoadComputeShaderProgram(compiled);
+    if (samplerProgram_ != 0 && samplerBuffer_ == 0) {
+      const unsigned int bytes = static_cast<unsigned int>(
+          sizeof(unsigned int) +
+          static_cast<std::size_t>(mathprogram::Program::kMaxSamples) *
+              static_cast<std::size_t>(mathprogram::Program::kMaxStride) * sizeof(float));
+      samplerBuffer_ = rlLoadShaderBuffer(bytes, nullptr, RL_DYNAMIC_COPY);
+    }
+    samplerRan_ = false;
+    program_.ShaderCompiled(samplerProgram_ != 0,
+                            samplerProgram_ != 0 ? std::string() : "compute shader failed");
+    return;
+  }
+
   const bool ok = CompileShaderHalf(program_.glslVertexSource().c_str(),
                                     program_.glslSource().c_str(), &shader_, &log);
   haveShader_ = ok;
@@ -1925,6 +2235,26 @@ void CodeBlock::CompileShader() {
     indexLoc_ = GetShaderLocation(shader_, "sbIndex");
     shapeLoc_ = GetShaderLocation(shader_, "sbShape");
     thickLoc_ = GetShaderLocation(shader_, "sbThick");
+    orbitLoc_ = GetShaderLocation(shader_, "sbOrbit");
+    liftLoc_ = GetShaderLocation(shader_, "sbLift");
+
+    // And the slots for feeding a function, plus the two buffers and the strip
+    // of fragments that does it -- one fragment per sample.
+    fnIndexLoc_ = GetShaderLocation(shader_, "sbFnIndex");
+    fnCountLoc_ = GetShaderLocation(shader_, "sbFnCount");
+    if (!program_.functions().empty()) {
+      const unsigned int bytes = static_cast<unsigned int>(
+          static_cast<std::size_t>(mathprogram::Program::kMaxSamples) *
+          static_cast<std::size_t>(mathprogram::Program::kMaxStride) * sizeof(float));
+      if (fnInBuffer_ == 0) fnInBuffer_ = rlLoadShaderBuffer(bytes, nullptr, RL_DYNAMIC_COPY);
+      if (fnOutBuffer_ == 0) fnOutBuffer_ = rlLoadShaderBuffer(bytes, nullptr, RL_DYNAMIC_COPY);
+      if (!haveFnTarget_) {
+        fnTarget_ = LoadRenderTexture(mathprogram::Program::kMaxSamples, 1);
+        haveFnTarget_ = true;
+      }
+    }
+    fnSignature_.clear();
+    sampling_ = {};
 
     // One pixel of target for each derived value it has to report.
     const std::vector<std::string>& probed = program_.probedNames();
@@ -1992,16 +2322,7 @@ bool CodeBlock::BeginField(const std::string& name, int mode, Vector2 range, Vec
 
 void CodeBlock::EndField() const { EndShaderMode(); }
 
-bool CodeBlock::Draws() const {
-  for (const std::string& line : lines_) {
-    if (line.find("finalColor") != std::string::npos) return true;
-  }
-  return false;
-}
-
 void CodeBlock::Poll() {
-  program_.Poll();
-
   // What the windows show is what the values were where the box is being read.
   program_.ApplyTrace(ExecutedUpTo());
 
@@ -2010,11 +2331,11 @@ void CodeBlock::Poll() {
   const mathprogram::State state = program_.state();
   if (state == mathprogram::State::Shading) CompileShader();
 
-  // A box edited back into valid C++ should stop drawing the picture it used to
-  // be. While a rebuild is in flight the old one stays up, the way the knobs
-  // keep their old values.
+  // A box edited into something that no longer compiles should stop drawing the
+  // picture it used to be. While a rebuild is in flight the old one stays up,
+  // the way the knobs keep their old values.
   if ((haveShader_ || haveVizShader_) && state != mathprogram::State::ShaderReady &&
-      state != mathprogram::State::Building && state != mathprogram::State::Shading) {
+      state != mathprogram::State::Shading) {
     ReleaseGpu();
   }
 
@@ -2022,11 +2343,7 @@ void CodeBlock::Poll() {
   // something to show. The point they are read at was settled while drawing the
   // last frame, which is close enough to be imperceptible.
   ProbeIfNeeded();
-
-  if (!pending_.valid()) return;
-  if (pending_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
-  outcome_ = pending_.get();
-  pending_ = {};
+  FeedFunction();
 }
 
 void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
@@ -2171,23 +2488,6 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
     DrawRim(g.rect, g.zoom, dragging_ || selected_ || focused_);
   }
 
-  // The legacy result square, only for a box that has no variables of its own.
-  if (outcome_.status != compiler::Status::NotRun) {
-    const float side = kSquareSide * g.zoom;
-    const Rectangle square = {g.rect.x + g.rect.width + kSquareGap * g.zoom,
-                              g.rect.y + (g.rect.height - side) * 0.5f, side, side};
-    switch (outcome_.status) {
-      case compiler::Status::True:
-        DrawCard(square, g.zoom, kResultTrue, Fade(BLACK, 0.18f), 1.0f);
-        break;
-      case compiler::Status::False:
-        DrawCard(square, g.zoom, kResultFalse, Fade(BLACK, 0.18f), 1.0f);
-        break;
-      default:
-        DrawCard(square, g.zoom, kResultUnknown, Fade(BLACK, 0.15f), 1.0f);
-        break;
-    }
-  }
 }
 
 void CodeBlock::DrawChrome(const Viewport& viewport, FontStore& fonts) const {
@@ -2267,7 +2567,9 @@ void CodeBlock::DrawChrome(const Viewport& viewport, FontStore& fonts) const {
       const bool overToggle = CheckCollisionPointRec(pointer, chrome.toggle);
       DrawRectangleRounded(chrome.toggle, 0.35f, 8, overToggle ? kChromeHover : kChromeBg);
       // The label names what you will get, not what you have.
-      const char* label = showMath_ ? "code" : "math";
+      // The button says what pressing it would give you, so it asks what the
+      // box is doing rather than what was last chosen: in Auto those differ.
+      const char* label = ReadsAsCode() ? "math" : "code";
       const float labelWidth = text::Measure(fonts, Face::MainRegular, label, em);
       text::Draw(fonts, Face::MainRegular, label,
                  {chrome.toggle.x + (chrome.toggle.width - labelWidth) * 0.5f,
@@ -2371,35 +2673,15 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
     }
   }
 
-  // Whichever half of the machinery reported a problem, it is shown the same
-  // way: against the character the compiler pointed at.
-  bool        failed = false;
-  int         errorLine = 1;
-  int         errorColumn = 1;
-  std::string message;
-  // The next error after the one the caret points at. One mistake usually has
-  // another right behind it, and seeing both saves a round trip.
-  std::string secondary;
-
-  if (program_.state() == mathprogram::State::Failed && program_.error().present) {
-    failed = true;
-    errorLine = program_.error().line;
-    errorColumn = program_.error().column;
-    message = program_.error().message;
-    secondary = program_.error().secondary;
-  } else if (program_.state() == mathprogram::State::NoCompiler) {
-    message = program_.detail();
-  } else if (outcome_.status == compiler::Status::Failed && outcome_.error.present) {
-    failed = true;
-    errorLine = outcome_.error.line;
-    errorColumn = outcome_.error.column;
-    message = outcome_.error.message;
-    secondary = outcome_.error.secondary;
-  } else if (outcome_.status == compiler::Status::NoCompiler ||
-             outcome_.status == compiler::Status::Crashed) {
-    message = outcome_.detail.empty() ? "the program did not run" : outcome_.detail;
-  }
-  if (message.empty()) return;
+  // What the driver said, shown against the character it pointed at. The
+  // second error comes with it: one mistake usually has another right behind
+  // it, and seeing both saves a round trip.
+  if (program_.state() != mathprogram::State::Failed || !program_.error().present) return;
+  const bool         failed = true;
+  const int          errorLine = program_.error().line;
+  const int          errorColumn = program_.error().column;
+  const std::string& message = program_.error().message;
+  const std::string& secondary = program_.error().secondary;
 
   const Geometry& g = Measure(viewport, fonts);
   if (g.emPx < 0.4f || g.rows.empty()) return;

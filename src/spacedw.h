@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "blocks.h"
+#include "dock.h"
 #include "fontstore.h"
 #include "raylib.h"
 #include "touch.h"
@@ -65,11 +66,17 @@ struct SpaceWindow {
   Vector2 dragFrom{};
 };
 
-class SpacePanel {
+class SpacePanel : public Flanking {
  public:
   using Blocks = std::vector<std::unique_ptr<CodeBlock>>;
 
-  ~SpacePanel();
+  ~SpacePanel() override;
+
+  // The kinds before this one in the flanking order, so it knows how many slots
+  // beside a box are already taken. See dock.h.
+  void SetBefore(std::vector<const Flanking*> before) { before_ = std::move(before); }
+  int  FlankCount(const CodeBlock* block) const override;
+
 
   // A destructor cannot free what is on the GPU, so whoever destroys this
   // releases it first, by hand.
@@ -89,10 +96,22 @@ class SpacePanel {
   // number line's scroll already gets.
   bool Orbiting() const { return orbiting_; }
 
+  // Where the pointer is on one of a fed function's samples in one of these
+  // windows, if it is. A point in space is the answer to a question asked
+  // somewhere else, and pointing at it is one way of asking which question.
+  bool SampleUnder(Vector2 point, const Viewport& viewport, FontStore& fonts,
+                   const CodeBlock** block, int* sample) const;
+  // Where one end of a lit sample is on screen, so a wire can be drawn to it.
+  bool SampleMarker(const CodeBlock* block, int sample, bool output, const Viewport& viewport,
+                    FontStore& fonts, Vector2* out) const;
+
   bool Dragging() const { return dragging_; }
   bool Carrying() const { return dragging_ && dragMoved_; }
 
   // --- selection ----------------------------------------------------------
+  // As every other window: the lasso catches by the middle, a selected one
+  // wears its rim, and the whole selection moves and goes as one. The bodies
+  // are the shared ones in selection.h; what differs is what closing one means.
   void SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                     FontStore& fonts);
   void ClearSelection();
@@ -110,10 +129,15 @@ class SpacePanel {
 
  private:
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
+  // Where a point in the space lands on screen. The same projection the drawing
+  // used, carried through the blit that puts the scene on the canvas.
+  bool      Project(std::size_t index, Vector3 at, const Viewport& viewport, FontStore& fonts,
+                    Vector2* out) const;
   void      EnsureGpu();
   void      DrawScene(const SpaceWindow& window, Rectangle rect);
 
-  std::vector<SpaceWindow> windows_;
+  std::vector<SpaceWindow>     windows_;
+  std::vector<const Flanking*> before_;
 
   bool        dragging_ = false;
   std::size_t dragView_ = 0;

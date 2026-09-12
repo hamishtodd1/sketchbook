@@ -1,8 +1,21 @@
 // The window a shader is seen in.
 //
-// A box whose code turned out to be GLSL draws something, and this is where it
-// is drawn. Unlike a number line or a plot it stands for a whole box rather
-// than for one variable, so there is one of these per shader box.
+// Pictures: the window a *colour-valued* function of the plane is seen in.
+//
+// **A box draws because it defines a function**, and how many variables that
+// function takes decides which kind of window it gets: one is a curve on a
+// plot, two is this, three is a volume. They are separate kinds because each
+// has a different camera, and a display window is largely its camera -- this
+// one has none at all, because a colour has nowhere to go but the pixel it is
+// at and there is nothing to turn.
+//
+// A *real*-valued function of the plane goes next door to `surfacedw`, where
+// the answer has a third direction to use.
+//
+// One pixel for every input, coloured by what comes out: the colour itself for
+// a vec3, hue and lightness for a complex number. There is one of these per box
+// rather than per function, and it shows whichever the box is being read
+// inside.
 //
 // It is a window like the others: a rim to carry it by, the grid to land on,
 // and the drop target to throw it away on. What it is *not* is a control -- it
@@ -15,6 +28,7 @@
 #include <vector>
 
 #include "blocks.h"
+#include "dock.h"
 #include "fontstore.h"
 #include "raylib.h"
 #include "types/RealFunctionViz.h"
@@ -27,13 +41,22 @@ struct ShaderView {
   CodeBlock* block = nullptr;
   bool       docked = true;
   Vector2    worldPos{};
+  // The patch of the input plane on show. Its own scale, like every other
+  // window's -- the wheel over it zooms the picture rather than the canvas.
+  Vector2    centre{0.0f, 0.0f};
+  float      span = 4.0f;
   bool       selected = false;
   Vector2    dragFrom{};
 };
 
-class ShaderPanel {
+class ShaderPanel : public Flanking {
  public:
   using Blocks = std::vector<std::unique_ptr<CodeBlock>>;
+
+  // The kinds before this one in the flanking order, so it knows how many slots
+  // beside a box are already taken. See dock.h.
+  void SetBefore(std::vector<const Flanking*> before) { before_ = std::move(before); }
+  int  FlankCount(const CodeBlock* block) const override;
 
   bool Sync(const Blocks& blocks);
   void Forget(const CodeBlock* block);
@@ -56,15 +79,14 @@ class ShaderPanel {
   bool Carrying() const { return dragging_ && dragMoved_; }
 
   // --- selection ----------------------------------------------------------
-  // The lasso catches windows by their middle. A selected one wears its rim,
-  // moves with the rest of the selection, and goes with it.
+  // As every other window: the lasso catches by the middle, a selected one
+  // wears its rim, and the whole selection moves and goes as one. The bodies
+  // are the shared ones in selection.h; what differs is what closing one means.
   void SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                     FontStore& fonts);
   void ClearSelection();
   bool AnySelected() const;
   bool SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const;
-  // Remembers where everything selected is, so a drag can place it relative to
-  // there rather than accumulating a delta frame by frame.
   void BeginSelectionDrag();
   void MoveSelection(Vector2 worldDelta);
   void DeleteSelection();
@@ -79,7 +101,8 @@ class ShaderPanel {
  private:
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
 
-  std::vector<ShaderView> views_;
+  std::vector<ShaderView>       views_;
+  std::vector<const Flanking*>  before_;
 
   bool        dragging_ = false;
   std::size_t dragView_ = 0;

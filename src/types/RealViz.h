@@ -42,6 +42,13 @@ struct NumberLine {
   // markers rather than as points on the line -- a function has no one place to
   // be, but it has a value everywhere, and this axis already says what x is.
   std::vector<AxisRef> fields;
+  // Boxes whose function is being drawn by being fed: the spread of its inputs,
+  // or the spread of its answers, or both when a function goes from reals to
+  // reals of some other kind. The box rather than the function, because which
+  // function is being shown is decided by where the box is being read and
+  // changes as the caret moves -- and a window that came and went with the
+  // caret would be a window nobody could aim at.
+  std::vector<CodeBlock*> samples;
   float                centre = 0.0f;
   float                span = 4.0f;   // values across the full width
   // An axis frames itself once, when the values it carries first exist. Not
@@ -123,6 +130,15 @@ class AxisPanel {
   bool MarkerFor(const CodeBlock* block, const std::string& name, const Viewport& viewport,
                  FontStore& fonts, Vector2* out) const;
 
+  // Where the pointer is on one of a fed function's samples, if it is. Both
+  // ends are searched, because pointing at an answer is as good a way of asking
+  // about a sample as pointing at the sample is.
+  bool SampleUnder(Vector2 point, const Viewport& viewport, FontStore& fonts,
+                   const CodeBlock** block, int* sample) const;
+  // Where one end of a lit sample is on screen, so a wire can be drawn to it.
+  bool SampleMarker(const CodeBlock* block, int sample, bool output, const Viewport& viewport,
+                    FontStore& fonts, Vector2* out) const;
+
   // Takes a variable off the axis it shares with the rest of its box and starts
   // carrying it as an axis of its own, from the pointer. The drop is the same
   // drop any other carried row gets -- onto the canvas, onto another axis to
@@ -147,15 +163,14 @@ class AxisPanel {
   bool Carrying() const { return drag_ == Drag::Move && dragMoved_; }
 
   // --- selection ----------------------------------------------------------
-  // The lasso catches windows by their middle. A selected one wears its rim,
-  // moves with the rest of the selection, and goes with it.
+  // As every other window: the lasso catches by the middle, a selected one
+  // wears its rim, and the whole selection moves and goes as one. The bodies
+  // are the shared ones in selection.h; what differs is what closing one means.
   void SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                     FontStore& fonts);
   void ClearSelection();
   bool AnySelected() const;
   bool SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const;
-  // Remembers where everything selected is, so a drag can place it relative to
-  // there rather than accumulating a delta frame by frame.
   void BeginSelectionDrag();
   void MoveSelection(Vector2 worldDelta);
   void DeleteSelection();
@@ -217,6 +232,11 @@ class AxisPanel {
   std::string MakeVariable(std::size_t index, Vector2 pointer, const Viewport& viewport,
                            FontStore& fonts);
   const mathprogram::Variable* Resolve(const AxisRef& ref) const;
+  // Where one sample of a fed function sits on a row, and whether it is there
+  // at all -- the input spread and the answers are drawn on the same axis when
+  // both are reals, one above the line and one below.
+  bool SampleAt(std::size_t index, const CodeBlock* block, int sample, bool output,
+                const Viewport& viewport, FontStore& fonts, Vector2* out) const;
   // Where a variable's marker is drawn on its row: the dot that *is* the
   // variable, which is where a wire from its name should land.
   Vector2 MarkerAt(std::size_t index, const AxisRef& ref, const Viewport& viewport,

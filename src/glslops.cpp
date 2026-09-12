@@ -209,6 +209,17 @@ class Rewriter {
 
   // Precedence climbing. `least` is the loosest binding this call will take.
   void Expression(std::vector<Piece>* out, int least) {
+    // `return` takes an expression; it is not part of one. Without this,
+    // `return (a) * b;` reads as a *call* of `return` -- the name is an
+    // identifier and a bracket follows it -- and the rewrite duly makes one,
+    // which is a syntax error in a language where `return` is a keyword. It is
+    // emitted here rather than inside the expression so the operator wraps only
+    // what is being returned.
+    while (!AtEnd() && Peek().kind == Token::Kind::Ident && Peek().text == "return") {
+      out->push_back({Peek().text + " ", Peek().line});
+      ++at_;
+    }
+
     std::vector<Piece> left;
     Unary(&left);
 

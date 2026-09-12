@@ -1,14 +1,10 @@
 // RealFunction: a function from reals to reals.
 //
-// This is the type itself -- the C++ the app prepends to every program so that
-// `RealFunction f;` compiles -- and nothing about how one is drawn. That lives
-// next door in RealFunctionViz.*.
-//
-// The definition is deliberately thin. `RealFunction` *is* a
-// std::function<float(float)>, so there is nothing to learn and nothing to take
-// on trust: it is exactly what a C++ programmer already means by a function
-// from floats to floats. On top of that sit the operators that make these
-// functions a vector space.
+// There is almost nothing left of this type, and that is the point: a function
+// is a GLSL function now, so `RealFunction` is only a *spelling* -- the one that
+// says which arrow a function is, where GLSL knows only that the thing returns
+// a float. What remains is the name, and the shape the app chooses when someone
+// declares a function without saying what it is.
 //
 // No raylib here, and none in any type: the mathematics and the toolchain do
 // not know that a renderer exists.
@@ -18,34 +14,16 @@
 
 namespace sb::types::realfunction {
 
-// How the type is spelled in the user's C++.
+// How the type is spelled.
 inline constexpr const char* kName = "RealFunction";
 
-// The C++ prepended to every program that uses one: the type, its operators,
-// and the sampler that prints one back to the app.
-const char* Source();
+// The shape the app chose for a function nobody defined, as an expression in
+// `x`. Deterministic in the name, so a variable keeps the same example between
+// runs instead of jittering every time something is rebuilt.
+std::string ExampleBody(const std::string& name);
 
-// The statement that prints a variable of this type back. A real prints one
-// number; a function has to print its whole sample run, because there is no
-// other way to send a function to something that is going to draw it.
-std::string PrintStatement(const std::string& name);
-
-// A function the app chose, as the GLSL that defines it. The same four shapes
-// the C++ generator picks from and the same choice for a given name, so a box
-// reads the same whichever language it turns out to be.
+// The same thing, as the definition that is compiled. One generator behind
+// both, so what a hover shows and what the shader runs cannot drift apart.
 std::string ExampleGlsl(const std::string& name);
-
-// The window a function is sampled over, and how finely. Fixed at compile time
-// and wider than a plot shows by default, so zooming a plot out still has curve
-// to draw.
-inline constexpr int   kSampleCount = 193;
-inline constexpr float kSampleLo = -8.0f;
-inline constexpr float kSampleHi = 8.0f;
-
-// The input value the i-th sample was taken at.
-inline float SampleInput(int i) {
-  return kSampleLo + (kSampleHi - kSampleLo) * static_cast<float>(i) /
-                         static_cast<float>(kSampleCount - 1);
-}
 
 }  // namespace sb::types::realfunction

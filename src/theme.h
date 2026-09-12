@@ -319,9 +319,6 @@ inline Color VariableColor(int index) {
 inline constexpr float kMentionFillAlpha = 0.24f;
 
 // ------------------------------------------------------- compilation result
-inline constexpr Color kResultTrue    = { 214,  62,  58, 255 };  // testFunc() == true
-inline constexpr Color kResultFalse   = {  46, 104, 214, 255 };  // testFunc() == false
-inline constexpr Color kResultUnknown = { 178, 178, 182, 255 };  // building, or broken
 inline constexpr Color kErrorCaret    = { 236,  68,  62, 255 };
 
 // -------------------------------------------------------------------- menu

@@ -6,14 +6,13 @@
 #include "grid.h"
 #include "raymath.h"
 #include "rlgl.h"
+#include "selection.h"
 #include "theme.h"
 
 namespace sb {
 namespace {
 
 // How big one of these is on the canvas, and how far it sits from its box.
-constexpr float kSide = 300.0f;
-constexpr float kGap = 12.0f;
 
 // The cuboid. Not a box containing the space -- a window into it: what falls
 // outside is cut away, so the walls are where the world stops being drawn.
@@ -45,9 +44,8 @@ struct Point {
   bool    known = false;
 };
 
-Point PointOf(const std::vector<float>& c) {
+Point PointOf(const float* c) {
   Point p;
-  if (c.size() < 4) return p;
   p.known = true;
   const float w = c[3];
   const Vector3 dir = {c[2], c[1], c[0]};
@@ -61,6 +59,40 @@ Point PointOf(const std::vector<float>& c) {
   p.at = Vector3Scale(dir, 1.0f / w);
   return p;
 }
+
+Point PointOf(const std::vector<float>& c) {
+  if (c.size() < 4) return {};
+  return PointOf(c.data());
+}
+
+// The one type these windows show. A trivector of a four-generator algebra is a
+// point, and a point is what there is to draw here.
+constexpr const char* kPointType = "Tri";
+
+// Whether a box has a function whose input or answer is a point. Asked of every
+// function it defines rather than only the one being read, so the window stays
+// put as the caret moves.
+bool WantsPointSamples(const CodeBlock& block) {
+  for (const std::string& type : block.SampledTypes()) {
+    if (type == kPointType) return true;
+  }
+  return false;
+}
+
+// One end of a fed function, as a point in the space -- or nothing, if that end
+// is not a point at all.
+bool SamplePoint(const Sampling& fed, int index, bool output, Point* out) {
+  const std::string&        type = output ? fed.outputType : fed.inputType;
+  const int                 stride = output ? fed.outStride : fed.inStride;
+  const std::vector<float>& run = output ? fed.outputs : fed.inputs;
+  if (type != kPointType || stride != 4 || index < 0) return false;
+  if (static_cast<std::size_t>((index + 1) * 4) > run.size()) return false;
+  *out = PointOf(run.data() + static_cast<std::size_t>(index) * 4);
+  return out->known;
+}
+
+// How near counts as on a sample.
+constexpr float kSampleGrab = 11.0f;
 
 // Everything drawn in here shares one vertex shader. It is raylib's own, plus
 // the world position the limits are tested against.
@@ -217,19 +249,6 @@ void TurnInsideOut(Mesh* mesh) {
   }
 }
 
-bool LassoCatches(const std::vector<Vector2>& lasso, Rectangle rect) {
-  const Vector2 middle = {rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f};
-  bool inside = false;
-  for (std::size_t i = 0, j = lasso.size() - 1; i < lasso.size(); j = i++) {
-    if ((lasso[i].y > middle.y) == (lasso[j].y > middle.y)) continue;
-    const float x = (lasso[j].x - lasso[i].x) * (middle.y - lasso[i].y) /
-                        (lasso[j].y - lasso[i].y) +
-                    lasso[i].x;
-    if (middle.x < x) inside = !inside;
-  }
-  return inside;
-}
-
 }  // namespace
 
 clifford::Signature SignatureOf(SpaceKind kind) {
@@ -314,11 +333,19 @@ void SpacePanel::EnsureGpu() {
   haveGpu_ = true;
 }
 
+int SpacePanel::FlankCount(const CodeBlock* block) const {
+  int many = 0;
+  for (const SpaceWindow& window : windows_) {
+    if (window.docked && window.dock == block) ++many;
+  }
+  return many;
+}
+
 Rectangle SpacePanel::RectFor(std::size_t index, const Viewport& viewport,
                               FontStore& fonts) const {
-  const float zoom = viewport.Zoom();
+  const float        zoom = viewport.Zoom();
   const SpaceWindow& window = windows_[index];
-  const float side = kSide * zoom;
+  const float        side = kFlankSide * zoom;
 
   if (dragging_ && dragMoved_ && index == dragView_) {
     return {dragScreenPos_.x, dragScreenPos_.y, side, side};
@@ -327,8 +354,11 @@ Rectangle SpacePanel::RectFor(std::size_t index, const Viewport& viewport,
     const Vector2 topLeft = viewport.ToScreen(window.worldPos);
     return {topLeft.x, topLeft.y, side, side};
   }
-  const Rectangle card = window.dock->Measure(viewport, fonts).rect;
-  return {card.x + card.width + kGap * zoom, card.y, side, side};
+  int slot = FlankBase(before_, window.dock);
+  for (std::size_t i = 0; i < index; ++i) {
+    if (windows_[i].docked && windows_[i].dock == window.dock) ++slot;
+  }
+  return FlankRect(window.dock->Measure(viewport, fonts).rect, slot, zoom);
 }
 
 Rectangle SpacePanel::DockedBounds(const CodeBlock* block, const Viewport& viewport,
@@ -362,7 +392,11 @@ bool SpacePanel::Sync(const Blocks& blocks) {
       if (windows_[i].dock == block.get()) { existing = i; break; }
     }
 
-    if (wanted.empty()) {
+    // A box with no point of its own still gets a window if it has a function
+    // that answers with one: the answers have to land somewhere.
+    const bool spread = WantsPointSamples(*block);
+
+    if (wanted.empty() && !spread) {
       if (existing < windows_.size()) {
         windows_.erase(windows_.begin() + static_cast<long>(existing));
         changed = true;
@@ -433,7 +467,7 @@ bool SpacePanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
       }
     } else if (orbitView_ < windows_.size()) {
       SpaceWindow& window = windows_[orbitView_];
-      window.yaw -= (middle.x - orbitFrom_.x) * 0.01f;
+      window.yaw += (middle.x - orbitFrom_.x) * 0.01f;
       window.pitch -= (middle.y - orbitFrom_.y) * 0.01f;
       window.pitch = std::clamp(window.pitch, -PI / 2.01f, PI / 2.01f);
       orbitFrom_ = middle;
@@ -452,7 +486,9 @@ bool SpacePanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
     }
     SpaceWindow& window = windows_[orbitView_];
     const Vector2 now = GetMousePosition();
-    window.yaw -= (now.x - orbitFrom_.x) * 0.01f;
+    // Dragging right turns the right-hand side towards you, the way a hand on a
+    // globe does, and the same way round as every other window that turns.
+    window.yaw += (now.x - orbitFrom_.x) * 0.01f;
     window.pitch -= (now.y - orbitFrom_.y) * 0.01f;
     window.pitch = std::clamp(window.pitch, -PI / 2.01f, PI / 2.01f);
     orbitFrom_ = now;
@@ -516,10 +552,9 @@ bool SpacePanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
   return false;
 }
 
-void SpacePanel::DrawScene(const SpaceWindow& window, Rectangle rect) {
-  const int side = std::min(targetSide_, static_cast<int>(std::max(rect.width, rect.height)));
-  if (side <= 1) return;
+namespace {
 
+Camera3D CameraFor(const SpaceWindow& window) {
   Camera3D camera{};
   camera.target = {0.0f, 0.0f, 0.0f};
   camera.up = {0.0f, 1.0f, 0.0f};
@@ -528,12 +563,75 @@ void SpacePanel::DrawScene(const SpaceWindow& window, Rectangle rect) {
   camera.position = {0.0f, 0.0f, window.dist};
   camera.position = Vector3RotateByAxisAngle(camera.position, {1.0f, 0.0f, 0.0f}, window.pitch);
   camera.position = Vector3RotateByAxisAngle(camera.position, {0.0f, 1.0f, 0.0f}, window.yaw);
+  return camera;
+}
+
+}  // namespace
+
+bool SpacePanel::Project(std::size_t index, Vector3 at, const Viewport& viewport,
+                         FontStore& fonts, Vector2* out) const {
+  const Rectangle rect = RectFor(index, viewport, fonts);
+  const int       side = static_cast<int>(rect.width);
+  if (side <= 1) return false;
+  // A square viewport was what the scene was drawn into, so a square is what it
+  // is projected back through.
+  const Vector2 in = GetWorldToScreenEx(at, CameraFor(windows_[index]), side, side);
+  *out = {rect.x + in.x, rect.y + in.y};
+  return true;
+}
+
+bool SpacePanel::SampleMarker(const CodeBlock* block, int sample, bool output,
+                              const Viewport& viewport, FontStore& fonts, Vector2* out) const {
+  if (block == nullptr) return false;
+  Point point{};
+  if (!SamplePoint(block->Samples(), sample, output, &point)) return false;
+  for (std::size_t i = 0; i < windows_.size(); ++i) {
+    if (windows_[i].dock != block) continue;
+    return Project(i, point.at, viewport, fonts, out);
+  }
+  return false;
+}
+
+bool SpacePanel::SampleUnder(Vector2 point, const Viewport& viewport, FontStore& fonts,
+                             const CodeBlock** block, int* sample) const {
+  float best = kSampleGrab * kSampleGrab;
+  bool  found = false;
+  for (std::size_t i = 0; i < windows_.size(); ++i) {
+    const CodeBlock* dock = windows_[i].dock;
+    if (dock == nullptr || !dock->Samples().Live()) continue;
+    const Rectangle rect = RectFor(i, viewport, fonts);
+    if (!CheckCollisionPointRec(point, rect)) continue;
+    const Sampling& fed = dock->Samples();
+    for (int k = 0; k < fed.count; ++k) {
+      for (int end = 0; end < 2; ++end) {
+        Point where{};
+        if (!SamplePoint(fed, k, end == 1, &where)) continue;
+        Vector2 at{};
+        if (!Project(i, where.at, viewport, fonts, &at)) continue;
+        const float dx = at.x - point.x;
+        const float dy = at.y - point.y;
+        const float away = dx * dx + dy * dy;
+        if (away >= best) continue;
+        best = away;
+        found = true;
+        if (block != nullptr) *block = dock;
+        if (sample != nullptr) *sample = k;
+      }
+    }
+  }
+  return found;
+}
+
+void SpacePanel::DrawScene(const SpaceWindow& window, Rectangle rect) {
+  const int side = std::min(targetSide_, static_cast<int>(std::max(rect.width, rect.height)));
+  if (side <= 1) return;
+
+  const Camera3D camera = CameraFor(window);
 
   const Vector3 limitsMin = {-kLimitX, -kLimitY, -kLimitZ};
   const Vector3 limitsMax = {kLimitX, kLimitY, kLimitZ};
   const float   cull = window.cullOutside ? 1.0f : 0.0f;
   const float   exemptOn = 1.0f;
-  const float   exemptOff = 0.0f;
 
   SetShaderValue(solid_, solid_.locs[SHADER_LOC_VECTOR_VIEW], &camera.position,
                  SHADER_UNIFORM_VEC3);
@@ -576,6 +674,29 @@ void SpacePanel::DrawScene(const SpaceWindow& window, Rectangle rect) {
     }
   }
 
+  // And the spread a function is being fed with, if this box is being read
+  // inside one. A function has no one place to be, so this is what it looks
+  // like: every sample put through it, drawn where its answer lands. Smaller
+  // than a value's own marker, because a sample is a place the function was
+  // asked about rather than a value anybody chose.
+  if (window.dock != nullptr && window.dock->Samples().Live()) {
+    const Sampling& fed = window.dock->Samples();
+    const Color     tint = window.dock->VariableColor(fed.name);
+    const int       lit = window.dock->SampleHover();
+    for (int end = 0; end < 2; ++end) {
+      for (int k = 0; k < fed.count; ++k) {
+        Point where{};
+        if (!SamplePoint(fed, k, end == 1, &where)) continue;
+        const float exempt = where.atInfinity ? 1.0f : 0.0f;
+        SetShaderValue(solid_, atInfinityLoc_, &exempt, SHADER_UNIFORM_FLOAT);
+        const bool  on = (k == lit);
+        const float size = kPointRadius * (on ? 1.1f : 0.65f) *
+                           (where.atInfinity ? 6.0f : 1.0f);
+        DrawModel(ball_, where.at, size, tint);
+      }
+    }
+  }
+
   EndMode3D();
   EndTextureMode();
 
@@ -610,36 +731,23 @@ void SpacePanel::Draw(const Viewport& viewport, FontStore& fonts) {
 void SpacePanel::SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                               FontStore& fonts) {
   if (lasso.size() < 3) return;
-  for (std::size_t i = 0; i < windows_.size(); ++i) {
-    windows_[i].selected = LassoCatches(lasso, RectFor(i, viewport, fonts));
-  }
+  SelectCaught(windows_, lasso, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
 }
 
-void SpacePanel::ClearSelection() {
-  for (SpaceWindow& window : windows_) window.selected = false;
+void SpacePanel::ClearSelection() { ClearSelected(windows_); }
+
+bool SpacePanel::AnySelected() const { return sb::AnySelected(windows_); }
+
+bool SpacePanel::SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const {
+  return SelectedRim(windows_, point, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
 }
 
-bool SpacePanel::AnySelected() const {
-  for (const SpaceWindow& window : windows_) {
-    if (window.selected) return true;
-  }
-  return false;
-}
-
-bool SpacePanel::SelectedRimAt(Vector2 point, const Viewport& viewport,
-                               FontStore& fonts) const {
-  for (std::size_t i = 0; i < windows_.size(); ++i) {
-    if (!windows_[i].selected) continue;
-    if (PointOnRim(RectFor(i, viewport, fonts), point)) return true;
-  }
-  return false;
-}
-
-void SpacePanel::BeginSelectionDrag() {
-  for (SpaceWindow& window : windows_) window.dragFrom = window.worldPos;
-}
+void SpacePanel::BeginSelectionDrag() { RememberPositions(windows_); }
 
 void SpacePanel::MoveSelection(Vector2 worldDelta) {
+  // Not MoveSelected: one of these carried out of a selection comes off its box
+  // rather than staying docked to it, since a space window docks beside a box
+  // rather than under it and there is nothing to follow.
   for (SpaceWindow& window : windows_) {
     if (!window.selected) continue;
     window.docked = false;
@@ -647,18 +755,11 @@ void SpacePanel::MoveSelection(Vector2 worldDelta) {
   }
 }
 
-void SpacePanel::DeleteSelection() {
-  for (std::size_t i = windows_.size(); i-- > 0;) {
-    if (!windows_[i].selected) continue;
-    windows_.erase(windows_.begin() + static_cast<long>(i));
-  }
-}
+void SpacePanel::DeleteSelection() { EraseSelected(windows_); }
 
 void SpacePanel::DrawSelectionRims(const Viewport& viewport, FontStore& fonts) const {
-  for (std::size_t i = 0; i < windows_.size(); ++i) {
-    if (!windows_[i].selected) continue;
-    DrawRim(RectFor(i, viewport, fonts), viewport.Zoom(), true);
-  }
+  DrawSelectedRims(windows_, viewport.Zoom(),
+                   [&](std::size_t i) { return RectFor(i, viewport, fonts); });
 }
 
 void SpacePanel::Clear() {

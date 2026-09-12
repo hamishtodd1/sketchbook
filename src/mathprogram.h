@@ -1,19 +1,16 @@
 // The live program behind a box of mathematical lines.
 //
-// A box is compiled once. Its free variables are then passed in as command-line
-// arguments and every variable's value is printed back, so moving a knob costs
-// one process launch (a few milliseconds) instead of a rebuild.
+// A box is one shader. Its free variables reach it as uniforms standing behind
+// the literals they are assigned, so moving a knob costs the next frame rather
+// than a rebuild.
 //
 // The declaration the user writes stays abstract -- `float a;`. The initialiser
 // that makes it compile is injected here, never in their text.
 #pragma once
 
-#include <future>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include <map>
 
 #include "compiler.h"
 #include "types/RealFunction.h"
@@ -27,12 +24,6 @@ enum class Kind {
   Function,     // RealFunction: a function from reals to reals
   Multivector,  // an element of a Clifford algebra: Bi, Even, ...
 };
-
-// How a canvas says its own types are drawn: the C++ lines of every viz box on
-// it, by the type it names. They are injected into every program that declares a
-// value of that type, once per value, with `value` bound to it -- because the
-// only place a function can be sampled is the program that made it.
-using VizSources = std::map<std::string, std::vector<std::string>>;
 
 // One literal assignment to a variable, and the uniform standing behind it.
 //
@@ -53,6 +44,87 @@ struct Literal {
   float       value = 0.0f;
 };
 
+// What a type is, *as a space*.
+//
+// A function is drawn by what goes in and what comes out, and those are the
+// same question asked twice: how many dimensions, and what kind of thing. The
+// answer decides everything about how one is shown --
+//
+//   **the input decides the window.** One dimension is a line of pixels: the
+//   field along a number line. Two is a square of them: a picture. Three is a
+//   volume. Nothing else about the function comes into it.
+//
+//   **the output decides the colour.** A real is viridis, signed. A vec3 *is* a
+//   colour and is used as one. A complex number has an argument as well as a
+//   size, so it gets hue for the one and lightness for the other.
+//
+// That is why `Complex` is not `vec2`. They are the same two numbers and they
+// are not the same space: one is a place, the other is a place with a
+// multiplication, and the second is worth drawing differently.
+enum class Space {
+  None,   // nothing this canvas knows how to draw
+  R1,     // float
+  R2,     // vec2
+  R3,     // vec3
+  C,      // Complex
+  Multi,  // an element of the box's algebra
+};
+
+// How many numbers one value of it takes. A multivector's count depends on
+// which one, so it is not answered here.
+int Dimension(Space space);
+
+// A function defined in the box: `Tri p(float t) { ... }`.
+//
+// A function is recognised by its **shape**, not by a type name -- it is not a
+// value here, it is a machine, and the only things a window needs of one are
+// what goes in and what comes out. It runs from its signature to the brace that
+// closes it, and that span is what makes "the caret is inside this function" a
+// question with an answer -- which is what decides which function is being
+// shown.
+struct Function {
+  std::string name;
+  std::string inputType;    // as the user spelled it
+  std::string outputType;
+  int         firstLine = 0;   // the signature
+  int         lastLine = 0;    // the brace that closes it
+  // How many numbers one value takes: 1 for a real, one per component for a
+  // multivector. Samples travel as a flat run of floats, so this is the stride.
+  int         inStride = 1;
+  int         outStride = 1;
+  // What those types are as spaces, which is what decides how one is drawn.
+  Space       in = Space::None;
+  Space       out = Space::None;
+  // A function of reals to reals is already drawn two ways -- a curve on a plot
+  // and a field on an axis -- and those special cases win where they apply.
+  // Everything else falls back on being sampled.
+  bool        sampled = false;
+
+  bool Spans(int line) const { return line >= firstLine && line <= lastLine; }
+
+  // A function of two variables is a picture: one pixel per input. Whether the
+  // plane it is over is R2 or C changes only how the answer is coloured.
+  bool IsPicture() const {
+    return (in == Space::R2 || in == Space::C) &&
+           (out == Space::R1 || out == Space::R3 || out == Space::C);
+  }
+  // **And a real-valued one is a surface.** A colour has nowhere to go but the
+  // pixel it is at; a *number* has a third direction available, and using it is
+  // the difference between a picture of a landscape and the landscape. So this
+  // one is drawn as relief, seen from straight above to begin with -- which is
+  // the flat picture exactly -- and turned to be read as terrain.
+  bool IsSurface() const { return in == Space::R2 && out == Space::R1; }
+  // **And a function of three variables is a volume.** There is no surface to
+  // stand on and no pixel to put the answer at, so it is drawn as what it is: a
+  // quantity that is everywhere at once, thick where there is a lot of it and
+  // clear where there is none.
+  bool IsVolume() const {
+    return in == Space::R3 && (out == Space::R1 || out == Space::C);
+  }
+  // Anything with a window of its own to be drawn in.
+  bool IsDrawn() const { return IsPicture() || IsVolume(); }
+};
+
 struct Variable {
   std::string name;
   std::string type;       // as the user spelled it, which is what a viz claims
@@ -65,9 +137,6 @@ struct Variable {
   float       example = 0.0f;  // what the type's example generator produced
   float       value = 0.0f;    // Real: what it currently is
   bool        known = false;   // has a value actually been computed yet
-  // Function: what it evaluates to across the sample window below. A function
-  // cannot be printed as a number, so this is how one gets back to the screen.
-  std::vector<float> samples;
   // Multivector: its components, in the order its struct declares them. A
   // multivector is not one number, so it does not fit `value` -- but it is a
   // fixed, short list of them, so it needs nothing cleverer than this.
@@ -83,11 +152,6 @@ struct Variable {
     }
     return best;
   }
-  // What the canvas's viz for this type drew for this value: triangles and
-  // lines, x and y alternating, in the viz's own units. Empty unless the canvas
-  // defines one.
-  std::vector<float> mesh;
-  std::vector<float> lines;
 };
 
 // The point a fragment shader is being evaluated at. Worth a name out here
@@ -96,32 +160,26 @@ struct Variable {
 // canvas is concerned.
 inline constexpr const char* kShaderInput = "fragTexCoord";
 
-// A box is C++ by default. If the C++ compiler rejects it, the same text is
-// tried as GLSL -- the same lines, wrapped in different boilerplate -- because
-// a box that says `vec2 p = fragTexCoord;` was never meant to be C++.
+// There is one language. A box is GLSL, and compiling GLSL means talking to the
+// graphics context -- which this half of the program knows nothing about and
+// must keep knowing nothing about. So it assembles the source, stops, and waits
+// to be told what the driver said.
 enum class State {
   Empty,        // nothing to build
-  Building,     // a C++ compile is in flight
-  Shading,      // C++ rejected it; whoever owns the GPU should try the shader
-  Ready,        // built as C++, and values are live
-  ShaderReady,  // built as a shader, and its uniforms are live
-  Failed,       // neither language would take it
-  NoCompiler,   // nothing to build it with
+  Shading,      // assembled; whoever owns the GPU should compile it
+  ShaderReady,  // built, and its uniforms are live
+  Failed,       // the driver would not have it
 };
 
 class Program {
  public:
   Program() = default;
-  ~Program();
   Program(const Program&) = delete;
   Program& operator=(const Program&) = delete;
 
   // Rebuilds from the box's lines. Values of variables that survive the edit
   // are carried over, so editing does not reset the knobs you have set.
-  void Rebuild(const std::vector<std::string>& lines, const VizSources* vizes = nullptr);
-
-  // Collects finished builds and runs. Call every frame.
-  void Poll();
+  void Rebuild(const std::vector<std::string>& lines);
 
   // Sets a free variable and schedules a re-run. Repeated calls while a run is
   // in flight coalesce into a single follow-up, so dragging stays smooth.
@@ -147,16 +205,8 @@ class Program {
   // **vertex shader** that places those vertices, given the value and the scale
   // the window is drawn at. Which half a box is is decided the way it always
   // is: C++ first, and GLSL if C++ will not have it.
-  const std::string&        vizType() const { return vizType_; }
-  const std::vector<float>& vizMesh() const { return vizMesh_; }
-  const std::vector<float>& vizLines() const { return vizLines_; }
+  const std::string& vizType() const { return vizType_; }
 
-  // --- the shader half ----------------------------------------------------
-  //
-  // Compiling GLSL means talking to the graphics context, which this half of
-  // the program knows nothing about. So it assembles the source and hands it
-  // over: the host compiles it on the thread that owns the context and says
-  // what happened.
   const std::string& glslSource() const { return glsl_; }
   // The vertex half. Ours rather than raylib's default, because the fragment
   // half needs the texture coordinate under a private name: reporting a value
@@ -172,6 +222,32 @@ class Program {
   // `std::function` could only be sampled in the process that made it -- and
   // that reason went away when a function became GLSL.
   const std::string& glslMeshSource() const { return glslMesh_; }
+
+  // --- functions, and feeding them -----------------------------------------
+  //
+  // A function has no one place to be, so it is not shown as a value: it is
+  // shown by being *fed*. A spread of samples of its input space is drawn in
+  // whatever window that type goes in, every one of them is put through the
+  // function, and the answers are drawn in whatever window the output type goes
+  // in -- which may well be the same window.
+  const std::vector<Function>& functions() const { return functions_; }
+  // Which function is being read at `line`, or -1. Out of range means the end,
+  // which for a box that is nothing but a definition is inside it.
+  int FunctionAt(int line) const;
+
+  // `Samples(float, 24);` makes a box a **sampler**: it says how a type's space
+  // is spread out, and how thickly, rather than declaring a value of its own.
+  // Its body lays samples down with `sample(...)`, exactly as a viz's mesh half
+  // lays vertices down with `vertex(...)`, and for the same reason -- a spread
+  // is geometry, and geometry belongs on the GPU.
+  const std::string& samplerType() const { return samplerType_; }
+  int                samplerCount() const { return samplerCount_; }
+  int                samplerStride() const { return samplerStride_; }
+  const std::string& glslSampleSource() const { return glslSample_; }
+  // Anything that grows with use needs a bound, and this is a spread of dots on
+  // a window: past a couple of hundred they are a smear rather than a set.
+  static constexpr int kMaxSamples = 256;
+  static constexpr int kMaxStride = 16;
   // How many vertices either half may lay down before it is cut off.
   static constexpr int kVizVertexCap = 4096;
   // In the order `sbIndex` picks them.
@@ -196,71 +272,35 @@ class Program {
   const std::vector<std::string>& probedNames() const { return probed_; }
   // What the probe read, in probedNames() order.
   void                            SetProbedValues(const std::vector<float>& values);
-  // Lines of boilerplate before the user's first line in it, so a diagnostic
-  // can be moved back into the box's own coordinates.
-  int                shaderLineOffset() const { return glslLines_.bodyAt; }
-  void               ShaderCompiled(bool ok, const std::string& log);
+  void                            ShaderCompiled(bool ok, const std::string& log);
 
   State                        state() const { return state_; }
   const std::vector<Variable>& variables() const { return variables_; }
   const compiler::Diagnostic&  error() const { return error_; }
-  const std::string&           detail() const { return detail_; }
-  // How many lines were prepended to the user's text, for diagnostic mapping.
-  static int                   LineOffset();
 
  private:
-  // One printed line: a name and the numbers after its `=`. A real prints one
-  // number, a function prints its whole sample run.
-  struct RunValue {
-    std::string        name;
-    std::vector<float> numbers;
-  };
-  struct RunOutput {
-    bool                  ok = false;
-    std::vector<RunValue> values;
-  };
-
-  void Launch();
-
   std::vector<Variable> variables_;
   State                 state_ = State::Empty;
 
-  // The type this box draws, if it is a viz, and the mesh its C++ laid down --
-  // x, y, x, y, three vertices to a triangle.
+  // The type this box draws, if it is a viz.
   std::string           vizType_;
-  std::vector<float>    vizMesh_;
-  std::vector<float>    vizLines_;
-
-  // The shader the box would be, assembled alongside the C++ and only used if
-  // the C++ is refused.
-  std::string              glsl_;
+  std::string           glsl_;
 
   std::vector<std::string> functionNames_;
+  std::vector<Function>    functions_;
+  std::string              samplerType_;
+  int                      samplerCount_ = 0;
+  int                      samplerStride_ = 1;
+  std::string              glslSample_;
   std::string              glslMesh_;
   std::vector<std::pair<std::string, int>> tracedSlots_;
   int                      tracedLines_ = 0;
   std::vector<float>       trace_;
   std::vector<std::string> probed_;
   compiler::ShaderLines    glslLines_;
-  // Whether the text mentions anything only GLSL has. It decides which of two
-  // failures to report when neither language would take the box.
-  bool                 looksLikeGlsl_ = false;
-  compiler::Diagnostic cppError_;
-  compiler::Diagnostic  error_;
-  std::string           detail_;
-  std::string           exePath_;
+  compiler::Diagnostic     error_;
 
   std::vector<std::pair<std::string, float>> restore_;
-
-  std::future<compiler::Build> build_;
-  std::future<RunOutput>       run_;
-  bool                         runQueued_ = false;
-  // A rebuild asked for while one was already in flight. Dropping it would lose
-  // the ask entirely -- which is how a box that had not finished its first
-  // build would never learn that the canvas had said how to draw its type.
-  bool                         rebuildQueued_ = false;
-  std::vector<std::string>     queuedLines_;
-  const VizSources*            queuedVizes_ = nullptr;
 };
 
 }  // namespace sb::mathprogram

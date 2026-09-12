@@ -75,13 +75,13 @@ Info Probe(const std::string& path) {
                               " -show_entries format=duration"
                               " -of default=noprint_wrappers=1 " +
                               proc::Quote(path);
-  const proc::Result result = proc::Run(command, 8000);
-  if (!result.started) return info;
+  const std::string output = proc::Capture(command);
+  if (output.empty()) return info;
 
-  info.width = std::atoi(Field(result.output, "width").c_str());
-  info.height = std::atoi(Field(result.output, "height").c_str());
-  info.duration = std::atof(Field(result.output, "duration").c_str());
-  const double fps = Rational(Field(result.output, "avg_frame_rate"));
+  info.width = std::atoi(Field(output, "width").c_str());
+  info.height = std::atoi(Field(output, "height").c_str());
+  info.duration = std::atof(Field(output, "duration").c_str());
+  const double fps = Rational(Field(output, "avg_frame_rate"));
   if (fps > 0.1) info.fps = std::min<double>(fps, kMaxFrameRate);
   info.ok = info.width > 0 && info.height > 0;
   return info;

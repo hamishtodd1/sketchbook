@@ -84,10 +84,13 @@ void Viz::Draw(float value, Rectangle area, Vector4 view, float scale, Color tin
   rlDisableShader();
 }
 
-bool VizStore::Sync(const std::vector<std::unique_ptr<CodeBlock>>& blocks) {
+void VizStore::Sync(const std::vector<std::unique_ptr<CodeBlock>>& blocks) {
   vizes_.clear();
-  mathprogram::VizSources sources;
+  samplers_.clear();
   for (const std::unique_ptr<CodeBlock>& block : blocks) {
+    // A sampler box is a box like any other; what makes it one is a line in it.
+    if (!block->SamplerType().empty()) samplers_[block->SamplerType()] = block.get();
+
     const std::string& type = block->VizType();
     if (type.empty()) continue;
 
@@ -107,10 +110,11 @@ bool VizStore::Sync(const std::vector<std::unique_ptr<CodeBlock>>& blocks) {
       viz.tintLoc = block->VizUniform("sbTint");
     }
   }
+}
 
-  const bool changed = sources != sources_;
-  sources_ = std::move(sources);
-  return changed;
+const CodeBlock* VizStore::Sampler(const std::string& type) const {
+  const auto found = samplers_.find(type);
+  return (found == samplers_.end()) ? nullptr : found->second;
 }
 
 const Viz* VizStore::Find(const std::string& type, const std::string& window) const {

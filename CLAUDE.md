@@ -102,12 +102,31 @@ behind it, and it goes when the box stops needing it rather than at exit -- so
 the check is easy to run: open a canvas, close it, and the working directory
 should be empty.
 
-The known soft spots, in the order they will start to hurt: `CodeBlock::Measure`
-runs several times per frame per box, and placement leans on it again while a
-box is being dragged; `highlight::Cpp` re-tokenises every
-visible code line every frame; `tex::DrawLayout` re-resolves each glyph as it
-draws. All are fine at present scale and all are cheap to memoise when they stop
-being fine. Measure before optimising any of them.
+**`CodeBlock::Measure` is memoised, and it had to be.** It is asked for a dozen
+times a frame per box -- by every panel, by the placement, by every hit test --
+and measured, that was *half of all the CPU the app spent*: 1.0 ms of a 1.9 ms
+frame on a canvas of twenty boxes. So the answer is kept, along with a `Shape`
+saying what it is the answer to, and a pan only translates the rows it already
+has rather than laying them out again.
+
+The rule that made it safe is the one worth keeping: **a signature is compared
+whole**, so nothing can be forgotten by halves. Two things are deliberately
+*not* in it -- which algebra a box works in, and whether it is prose -- because
+both are read off the lines, and so cannot change without the line cache
+changing too. That same argument is what lets `EnsureCache` skip asking for the
+algebra on the common path, where asking meant parsing every line of every box a
+dozen times a frame.
+
+The suspicion recorded here before was wrong, and it is worth saying so: it
+named `highlight::Cpp` as a soft spot, and `highlight::Cpp` costs **0.02 ms a
+frame**. It re-tokenises only the code rows actually on screen, and there are
+rarely many. `tex::DrawLayout` never showed up at all. **Measure before
+optimising** is the rule, and this is what it is for.
+
+Where it stands now, on the sketches in `C:\sketches`: 1.6 to 2.5 ms of CPU a
+frame, worst frame 4 to 7 ms, against an 8.3 ms budget at 120 Hz. The one real
+spike is the frame a canvas is *loaded* on -- 100 to 200 ms, every shader on it
+compiled at once -- and that is a load, not an interaction.
 
 ### raylib is not permanent
 
@@ -116,7 +135,7 @@ keep it extractable.
 
 It is already out of the way in the half of the program that matters most: the
 mathematics and the toolchain do not know it exists. `mathline.*`,
-`mathprogram.*`, `compiler.*`, `process.*`, `filedialog.*`, `video.*` and a
+`mathprogram.*`, `compiler.*`, `process.*`, `selection.h`, `filedialog.*`, `video.*` and a
 type's own file (`types/RealFunction.*`, `types/examples.h`) include no raylib
 header and use no raylib type. `video.*` is the newest of them and was written
 to the rule: it hands back frames as bytes, and `media.cpp` is where those bytes
@@ -193,6 +212,55 @@ possible. GLSL should eventually be possible too.
 parts that do have a LaTeX equivalent become LaTeX inline, expanding or
 contracting that region of the box. The rest stays as code.
 
+**A function reads as an arrow, and what it returns reads as an equality.** A
+definition spread over several lines used to have no reading at all: the head
+was code, the `return` was code, and only the working in between was
+mathematics -- which is backwards, since the head and the return are the two
+lines that say what the function *is*. So the head is now the arrow,
+`swirl : R^2 -> R^3`, which is the whole of what a signature claims; and the
+`return` is the equality that settles it, `swirl(p) := ...`, set where the
+answer actually is.
+
+**And the braces are kept, set as mathematics.** They were dropped at first, on
+the grounds that the arrow had already said where the function began -- but that
+left a definition with no visible extent, and the lines of the body looked like
+lines of the box. So `\{` closes the signature and `\}` stands on its own line,
+in the maths face rather than the mono one: the same two characters the code
+has, saying the same thing, and no longer punctuation borrowed from C. A
+mathematician would set a single tall brace down the side of the body instead,
+and that is the better answer -- it wants layout across rows, which a box does
+not have, since every row here is typeset on its own.
+
+That needed the one thing this file never had: **a line read in the light of the
+lines around it.** A `return` is not a statement about anything until you know
+which function it is the answer of, so `mathline::Parse` takes an `Inside`
+saying which function encloses the line. The spans that decide it are worked out
+once, by `mathline::FindFunctions` -- which the toolchain was already using to
+hoist functions above `main`, so "where does this function end" is one answer
+asked from two directions rather than two answers that can disagree.
+
+The brace that closes a **loop** inside a function is not the brace that closes
+the function, and stays code. That is the whole of what `Inside::closes` is for,
+and it is the difference between the end of a definition and a block still being
+held open.
+
+A function with two `return`s reads as two definitions of the same thing, each
+true only under a condition that nothing on screen shows. That is left as it is:
+the honest answer is a piecewise brace, which wants the same layout down the
+side of several rows that the braces above want, and both can wait for it.
+
+**A part of a value is a subscript, and a constructor is not a function.** `p.x`
+is written `p_{x}`, which is what a mathematician has always written; `vec3(a,
+b, c)` is the tuple `(a, b, c)`; and `Complex(a, b)` is `a + bi`. The name in
+front of the brackets is how a language spells a value it has no notation for,
+and mathematics has the notation. The first of these is what makes the rest
+possible at all: a function of a vector talks mostly about the parts of its
+argument, so without member access its lines had no reading to give.
+
+The dot is the only character here that means two things, and which one is
+settled by what follows it: a digit makes it a decimal point, anything else
+makes it a reach into a value.
+
 **Numbers read as numbers.** `2.`, `2.0` and `2` are the same number, and it is
 written `2`. The trailing zeros and the trailing point are how a float is
 spelled in code, like the `f` suffix that was already being dropped -- none of
@@ -215,8 +283,21 @@ code, or code being edited. A line with no mathematical reading just stays code.
 
 **Editing a box means editing all of it.** Giving a box the caret turns the
 whole thing into code, and hides the injected values throughout: while you are
-editing, what you see is your own text. A toggle on the focused box switches it
-back to reading as mathematics, with only the caret's line left as code.
+editing, what you see is your own text.
+
+**The toggle does not flip the box, it settles it.** A box starts in neither
+state but in *auto*: mathematics while it is being read, code while it is being
+written, which is the rule just above. Pressing the toggle answers the question
+for good -- the box reads that way whether or not it has the caret, and whether
+or not you come back to it tomorrow. It used to be a flip that only applied
+while the box was focused, so pressing `code` and then clicking away put the
+mathematics straight back: a toggle that springs out the moment you let go of it
+has not done anything.
+
+The button says what *pressing* it would give you, which means it has to ask
+what the box is doing rather than what was last chosen -- in auto those are two
+different questions. Three states, two of them reachable by pressing, and the
+third only where you have not pressed yet.
 
 **Dragging across a box highlights its text**, and so does holding shift while
 the caret moves -- shift means only "leave the anchor where it is", which is one
@@ -668,6 +749,9 @@ for (int i = 0; i < 20; ++i) {             float px = value(-8.0f), py = -8.0f;
 `C:\sketches\viz.sketch` is exactly that, both of them, and editing any of the
 four boxes changes what is drawn on the next rebuild.
 
+`C:\sketches\spaces.sketch` is one of each window a function's type can ask
+for: a picture, a domain colouring, a surface and a volume.
+
 **A viz box is compiled standing alone as well**, with `value` an example of its
 type. That is what tells the two halves apart -- the mesh half is the one C++
 will have -- and it means a mistake in a viz is reported on the viz's own lines
@@ -975,6 +1059,21 @@ it and the window is *absorbed* -- it stops being drawn, and the cross swells to
 say so. Pull off and nothing has happened. Let go while it is absorbed and the
 window is gone. There is no close button on anything: one gesture, every window,
 and it is the tablet gesture rather than something to be learnt.
+
+**Every window answers the lasso the same way, and now says so once.** The eight
+things a panel does with a selection -- catch, clear, ask, find a rim, remember
+where everything was, move it, draw its rims, erase it -- were written out six
+times, once per kind of window, and are now written once in `selection.h`. All
+they ask of a window is that it has a `selected`, a `worldPos` and a `dragFrom`,
+and that whoever holds a row of them knows where the n-th one is on screen. What
+stays with each kind is the only part that was ever different: **what closing
+one means** -- a knob bakes its value into the code, a plot does not, a picture
+releases its texture.
+
+A third copy of the lasso hit test went with them, in `spacedw.cpp`, and it had
+quietly drifted: it tested against the raw stroke where everything else tests
+against the *closed* loop, so a space window was caught by the chord where every
+other window was caught by the curve.
 
 **A lasso selects.** Left-dragging the background draws a loop, and everything
 whose middle it went round is selected -- the middle rather than any overlap, so
@@ -1584,6 +1683,12 @@ and no machinery. Boolean work uses `&&`, `||` and `not()`.
 **Line breaks survive the rewrite**, so a driver diagnostic still lands on the
 line that was written.
 
+**`return` is a keyword, not a name.** It took a while to notice, because
+`return sin(x) * 2.0;` is fine: the trouble is only `return (a) * b;`, where an
+identifier is followed by a bracket and the rewrite reads a *call* of `return`.
+So it is lifted out before the climb starts, and the operator then wraps only
+what is being returned.
+
 **A function is a GLSL function.** `RealFunction w(float x) { return sin(x); }`
 -- written the way GLSL writes one, because that is what it becomes. It is
 hoisted above `main`, since GLSL has nowhere else to put a function, and the
@@ -1620,10 +1725,24 @@ it a point simply stopped appearing in its window.
 **Moving a knob no longer relaunches anything.** A literal is a uniform; the next
 frame draws with it. There is no process to re-run and nothing to wait for.
 
-KNOWN: the C++ *generation* is still in the tree -- `CxxPrologue`, the `body`
-string, `compiler::Compile`, `process.*`, `Variable::samples` -- unreachable but
-present. Deleting it is hygiene rather than behaviour, and it is the one part of
-this that has not been done.
+**And the C++ half is gone from the tree**, not merely unreached: the prologue,
+the `body` assembled beside the shader, `compiler::Compile`, `Execute`,
+`BuildAndRun`, `proc::Run`, `Variable::samples`, the outcome and the future it
+arrived in. About 1200 lines, and with them the last reason for this app to
+launch a compiler.
+
+Two things went with it that are worth knowing about, because both were bugs
+wearing the costume of a feature. A box that declared no variables used to spawn
+`g++` looking for `bool testFunc()`, so **a box of nothing but notes reported
+`'testFunc' was not declared in this scope`** in a red balloon; that is what the
+two empty boxes on `viz.sketch` were saying. And `VizSources` -- the map that
+once injected a viz's lines into every program owning a value of that type --
+had been empty for as long as a viz has been its own compute shader, so the
+whole path was plumbing carrying nothing.
+
+`process.*` stays, because `ffprobe` still has to be run and read. But `Run` and
+`Pipe` were two copies of the same CreateProcess dance, so what is left is
+`Capture`, which is `Pipe` read to the end -- ten lines where there were ninety.
 
 ### What a shader compile actually costs
 
@@ -1705,6 +1824,124 @@ KNOWN: a curve still breaks up slightly where it is very steep *and* sharply
 curved, because the slope is measured over a fixed step. A smaller step, or a
 proper distance estimate, would fix it.
 
+### A function is drawn by being fed
+
+A value has a place to be; a function does not. It is a machine, and the only
+way to see a machine is to put something through it. So:
+
+**A spread of samples of the input space is drawn in whatever window that type
+goes in, every one of them is put through the function, and the answers are drawn
+in whatever window the output type goes in** -- which may well be the same
+window. A real to a `Tri` of Cl(3,0,1) is a row of beads along a number line and
+a constellation of points in a space window, and those two runs are the same
+length and line up index for index.
+
+**Pointing at either end boxes both and draws a wire between them.** Pointing at
+an answer is as good a way of asking about a sample as pointing at the sample is,
+so both ends are searched, and both light up -- the whole claim being made is
+that they are two halves of one statement. The boxes are drawn twice, a pale
+halo under the value's own colour, because they land on a dark card, on the pale
+canvas and on a sky-blue window full of the very dots they are pointing at, and
+one stroke cannot read on all three. Nothing here can be grabbed: a sample is a
+place the function was *asked*, not a value anybody chose.
+
+**Which function is shown is the one the box is being read inside.** Put the
+caret on a signature, on a `return`, on either brace, or on any line between
+them, and that function is the one that gets fed. It is the same "executed up to
+here" that decides what every other window shows, asked of a span rather than of
+a line -- and a box that is nothing but a definition is read inside it by
+default, since the end of such a box is inside the function. Read anywhere else
+and the spread goes, because nothing is being asked.
+
+**A function is recognised by its shape, not by a type name.** `Tri p(float t)`
+is a function exactly as `float f(float x)` is. `RealFunction` survives only as
+one spelling of a float-returning one, because it says *which* arrow a function
+is where GLSL only knows the thing returns a float. A function runs from its
+signature to the brace that closes it, so it may be as many lines as it likes,
+and every line of it is hoisted -- which is what makes "the caret is inside this
+function" a question with an answer.
+
+**The special cases win where they apply, and there will be more of them.**
+Reals to reals is already drawn two ways -- a curve on a plot, a field on an axis
+-- and neither of those is sampling. Making this general will be **an ongoing
+accumulation of special cases** rather than one rule: a function to a `Tri` will
+one day want to be a curve through space rather than a row of beads, a function
+of two reals will want a surface, a function to a `Bi` will want lines rather
+than points, and every one of those is a thing somebody has to write. Sampling
+is the **fallback** -- what a function gets until something better has been said
+about its shape.
+
+### Where the spread comes from
+
+`Samples(float, 24);` on a line of its own makes a box a **sampler**: it says how
+a type's space is laid out, and how thickly, rather than declaring a value of its
+own. It is the third sigil and it behaves like the other two -- a statement
+*about* the box, never compiled, leaving a blank line behind, and set as
+mathematics: `S_{24} \subset \mathbb{R}`.
+
+Its body lays samples down, exactly as a viz's mesh half lays vertices down, and
+for the same reason: a spread of points is geometry, so it is a compute shader
+writing into a buffer through an atomic counter.
+
+```
+Samples(float, 40);
+for (int i = 0; i < sbCount; ++i)
+  pick(10.0 * (sbRand(i) - 0.5));
+```
+
+`pick` rather than `sample`, which is what the rule behind `vertex` and `line`
+would have called it: GLSL keeps `sample` for multisampling and will not have it
+as a name. `sbCount` is what the sigil asked for. `sbRand(i)` is a hash rather
+than anything random -- the same integer always gives the same number, because a
+canvas that spread itself differently every frame would be a canvas nobody could
+point at anything on.
+
+**A type with no sampler box gets the spread the app was born with**, exactly as
+a type with no viz box keeps the drawing it was born with: authoring one is how
+you take it over, not how you switch it on. Only the reals have one -- 24 of
+them, evenly across [-4, 4] -- because a spread of reals is the one thing the app
+can guess at. What a spread of *points* should be is a question only the person
+drawing it can answer.
+
+**The spread gets a row of its own**, like a function's field and for the same
+reason. The box's own values are read against a scale framed around them, and a
+function's domain is not one of those values: it is where the function is being
+asked, which is a different question and wants its own answer. So that row frames
+itself around the spread, the first time the spread exists.
+
+**Feeding happens in the box's own shader**, in a mode of its own, one fragment
+per sample -- so nothing extra is compiled, which is the rule the three modes
+already followed. Unlike drawing a function it comes *after* the body: it runs
+once per change over a couple of hundred fragments rather than per pixel per
+frame, so it can afford to be exact, and a fed function may read anything the box
+computed rather than only what its variables were declared with.
+
+### A box's variables are globals
+
+GLSL has nowhere to put a nested function, so a function the user writes is
+hoisted above `main` -- and **a hoisted function cannot see a local**. So a box's
+variables are globals, declared in the prologue before the functions, and the
+line that used to declare one now only assigns to it.
+
+`h(x) = f(x) + a w(x)` is exactly what this is for: a function whose shape a knob
+reshapes, which is the whole reason a function is GLSL at all. It did not work
+before this was written down. `realfunction.sketch` did not compile at all --
+`undefined variable "a"` -- and so drew no curves and no fields, silently,
+because a box whose diagnostic nobody is looking at fails quietly.
+
+A curve and a field return before the body, so before the modes branch every
+variable is set to the value it was *given* where it was declared. That is the
+right thing for them to go on: what a knob moves is exactly one of those
+literals. A function reading a variable the body *computes* is a different
+matter, and a drawing of it reads whatever the declaration left -- the body is
+not run per pixel, on purpose.
+
+This applies to a box's *variables*, which is to say the declarations the app
+understands. `vec2 p = fragTexCoord - 0.5;` is not one of those -- it has no
+mathematical reading and is passed through verbatim -- so it stays a local, and a
+function cannot see it. A viz box and a sampler box have no variables at all, so
+their declarations stay the locals they were written as.
+
 ### Two languages
 
 A box is **C++ by default**. If the C++ compiler refuses it, the same lines are
@@ -1759,14 +1996,159 @@ whichever language the text was trying to be, decided by whether it mentions a
 word only GLSL has. Without that rule someone writing a shader would be shown a
 C++ complaint about `vec2`, which is true and useless.
 
-A GLSL box shows **what it draws**, in a window beside the card. Unlike a number
-line or a plot it stands for a whole box rather than for one variable, so there
-is one per shader box; in every other way it is an ordinary window, with a rim
-to carry it by and the grid to land on.
+### What goes in, and what comes out
 
-Known edges: a box with no `float` declarations never reaches either compiler
-(the rule that keeps ordinary notes from being built), so a shader with no knobs
-does not run yet. `RealFunction` is C++ only.
+**A box draws because it defines a function of two variables.** It used to draw
+because its text mentioned `finalColor`, which is a fact about the file rather
+than about the mathematics: it said a box was a shader, when what is worth
+knowing is that a box computes a *map from the plane*, and a picture is what one
+of those looks like.
+
+So both halves of a function's type are read, and between them they decide
+everything:
+
+**The input decides the window -- and it is a different *kind* of window each
+time.** One variable is a curve on a plot. Two is a square of pixels. Three is a
+volume, looked *through* rather than at. They are separate kinds rather than one
+window in three moods, because **a display window is largely its camera**, and
+these three have three different ones:
+
+| | camera |
+| --- | --- |
+| R to R, on a plot | none: there is nothing to turn |
+| R2 to R3 or C, a picture | none either: a colour has nowhere to go but its pixel |
+| R2 to R, a surface | orthographic, and it turns |
+| R3 to anything, a volume | perspective, and it turns |
+
+The projections are not a preference. **A surface is a graph**, and a graph must
+draw the same quantity the same size wherever it stands -- under a perspective
+the same height would look different depending where on the sheet it was, which
+is the one thing a graph must not do. **A volume is a place you are looking
+into**, and there the near things being bigger is exactly what says they are
+near; take it away and a cloud has no depth in it at all. Same reason, opposite
+answers, because they are not the same kind of thing.
+
+So the wheel means different things over them too: over a surface it changes the
+patch of the plane on show, and over a volume it moves the eye, because under a
+perspective camera those are two separate things and moving is the one that says
+something -- going in takes you *into* the cloud.
+
+**Dragging right turns the right-hand side towards you**, the way a hand on a
+globe does, in every window that turns. It used to be the other way about, which
+is the hand *behind* the globe pushing it -- a real convention, and the wrong one
+for a thing you are holding rather than standing inside.
+
+**The output decides the colour.** A real is viridis, signed, and it is the same
+map a real gets in every other window, so green means the same number wherever
+it is read. A `vec3` *is* a colour and is used as one. A complex number has an
+argument as well as a size, so it gets the two channels that answer to that:
+hue for the argument and lightness for the size, black at a zero and white as it
+runs away. That is domain colouring, and it is why the next paragraph exists.
+
+| | R1 out | R3 out | C out |
+| --- | --- | --- | --- |
+| **R2 in** | a surface | a picture | a picture |
+| **C in** | -- | a picture | a picture |
+| **R3 in** | a volume | -- | a volume |
+
+**`Complex` is its own type, and not `vec2`.** They are the same two numbers and
+they are not the same space: one is a *place* and the other is a place with a
+multiplication on it, and a function of the second is worth drawing differently
+from a function of the first. Nothing has to guess which was meant, because the
+box said. It is written out for the shader only when a box mentions it, exactly
+as an algebra is, and its products answer to the names the operator rewrite
+produces -- so `z * w` is a complex multiplication, `~z` is the conjugate (which
+is what the reverse of a one-generator algebra is), and there is nothing extra
+to learn.
+
+### A surface is a picture you can turn
+
+**R2 to R1 is the case with somewhere else to put the answer.** A colour has
+nowhere to go but the pixel it is at; a *number* has a third direction going
+spare, and using it is the difference between a picture of a landscape and the
+landscape. So a real-valued function of the plane opens as the flat viridis
+picture -- exactly what it would have been -- and the right button turns it into
+relief. What looked like a texture turns out to have been a topographic map seen
+from directly above, which is a thing you find out rather than a thing you are
+told.
+
+**Orthographic, where the window that shows points is perspective.** That is not
+a preference. A `spaceDw` shows *points*, and there perspective is what tells you
+which of two is nearer. A surface is a graph, and under a perspective the same
+height would draw a different size depending on where it stood -- which is the
+one thing a graph must not do. Two windows, two projections, and each for the
+reason the other could not use.
+
+The eye never goes below the plane. A height field from underneath is a hole,
+and the flat picture is one end of the range rather than the middle of it.
+
+### And a volume is one you look through
+
+A function of three variables has no surface to stand on and no pixel to put the
+answer at, so it is drawn as what it is: a quantity that is everywhere at once,
+thick where there is a lot of it and clear where there is none. Viridis green
+for positive and yellow for negative, or hue for a complex one, accumulated
+front to back so what is nearer hides what is behind it.
+
+It starts *turned*, where a surface starts flat -- a volume looked at square is
+a wash with no depth in it, so there is no discovery to save for later.
+
+**Where the ray crosses is found properly, not stepped to.** A surface's colour
+is the height *at the point the ray hit*, so how precisely that point is found is
+not a question about smoothness -- it is a question about whether the colour is
+right. Taking the step the crossing was detected on banded the surface along the
+ray, and the bands moved with the camera, so a thing coloured by height read as
+though it were coloured by distance. Eight halvings between the two steps puts
+the crossing inside a pixel and the banding is gone.
+
+**A volume's cube is drawn as twelve lines.** The walls are where the function
+stops being drawn, and without them a cloud floats in nothing with no way to
+tell how big it is or which way it has been turned. They are drawn on this side
+rather than marched in the shader, because an edge is a line and lines are what
+this side is good at -- the price is that the camera is built twice, once in each
+language, and the two have to agree exactly or the box will not sit on the cloud
+it is the box of.
+
+**Both are marched in the fragment shader that is already there**, rather than
+meshed. A mesh would want a vertex buffer, a second program and a draw path of
+its own; the march is a dozen lines, it shares its eye and its film with the
+other, and it is the same shape of loop either way -- stop at the first crossing
+for a surface, keep going and accumulate for a volume. That the two windows are
+separate kinds and the two marches sit in one shader is not a contradiction: a
+window is where something is drawn and who may turn it, and that is exactly what
+differs; how the pixels are worked out is the box's business either way.
+
+A volume's march is clipped to its cube first, by the usual slab test, so its
+steps are spent where something could be rather than on the empty space in
+front.
+
+**Closing is remembered per kind.** A box can define a picture and a surface at
+once, and throwing one away must not take the other with it, so there is a flag
+each rather than the one there used to be.
+
+### Where a window goes before anybody moves it
+
+**Everything a box *makes* flanks the card**: the first to the right, the second
+to the left, the third under the first, the fourth under the second, and so on
+down the two columns. Alternating rather than filling one side and then the
+other, so a box with two windows has one on each side and reads as balanced.
+
+Before this, every kind independently asked for the same spot to the right, and
+a box with a picture and a space window put one on top of the other. The order
+is settled once, where the panels are chained (`App::Init`), and each kind only
+has to know how many slots the kinds before it have taken -- so no one of them
+owns the arrangement and adding a fifth is one line. It lives in `dock.h`, with
+one size for all of them, since two columns that do not line up in rows are not
+columns.
+
+**The ones a box is *read against* are not in it.** Its number lines and its
+plots stay under it, as wide as it is, because a number line is a scale the
+box's values are read on rather than a picture the box produced.
+
+Known edges: a box with no `float` declarations and no functions never reaches
+the compiler, which is the rule that keeps ordinary notes from being built. A
+box gets one window of each kind rather than one per function, and each shows
+whichever function of its kind the box is being read inside.
 
 ### Plots
 
@@ -1832,8 +2214,29 @@ own wheel.
 
 Editing a box turns the *whole* box into Monokai-coloured code, with a
 math/code toggle shown only while the box has the caret. Undo is Ctrl+Z;
-Ctrl+left/right move by word; Ctrl+C, Ctrl+X and Ctrl+V cut and paste the text
-through the system clipboard. A line the compiler
+Ctrl+left/right move by word and **Ctrl+backspace and Ctrl+delete take one**,
+by the same reckoning of where a word ends, so what a Ctrl+backspace removes is
+exactly what a Ctrl+left would have skipped over. At the start of a line there
+is no word to take and the line break goes instead, which is what the plain key
+would have done. Ctrl+C, Ctrl+X and Ctrl+V cut and paste the text
+through the system clipboard.
+
+**The pointer and the keyboard are two different claims.** Everything about
+where a press lands is settled by asking each window in turn whether the pointer
+is over it, and a window that answers yes has taken *the pointer* -- it has not
+taken the keys. Typing used to stand down for whatever the pointer happened to
+be over, which is a rule with an edge nobody can see: hold backspace, and a box
+shrinking under it slides a number line up under a motionless cursor, and the
+typing stops in the middle of a word for no reason the typist can point at. A
+box with the caret in it keeps the keyboard wherever the mouse is sitting. The
+one thing that does take the keys away is a video's trim time being typed into,
+because that is a caret too and there cannot be two.
+
+**And the caret cannot back into the sigil.** `\text` is not on screen while a
+text box is showing its words, so a backspace at the visual start of the
+paragraph used to eat a character of something invisible and turn the box back
+into code with nothing to see. The floor the caret is clamped to is the floor
+the deletes stop at. A line the compiler
 complained about always reveals its code, so the red caret has real characters
 to point at; the message sits in a white balloon in a proportional face.
 
@@ -1843,6 +2246,16 @@ used -- and seeing the second saves a round trip through the compiler to find
 it. The caret points at the first, so the second is written with its own line
 number; they are wrapped separately, so the two read as two rather than running
 into one sentence.
+
+**The log says almost nothing, on purpose.** raylib narrates every texture,
+framebuffer and vertex array it loads and unloads, one line each, and on a canvas
+that makes and throws away windows all day that is pages of it with nothing in
+them. So the log is **filtered rather than turned down** -- turned down would not
+work, because raylib tests the level *before* the callback runs and that callback
+is the only way a box's shader errors are caught at all. What survives is a
+whitelist of this app's own prefixes (`logging.h`), so a new one has to be added
+there to be heard; `--verbose` turns the whole filter off and is what the sweeps
+run with. A canvas that opens cleanly now prints nothing.
 
 Canvases save and load: Escape menu buttons, Ctrl+S (straight back to where the
 canvas came from) and Ctrl+O, plus `--open <file>` on the command line. The
@@ -1950,23 +2363,72 @@ A viz can now be written on the canvas itself. Two boxes saying `Viz(float);`
 them on the next rebuild. `C:\sketches\viz.sketch` is that, working. A type
 with no viz boxes keeps the drawing the app was born with.
 
-Key files: `mathline.*` (C++ subset -> LaTeX), `mathprogram.*` (assemble /
-compile / re-run, and the scaffolding a fragment is wrapped in), `types/` (one
-directory per supported type: what it is, how to make an example of it, how to
-draw it), `blocks.*` (per-line rendering and editing, code and prose alike),
-`media.*` (pictures and video as windows), `video.*` (the ffmpeg pipe, raylib
-free), `resize.*` (the wheel-resize rule and its snapping), `highlight.*`
-(Monokai), `viz.*` (the vocabulary above, and the viz boxes the canvas
-defines), `filedialog_win32.*` (open/save dialogs).
+A function from a real to a point works end to end. A box of
 
-`bool testFunc()` with its red/blue square still works, but only as a fallback
-for a box that declares no variables. It is scaffolding from before this
-direction existed and can go whenever it stops being useful.
+```
+Algebra(3,0,1);
+float k;
+Tri p(float t) {
+  float s = t * (1.0 + k);
+  return Tri(cos(s), sin(s), 0.5 * t, 1.0);
+}
+```
+
+gets a number line for `k`, a second row carrying a spread of samples of `t`, and
+a space window with the answers in it. Pointing at a bead or at a point boxes
+both and joins them. `C:\sketches\function.sketch` is that, with a
+`Samples(float, 40);` box beside it saying how the spread is made.
+
+Key files: `mathline.*` (one line of code -> LaTeX, and what shape a function
+is), `mathprogram.*` (assembling a box into its shader, and the scaffolding a
+fragment is wrapped in), `types/` (one directory per supported type: what it is,
+how to make an example of it, how to draw it), `blocks.*` (per-line rendering
+and editing, code and prose alike), `selection.h` (the lasso, and the eight
+things every panel does with what it caught), `compiler.*` (what is left of the
+toolchain: reading a driver's log), `dock.h` (where a window a box makes goes before anybody moves it),
+`logging.h` (what the log says, and mostly what it does not),
+`shaderwindow.*` (a colour-valued map of the plane, flat), `surfacedw.*` (a
+real-valued one, as relief under an orthographic camera), `volumedw.*` (a
+function of three variables, looked through under a perspective one),
+`media.*` (pictures and video as windows),
+`video.*` (the ffmpeg pipe, raylib free), `resize.*` (the wheel-resize rule and
+its snapping), `highlight.*` (Monokai), `viz.*` (the vocabulary above, and the
+viz boxes the canvas defines), `filedialog_win32.*` (open/save dialogs).
+
+`bool testFunc()` and its red/blue square are gone, along with the C++ toolchain
+that served them. A box that declares nothing now simply declares nothing.
 
 ## Open questions
 
 Kept here so they are not lost between sessions. Answered ones move up into the
 sections above.
+- **A merged plot no longer reframes.** It used to open out until every curve on
+  it was in view; the code that did it read a function's samples, and nothing
+  has filled those since a function became GLSL, so it had been doing nothing
+  for some time. It is deleted rather than left looking alive. Restoring it
+  means asking the GPU what range a function covers -- which the machinery for
+  feeding a function could now answer.
+
+- **A box carrying an algebra is a 120 KB shader**, and the standing worry was
+  that it would be the first thing to stutter. Measured, it is not: `pga` holds
+  a mean of 1.0 ms a frame and a worst of 2.8 ms, and its compile lands in the
+  load frame with every other shader on the canvas. The lever is still there --
+  emit only the products a box actually calls -- but there is nothing yet asking
+  for it.
+- **A function takes one argument.** `Tri p(float t)` is recognised; anything
+  with two parameters is not a function as far as the canvas is concerned, and
+  stays code. A product of two spaces is the obvious next shape and wants a
+  spread of pairs rather than a spread of points.
+
+- **A sample cannot be grabbed.** Pointing at one lights the pair; nothing can
+  be dragged, and dragging one would mean asking the function to be run
+  backwards, which is the solver we are not building. Dragging the *sampler* --
+  the box that made the spread -- is the thing that would actually make sense.
+
+- **A viz cannot say how a function is drawn**, only how a value is. The
+  sampling above is the app's, in the way the marker and the curve used to be
+  the app's, and the same move is available: a box that says how a spread of
+  answers is joined up would turn the row of beads into a curve through space.
 - A paragraph wraps to a measure, but nothing yet lets one **flow into the
   next** -- a body that outgrows its slide simply runs off the bottom of it.
   Nothing warns, either.
@@ -1988,14 +2450,6 @@ sections above.
   names, `Una301` and `Bi301`, which would make the algebra a property of the
   thing rather than of the box and would let two algebras share one canvas. A
   deck of slides about one algebra would rather say it once, though.
-
-- **A GLSL box carrying an algebra is a large shader.** Cl(3,0,1) with the
-  default types is about 150KB of generated GLSL, and shaders are compiled on
-  the thread that owns the graphics context -- there is nowhere else to compile
-  them. It has not been a problem yet (a box with one costs about a third of a
-  second more than one without), but it is the thing that would start to hurt
-  first, and the fix if it does is to emit only the products a box actually
-  calls rather than every product between the types it mentions.
 
 - **A multivector shows no injected value.** A real shows its number and a
   function shows its lambda, but a multivector of Cl(3,0,1) has sixteen

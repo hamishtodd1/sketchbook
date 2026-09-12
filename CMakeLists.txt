@@ -38,7 +38,11 @@ add_executable(sketchbook
   src/compiler.cpp
   src/mathprogram.cpp
   src/mathline.cpp
+  src/surfacedw.cpp
+  src/volumedw.cpp
   src/types/Clifford.cpp
+  src/types/Complex.cpp
+  src/types/Complex.cpp
   src/types/RealFunction.cpp
   src/types/RealViz.cpp
   src/types/RealFunctionViz.cpp

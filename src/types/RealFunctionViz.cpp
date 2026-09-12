@@ -51,51 +51,6 @@ std::string FormatTick(float value, float step) {
 
 }  // namespace
 
-// --------------------------------------------------------- example generator
-namespace types {
-
-std::string ExampleRealFunction(std::string_view name) {
-  // Stirred past the shared seed so that the shape and its coefficient are not
-  // picked from the same bits.
-  std::uint32_t hash = NameSeed(name);
-  auto next = [&hash]() {
-    hash ^= hash << 13;
-    hash ^= hash >> 17;
-    hash ^= hash << 5;
-    return hash;
-  };
-  auto between = [&next](float low, float high) {
-    const float t = static_cast<float>(next() % 1000u) / 1000.0f;
-    // Three decimals, like the reals: a number a person would not mind seeing
-    // written into their code.
-    return std::round((low + (high - low) * t) * 1000.0f) / 1000.0f;
-  };
-
-  // Four recognisable shapes: a wave, a parabola, a bump, a line.
-  char buffer[128];
-  switch (next() % 4u) {
-    case 0:
-      std::snprintf(buffer, sizeof(buffer), "[](float x) { return sin(%gf * x); }",
-                    static_cast<double>(between(0.5f, 2.5f)));
-      break;
-    case 1:
-      std::snprintf(buffer, sizeof(buffer), "[](float x) { return %gf * x * x; }",
-                    static_cast<double>(between(-1.0f, 1.0f)));
-      break;
-    case 2:
-      std::snprintf(buffer, sizeof(buffer), "[](float x) { return exp(-%gf * x * x); }",
-                    static_cast<double>(between(0.4f, 1.5f)));
-      break;
-    default:
-      std::snprintf(buffer, sizeof(buffer), "[](float x) { return %gf * x; }",
-                    static_cast<double>(between(-1.5f, 1.5f)));
-      break;
-  }
-  return buffer;
-}
-
-}  // namespace types
-
 // -------------------------------------------------------------------- the plot
 const mathprogram::Variable* PlotPanel::Resolve(const CurveRef& ref) const {
   if (ref.block == nullptr) return nullptr;
@@ -191,62 +146,36 @@ Rectangle PlotPanel::RectFor(std::size_t index, const Viewport& viewport,
 // ------------------------------------------------------------------ selection
 void PlotPanel::SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                              FontStore& fonts) {
-  for (std::size_t i = 0; i < plots_.size(); ++i) {
-    plots_[i].selected = LassoCatches(lasso, RectFor(i, viewport, fonts));
-  }
+  SelectCaught(plots_, lasso, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
 }
 
-void PlotPanel::ClearSelection() {
-  for (Plot& plot : plots_) plot.selected = false;
-}
+void PlotPanel::ClearSelection() { ClearSelected(plots_); }
 
-bool PlotPanel::AnySelected() const {
-  for (const Plot& plot : plots_) {
-    if (plot.selected) return true;
-  }
-  return false;
-}
+bool PlotPanel::AnySelected() const { return sb::AnySelected(plots_); }
 
 bool PlotPanel::SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const {
-  for (std::size_t i = 0; i < plots_.size(); ++i) {
-    if (!plots_[i].selected) continue;
-    if (PointOnRim(RectFor(i, viewport, fonts), point)) return true;
-  }
-  return false;
+  return SelectedRim(plots_, point, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
 }
 
-void PlotPanel::BeginSelectionDrag() {
-  for (Plot& plot : plots_) plot.dragFrom = plot.worldPos;
-}
+void PlotPanel::BeginSelectionDrag() { RememberPositions(plots_); }
 
-void PlotPanel::MoveSelection(Vector2 worldDelta) {
-  for (Plot& plot : plots_) {
-    // A docked row has no position of its own: it follows its box, and moves
-    // when the box does.
-    if (!plot.selected || plot.docked) continue;
-    plot.worldPos = {plot.dragFrom.x + worldDelta.x, plot.dragFrom.y + worldDelta.y};
-  }
-}
+void PlotPanel::MoveSelection(Vector2 worldDelta) { MoveSelected(plots_, worldDelta); }
 
 void PlotPanel::DeleteSelection() {
-  for (Plot& plot : plots_) {
+  for (const Plot& plot : plots_) {
     if (!plot.selected) continue;
     // A plot only ever showed you something, so there is nothing to save.
     for (const CurveRef& ref : plot.refs) {
       if (ref.block != nullptr) ref.block->Hide(ref.name);
     }
   }
-  plots_.erase(std::remove_if(plots_.begin(), plots_.end(),
-                              [](const Plot& plot) { return plot.selected; }),
-               plots_.end());
+  EraseSelected(plots_);
   drag_ = Drag::None;
 }
 
 void PlotPanel::DrawSelectionRims(const Viewport& viewport, FontStore& fonts) const {
-  for (std::size_t i = 0; i < plots_.size(); ++i) {
-    if (!plots_[i].selected) continue;
-    DrawRim(RectFor(i, viewport, fonts), viewport.Zoom(), true);
-  }
+  DrawSelectedRims(plots_, viewport.Zoom(),
+                   [&](std::size_t i) { return RectFor(i, viewport, fonts); });
 }
 
 bool PlotPanel::Shown(const CurveRef& ref) {
@@ -347,40 +276,6 @@ Rectangle PlotPanel::DockedBounds(const CodeBlock* block, const Viewport& viewpo
   return bounds;
 }
 
-void PlotPanel::Reframe(Plot& plot) const {
-  bool  any = false;
-  float low = 0.0f;
-  float high = 0.0f;
-  const float inputLow = plot.centre.y - plot.span * 0.5f;
-  const float inputHigh = plot.centre.y + plot.span * 0.5f;
-
-  for (const CurveRef& ref : plot.refs) {
-    const mathprogram::Variable* variable = Resolve(ref);
-    if (variable == nullptr) continue;
-    for (std::size_t i = 0; i < variable->samples.size(); ++i) {
-      // Only what is actually on screen: a parabola is unbounded, and framing
-      // its far tails would squash everything else to a line.
-      const float input = types::realfunction::SampleInput(static_cast<int>(i));
-      if (input < inputLow || input > inputHigh) continue;
-      const float value = variable->samples[i];
-      if (!std::isfinite(value)) continue;
-      if (!any) {
-        low = high = value;
-        any = true;
-        continue;
-      }
-      low = std::min(low, value);
-      high = std::max(high, value);
-    }
-  }
-  if (!any) return;
-
-  plot.centre.x = (low + high) * 0.5f;
-  // Never zoom in: the input range on show is not the merge's business.
-  const float wanted = (high - low) / kFramedFill;
-  if (wanted > plot.span) plot.span = std::min(wanted, kMaxSpan);
-}
-
 bool PlotPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
   if (plots_.empty()) return false;
   const Vector2 pointer = GetMousePosition();
@@ -416,9 +311,13 @@ bool PlotPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
 
           // Two functions against one set of axes. Nothing about either program
           // changes; this is a way of seeing a sum next to its parts.
+          //
+          // The host keeps its scale. A merged axis used to open out until
+          // everything on it was in view, and it cannot any more: a function is
+          // evaluated per pixel on the GPU, so nothing on this side knows what
+          // range it covers. Wheel the plot instead.
           Plot& host = plots_[i];
           for (const CurveRef& ref : plots_[dragPlot_].refs) host.refs.push_back(ref);
-          Reframe(host);
           plots_.erase(plots_.begin() + static_cast<std::ptrdiff_t>(dragPlot_));
           merged = true;
           break;
@@ -632,18 +531,6 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts, const VizStore*
         }
       }
 
-      if (variable->samples.empty()) continue;
-
-      bool    havePrevious = false;
-      Vector2 previous{};
-      for (std::size_t s = 0; s < variable->samples.size(); ++s) {
-        const float value = variable->samples[s];
-        if (!std::isfinite(value)) { havePrevious = false; continue; }
-        const Vector2 point = toScreen(value, types::realfunction::SampleInput(static_cast<int>(s)));
-        if (havePrevious) DrawLineEx(previous, point, thickness, tint);
-        previous = point;
-        havePrevious = true;
-      }
     }
 
     EndScissorMode();

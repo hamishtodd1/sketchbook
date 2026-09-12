@@ -21,7 +21,10 @@
 // is exactly what you watched yourself circle.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "raylib.h"
@@ -114,6 +117,97 @@ inline bool PointInLasso(const std::vector<Vector2>& lasso, Vector2 point) {
 // rather than any overlap, so that what is caught is exactly what was circled.
 inline bool LassoCatches(const std::vector<Vector2>& lasso, Rectangle rect) {
   return PointInLasso(lasso, {rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f});
+}
+
+// --------------------------------------------------------------- the windows
+//
+// Every window on this canvas answers the lasso the same way, so it is written
+// once rather than six times. All any of these needs is that a window has a
+// `selected` flag, a `worldPos` and a `dragFrom`, and that whoever holds a row
+// of them knows where the n-th one is on screen. What differs between the kinds
+// -- what closing one *means* -- stays with the kind, which is the only part
+// that was ever really different.
+
+// A panel holds its windows either by value or behind a pointer. This is how
+// one is reached either way.
+template <class T>
+T& Held(T& item) {
+  return item;
+}
+template <class T>
+const T& Held(const T& item) {
+  return item;
+}
+template <class T>
+T& Held(std::unique_ptr<T>& item) {
+  return *item;
+}
+template <class T>
+T& Held(const std::unique_ptr<T>& item) {
+  return *item;
+}
+
+template <class Items, class RectOf>
+void SelectCaught(Items& items, const std::vector<Vector2>& lasso, RectOf rectOf) {
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    Held(items[i]).selected = LassoCatches(lasso, rectOf(i));
+  }
+}
+
+template <class Items>
+void ClearSelected(Items& items) {
+  for (auto& item : items) Held(item).selected = false;
+}
+
+template <class Items>
+bool AnySelected(const Items& items) {
+  for (const auto& item : items) {
+    if (Held(item).selected) return true;
+  }
+  return false;
+}
+
+template <class Items, class RectOf>
+bool SelectedRim(const Items& items, Vector2 point, RectOf rectOf) {
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    if (Held(items[i]).selected && PointOnRim(rectOf(i), point)) return true;
+  }
+  return false;
+}
+
+// Where everything is now, so a drag can place it relative to there rather than
+// accumulating a delta frame by frame.
+template <class Items>
+void RememberPositions(Items& items) {
+  for (auto& item : items) Held(item).dragFrom = Held(item).worldPos;
+}
+
+template <class Items>
+void MoveSelected(Items& items, Vector2 worldDelta) {
+  for (auto& item : items) {
+    auto& window = Held(item);
+    if (!window.selected) continue;
+    // A docked window has no position of its own: it follows its box, and moves
+    // when the box does. A kind with nothing to dock to skips the question.
+    if constexpr (requires { window.docked; }) {
+      if (window.docked) continue;
+    }
+    window.worldPos = {window.dragFrom.x + worldDelta.x, window.dragFrom.y + worldDelta.y};
+  }
+}
+
+template <class Items, class RectOf>
+void DrawSelectedRims(const Items& items, float zoom, RectOf rectOf) {
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    if (Held(items[i]).selected) DrawRim(rectOf(i), zoom, true);
+  }
+}
+
+template <class Items>
+void EraseSelected(Items& items) {
+  items.erase(std::remove_if(items.begin(), items.end(),
+                             [](const auto& item) { return Held(item).selected; }),
+              items.end());
 }
 
 inline void DrawLasso(const std::vector<Vector2>& lasso) {

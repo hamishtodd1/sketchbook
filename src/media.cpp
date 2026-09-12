@@ -693,39 +693,22 @@ void MediaPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
 // ---------------------------------------------------------------- selection
 
 void MediaPanel::SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport) {
-  for (const std::unique_ptr<MediaItem>& item : items_) {
-    item->selected = LassoCatches(lasso, ScreenRect(*item, viewport));
-  }
+  SelectCaught(items_, lasso,
+               [&](std::size_t i) { return ScreenRect(*items_[i], viewport); });
 }
 
-void MediaPanel::ClearSelection() {
-  for (const std::unique_ptr<MediaItem>& item : items_) item->selected = false;
-}
+void MediaPanel::ClearSelection() { ClearSelected(items_); }
 
-bool MediaPanel::AnySelected() const {
-  for (const std::unique_ptr<MediaItem>& item : items_) {
-    if (item->selected) return true;
-  }
-  return false;
-}
+bool MediaPanel::AnySelected() const { return sb::AnySelected(items_); }
 
 bool MediaPanel::SelectedRimAt(Vector2 point, const Viewport& viewport) const {
-  for (const std::unique_ptr<MediaItem>& item : items_) {
-    if (item->selected && PointOnRim(ScreenRect(*item, viewport), point)) return true;
-  }
-  return false;
+  return SelectedRim(items_, point,
+                     [&](std::size_t i) { return ScreenRect(*items_[i], viewport); });
 }
 
-void MediaPanel::BeginSelectionDrag() {
-  for (const std::unique_ptr<MediaItem>& item : items_) item->dragFrom = item->worldPos;
-}
+void MediaPanel::BeginSelectionDrag() { RememberPositions(items_); }
 
-void MediaPanel::MoveSelection(Vector2 worldDelta) {
-  for (const std::unique_ptr<MediaItem>& item : items_) {
-    if (!item->selected) continue;
-    item->worldPos = {item->dragFrom.x + worldDelta.x, item->dragFrom.y + worldDelta.y};
-  }
-}
+void MediaPanel::MoveSelection(Vector2 worldDelta) { MoveSelected(items_, worldDelta); }
 
 void MediaPanel::SetSelectionAbsorbed(bool absorbed) {
   for (const std::unique_ptr<MediaItem>& item : items_) {

@@ -15,17 +15,12 @@
 #pragma once
 
 #include <cstdint>
-#include <string>
 #include <string_view>
 
 namespace sb::types {
 
 // A real: a tidy number.
 float ExampleReal(std::string_view name);
-
-// A function: a piece of C++. There is no other way to write one down, and it
-// is what gets compiled into the program.
-std::string ExampleRealFunction(std::string_view name);
 
 // The seed every generator starts from. FNV-1a over the name.
 inline std::uint32_t NameSeed(std::string_view name) {

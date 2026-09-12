@@ -6,7 +6,10 @@
 #include <fstream>
 #include <sstream>
 
+#include <vector>
+
 #include "app.h"
+#include "logging.h"
 #include "glext.h"
 #include "glslops.h"
 #include "raylib.h"
@@ -25,6 +28,13 @@ struct Args {
   // Dev only: print a file with its operators rewritten and exit, so the
   // rewrite can be checked without a window or a GPU.
   std::string rewrite;
+  // Dev only: read a file as if it were a box's lines and print the shader it
+  // assembles to. Same reason -- what a box turns into is worth being able to
+  // read without a GPU in the room.
+  std::string assemble;
+  // raylib says a great deal about what it is doing and almost none of it is
+  // worth reading. This turns the filter off when it is.
+  bool verbose = false;
   int         frames = 0;   // 0 means run until the window is closed
   std::string open;         // a .sketch canvas to load at startup
 };
@@ -41,6 +51,8 @@ Args ParseArgs(int argc, char** argv) {
     else if (flag == "--open" && hasValue) args.open = argv[++i];
     else if (flag == "--rewrite" && hasValue) args.rewrite = argv[++i];
     else if (flag == "--overloads") args.rewrite = "-";
+    else if (flag == "--assemble" && hasValue) args.assemble = argv[++i];
+    else if (flag == "--verbose") args.verbose = true;
     else if (flag[0] != '-') args.open = flag;   // a file dropped on the exe
   }
   if (!args.screenshot.empty() && args.frames <= 0) args.frames = 6;
@@ -87,6 +99,36 @@ std::string ResolveAssetDir() {
 int main(int argc, char** argv) {
   const Args args = ParseArgs(argc, argv);
 
+  // Nothing graphical either: read a file as a box's lines and print what it
+  // assembles to -- the shader, the sampler, or the viz's two halves.
+  if (!args.assemble.empty()) {
+    std::ifstream file(args.assemble, std::ios::binary);
+    if (!file) {
+      std::fprintf(stderr, "sketchbook: cannot read %s\n", args.assemble.c_str());
+      return 1;
+    }
+    std::vector<std::string> lines;
+    for (std::string line; std::getline(file, line);) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      lines.push_back(line);
+    }
+    sb::mathprogram::Program program;
+    program.Rebuild(lines);
+    for (const sb::mathprogram::Function& fn : program.functions()) {
+      std::printf("// function %s : %s -> %s   lines %d..%d  %s\n", fn.name.c_str(),
+                  fn.inputType.c_str(), fn.outputType.c_str(), fn.firstLine, fn.lastLine,
+                  fn.sampled ? "sampled" : "special-cased");
+    }
+    if (!program.glslSampleSource().empty()) {
+      std::printf("%s", program.glslSampleSource().c_str());
+    } else if (!program.glslMeshSource().empty()) {
+      std::printf("%s", program.glslMeshSource().c_str());
+    } else {
+      std::printf("%s", program.glslSource().c_str());
+    }
+    return 0;
+  }
+
   // Nothing graphical: read a file, rewrite its operators, print it.
   if (!args.rewrite.empty()) {
     if (args.rewrite == "-") {
@@ -116,6 +158,9 @@ int main(int argc, char** argv) {
   // factor while GetMousePosition() keeps reporting unscaled coordinates. Off,
   // screen size, render size, mouse position and the WM_POINTER touch
   // coordinates are all the same pixel space.
+  // Before the window, so the window's own narration goes through it too.
+  sb::log::Install(args.verbose);
+
   SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
   InitWindow(args.width, args.height, "Sketchbook");
   if (!IsWindowReady()) {
@@ -125,7 +170,7 @@ int main(int argc, char** argv) {
   // The GL entry points raylib does not wrap. After the window, because asking
   // the driver for one needs a current context.
   if (!sb::glext::Init()) {
-    TraceLog(LOG_WARNING, "GL: no glMemoryBarrier; compute results will be read back instead");
+    TraceLog(LOG_WARNING, "GLEXT: no glMemoryBarrier; compute results will be read back instead");
   }
   // Shaders are compiled on the thread that owns the context, and a box builds
   // several of them at once. This lets the driver spread that over threads of
@@ -133,7 +178,7 @@ int main(int argc, char** argv) {
   if (sb::glext::ParallelCompile()) {
     sb::glext::UseAllCompilerThreads();
   } else {
-    TraceLog(LOG_WARNING, "GL: parallel shader compile unavailable (KHR advertised %d, ARB %d)",
+    TraceLog(LOG_WARNING, "GLEXT: parallel shader compile unavailable (KHR advertised %d, ARB %d)",
              sb::glext::HasExtension("GL_KHR_parallel_shader_compile") ? 1 : 0,
              sb::glext::HasExtension("GL_ARB_parallel_shader_compile") ? 1 : 0);
   }

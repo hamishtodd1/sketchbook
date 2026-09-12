@@ -1,4 +1,4 @@
-// Running a child process and capturing what it prints.
+// Running a child process and reading what it prints as it goes.
 //
 // Like touch_win32, this deliberately never includes raylib.h, because
 // <windows.h> also declares Rectangle, CloseWindow and ShowCursor.
@@ -10,23 +10,15 @@
 
 namespace sb::proc {
 
-struct Result {
-  bool        started = false;   // false if the executable could not be launched
-  bool        timedOut = false;
-  int         exitCode = -1;
-  std::string output;            // stdout and stderr, interleaved
-};
-
-// Runs `commandLine` with no console window and waits for it, up to
-// `timeoutMs`. On timeout the child is killed and `timedOut` is set.
-Result Run(const std::string& commandLine, int timeoutMs);
-
 // Quotes a path for use as one argument of a command line.
 std::string Quote(const std::string& value);
 
+// Runs a command to completion and returns everything it wrote to stdout, or
+// nothing if it could not be started. For a tool that says a little and stops.
+std::string Capture(const std::string& commandLine);
+
 // A child whose output is read *while it runs* rather than collected at the
-// end. Run() is the right shape for a compiler, which says a little and stops;
-// this is the right shape for a decoder, which says a great deal and would
+// end. That is the shape a decoder wants: it says a great deal, and would
 // otherwise have to finish -- and be held in memory whole -- before anything
 // could be shown.
 //

@@ -13,6 +13,8 @@
 #include "selection.h"
 #include "slides.h"
 #include "shaderwindow.h"
+#include "surfacedw.h"
+#include "volumedw.h"
 #include "spacedw.h"
 #include "ui.h"
 #include "viewport.h"
@@ -80,6 +82,12 @@ class App {
   // Returns true while the gesture owns the input.
   bool HandleCompose();
   void DrawCompose();
+  // Feeding every function that is being read, from whatever the canvas says a
+  // spread of its input type looks like.
+  void FeedFunctions();
+  // The pair the pointer is on -- one sample and the answer it turned into --
+  // boxed at both ends and joined by a wire.
+  void DrawSampleLink();
   // Writes `float <fresh> = <a> <op> <b>;` into the box the two came from.
   void ComposeInto(const std::string& op);
 
@@ -133,6 +141,12 @@ class App {
   AxisPanel                               axes_;
   PlotPanel                               plots_;
   ShaderPanel                             shaders_;
+  // One kind of window per shape of function: a colour-valued map of the plane
+  // is a picture with no camera, a real-valued one is a surface under an
+  // orthographic camera, and a function of three variables is a volume under a
+  // perspective one.
+  SurfacePanel                            surfaces_;
+  VolumePanel                             volumes_;
   SpacePanel                              spaces_;
   // Pictures and video. Not mathematics, so not in types/ -- but windows, and
   // so subject to every rule the others are.
@@ -201,7 +215,8 @@ class App {
   struct Clipping {
     std::vector<std::string>                   lines;
     float                                      em = 26.0f;
-    bool                                       showMath = false;
+    // How the box reads: 0 auto, 1 mathematics, 2 code.
+    int                                        showMath = 0;
     // How a text box is set. A copy that lost its formatting would not be one.
     bool                                       bold = false;
     bool                                       italic = false;

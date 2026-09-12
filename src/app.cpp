@@ -36,15 +36,16 @@ bool App::Init(const std::string& assetDir, std::string* error) {
   SetGridBaseStep(text::LineHeight(fonts_, Face::Mono, kDefaultBlockEm));
 
   viewport_.Reset({0.0f, 0.0f}, kDefaultZoom);
-  // Plots stack under the number lines, so they have to know how tall those are.
+  // Everything docked under a box stacks in one column, each kind asking the
+  // kinds above it how far down the column has already got.
   plots_.SetAxes(&axes_);
-
-  if (compiler::ToolchainPath().empty()) {
-    TraceLog(LOG_WARNING,
-             "COMPILER: no C++ compiler found; set SKETCHBOOK_CXX to enable code blocks");
-  } else {
-    TraceLog(LOG_INFO, "COMPILER: using %s", compiler::ToolchainPath().c_str());
-  }
+  // And everything a box *makes* flanks it, in this order: right, left, right
+  // below the first, left below the second. Each kind only has to know how many
+  // slots the kinds before it have taken.
+  shaders_.SetBefore({});
+  surfaces_.SetBefore({&shaders_});
+  volumes_.SetBefore({&shaders_, &surfaces_});
+  spaces_.SetBefore({&shaders_, &surfaces_, &volumes_});
 
   // Nothing is put on the canvas. It opens empty, because what belongs on it is
   // whatever you are about to put there -- and a starting card is a thing to
@@ -105,6 +106,8 @@ Rectangle App::Footprint(const CodeBlock* block) {
   const Rectangle docks[] = {axes_.DockedBounds(block, viewport_, fonts_),
                              plots_.DockedBounds(block, viewport_, fonts_),
                              shaders_.DockedBounds(block, viewport_, fonts_),
+                             surfaces_.DockedBounds(block, viewport_, fonts_),
+                             volumes_.DockedBounds(block, viewport_, fonts_),
                              spaces_.DockedBounds(block, viewport_, fonts_)};
   for (const Rectangle& dock : docks) {
     if (dock.width <= 0.0f || dock.height <= 0.0f) continue;
@@ -247,6 +250,8 @@ void App::RemoveBlock(CodeBlock* block) {
   axes_.Forget(block);
   plots_.Forget(block);
   shaders_.Forget(block);
+  surfaces_.Forget(block);
+  volumes_.Forget(block);
   spaces_.Forget(block);
   block->ReleaseGpu();
   codeBlocks_.erase(std::remove_if(codeBlocks_.begin(), codeBlocks_.end(),
@@ -264,11 +269,8 @@ void App::SetFocus(CodeBlock* block) {
     previous->SetFocused(false);
     focus_ = nullptr;
 
-    // A block the user opened and left completely empty is not content. Drop it
-    // before considering a build: destroying a block with a build in flight
-    // would block on the future and stall the frame.
-    if (previous->Empty() && previous->Status() == compiler::Status::NotRun &&
-        previous->Variables().empty()) {
+    // A block the user opened and left completely empty is not content.
+    if (previous->Empty() && previous->Variables().empty()) {
       if (block == previous) block = nullptr;
       RemoveBlock(previous);
     } else if (previous->Dirty()) {
@@ -290,7 +292,6 @@ CodeBlock* App::NewBlockAtCentre() {
   const Vector2 world = viewport_.ToWorld({centre.x - 120.0f, centre.y - 30.0f});
   codeBlocks_.push_back(
       std::make_unique<CodeBlock>(world, kDefaultBlockEm, std::vector<std::string>{}));
-  codeBlocks_.back()->SetVizSources(&vizes_.Sources());
   CodeBlock* block = codeBlocks_.back().get();
   // The middle of the screen may well be occupied; the new box goes to the
   // nearest free dot instead of opening on top of what is there.
@@ -305,6 +306,8 @@ void App::ClearSelection() {
   axes_.ClearSelection();
   plots_.ClearSelection();
   shaders_.ClearSelection();
+  surfaces_.ClearSelection();
+  volumes_.ClearSelection();
   spaces_.ClearSelection();
   media_.ClearSelection();
 }
@@ -314,6 +317,7 @@ bool App::AnySelected() const {
     if (block->Selected()) return true;
   }
   return axes_.AnySelected() || plots_.AnySelected() || shaders_.AnySelected() ||
+         surfaces_.AnySelected() || volumes_.AnySelected() ||
          spaces_.AnySelected() || media_.AnySelected();
 }
 
@@ -324,6 +328,8 @@ bool App::SelectedRimAt(Vector2 point) {
   return axes_.SelectedRimAt(point, viewport_, fonts_) ||
          plots_.SelectedRimAt(point, viewport_, fonts_) ||
          shaders_.SelectedRimAt(point, viewport_, fonts_) ||
+         surfaces_.SelectedRimAt(point, viewport_, fonts_) ||
+         volumes_.SelectedRimAt(point, viewport_, fonts_) ||
          spaces_.SelectedRimAt(point, viewport_, fonts_) ||
          media_.SelectedRimAt(point, viewport_);
 }
@@ -332,6 +338,8 @@ void App::DeleteSelection() {
   axes_.DeleteSelection();
   plots_.DeleteSelection();
   shaders_.DeleteSelection();
+  surfaces_.DeleteSelection();
+  volumes_.DeleteSelection();
   spaces_.DeleteSelection();
   media_.DeleteSelection();
 
@@ -364,7 +372,7 @@ void App::CopySelection(bool cut) {
     Clipping clip;
     clip.lines = block->Lines();
     clip.em = block->Em();
-    clip.showMath = block->ShowMath();
+    clip.showMath = block->ReadingMode();
     clip.bold = block->Bold();
     clip.italic = block->Italic();
     clip.justify = static_cast<int>(block->Justification());
@@ -394,7 +402,7 @@ void App::PasteClipboard() {
   for (const Clipping& clip : clipboard_) {
     auto block = std::make_unique<CodeBlock>(
         Vector2{anchor.x + clip.offset.x, anchor.y + clip.offset.y}, clip.em, clip.lines);
-    block->SetShowMath(clip.showMath);
+    block->SetReadingMode(clip.showMath);
     block->SetBold(clip.bold);
     block->SetItalic(clip.italic);
     block->SetJustification(static_cast<CodeBlock::Justify>(clip.justify));
@@ -432,6 +440,8 @@ void App::HandleSelection() {
       axes_.MoveSelection(delta);
       plots_.MoveSelection(delta);
       shaders_.MoveSelection(delta);
+      surfaces_.MoveSelection(delta);
+      volumes_.MoveSelection(delta);
       spaces_.MoveSelection(delta);
       media_.MoveSelection(delta);
     }
@@ -464,6 +474,8 @@ void App::HandleSelection() {
     axes_.BeginSelectionDrag();
     plots_.BeginSelectionDrag();
     shaders_.BeginSelectionDrag();
+    surfaces_.BeginSelectionDrag();
+    volumes_.BeginSelectionDrag();
     spaces_.BeginSelectionDrag();
     media_.BeginSelectionDrag();
     return;
@@ -499,6 +511,8 @@ void App::HandleSelection() {
         axes_.SelectWithin(loop, viewport_, fonts_);
         plots_.SelectWithin(loop, viewport_, fonts_);
         shaders_.SelectWithin(loop, viewport_, fonts_);
+        surfaces_.SelectWithin(loop, viewport_, fonts_);
+        volumes_.SelectWithin(loop, viewport_, fonts_);
         spaces_.SelectWithin(loop, viewport_, fonts_);
         media_.SelectWithin(loop, viewport_);
         for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
@@ -820,6 +834,94 @@ void App::DrawCompose() {
   }
 }
 
+// The spread a type gets when nothing on the canvas says otherwise. A canvas
+// with no sampler box still shows a function, exactly as a type with no viz box
+// still gets a marker: authoring one is how you take the drawing over, not how
+// you switch it on. Only the reals have one, because a spread of reals is the
+// one thing the app can guess at -- what a spread of points would be is a
+// question only the person drawing it can answer.
+namespace {
+constexpr int   kBornSamples = 24;
+constexpr float kBornLo = -4.0f;
+constexpr float kBornHi = 4.0f;
+}  // namespace
+
+void App::FeedFunctions() {
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    const int which = block->FunctionShown();
+    if (which < 0) continue;
+    const mathprogram::Function& fn = block->Functions()[static_cast<std::size_t>(which)];
+    if (!fn.sampled) continue;
+
+    // Whatever box on this canvas says how that space is spread out.
+    if (const CodeBlock* sampler = vizes_.Sampler(fn.inputType); sampler != nullptr) {
+      const int stride = std::max(1, sampler->SamplerStride());
+      const std::vector<float>& run = sampler->SamplerRun();
+      block->SetSampleInputs(run, static_cast<int>(run.size()) / stride, stride);
+      continue;
+    }
+    if (fn.inStride != 1) continue;   // nothing to guess at
+
+    std::vector<float> spread(kBornSamples, 0.0f);
+    for (int i = 0; i < kBornSamples; ++i) {
+      spread[static_cast<std::size_t>(i)] =
+          kBornLo + (kBornHi - kBornLo) * static_cast<float>(i) /
+                        static_cast<float>(kBornSamples - 1);
+    }
+    block->SetSampleInputs(spread, kBornSamples, 1);
+  }
+}
+
+// One sample and the answer it turned into, boxed at both ends and joined.
+//
+// The pointer picks the pair out at either end -- pointing at an answer is as
+// good a way of asking about a sample as pointing at the sample is -- and both
+// ends light up, because the whole claim being made is that they are two halves
+// of one statement. The wire runs over every window rather than under them, for
+// the same reason every other wire here does.
+void App::DrawSampleLink() {
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    const int lit = block->SampleHover();
+    if (lit < 0 || !block->Samples().Live()) continue;
+
+    Vector2 ends[2]{};
+    bool    have[2] = {false, false};
+    for (int end = 0; end < 2; ++end) {
+      const bool output = (end == 1);
+      have[end] = axes_.SampleMarker(block.get(), lit, output, viewport_, fonts_, &ends[end]) ||
+                  spaces_.SampleMarker(block.get(), lit, output, viewport_, fonts_, &ends[end]);
+    }
+    if (!have[0] && !have[1]) continue;
+
+    const Color tint = block->VariableColor(block->Samples().name);
+    const float zoom = viewport_.Zoom();
+    const float side = std::max(9.0f, 11.0f * zoom);
+    const float thickness = std::max(1.4f, 1.8f * zoom);
+
+    for (int end = 0; end < 2; ++end) {
+      if (!have[end]) continue;
+      const Rectangle box = {ends[end].x - side * 0.5f, ends[end].y - side * 0.5f, side, side};
+      // Two passes, the way the grabbing cursor is drawn: these land on a dark
+      // card, on the pale canvas and on a sky-blue window full of the very dots
+      // they are pointing at, and one stroke cannot read on all three.
+      const Rectangle halo = {box.x - thickness, box.y - thickness,
+                              box.width + thickness * 2.0f, box.height + thickness * 2.0f};
+      DrawRectangleLinesEx(halo, thickness, Fade(RAYWHITE, 0.85f));
+      DrawRectangleLinesEx(box, thickness, tint);
+    }
+    if (!have[0] || !have[1]) continue;
+
+    // The same cable every other pair of things on this canvas is joined by:
+    // out horizontally at both ends, so it never crosses what it points at.
+    const Vector2 a = ends[0];
+    const Vector2 b = ends[1];
+    const float   reach = std::clamp(std::abs(b.x - a.x) * 0.45f, 20.0f, 160.0f);
+    const float   direction = (b.x > a.x) ? 1.0f : -1.0f;
+    DrawSplineSegmentBezierCubic(a, {a.x + reach * direction, a.y},
+                                 {b.x - reach * direction, b.y}, b, thickness, Fade(tint, 0.9f));
+  }
+}
+
 bool App::CanWire(const ActiveValue& active) {
   if (active.block == nullptr) return false;
   const mathline::Flow flow = active.block->FlowFor(active.name);
@@ -1079,6 +1181,8 @@ void App::SelectWithinWorld(Rectangle worldRect) {
   axes_.SelectWithin(loop, viewport_, fonts_);
   plots_.SelectWithin(loop, viewport_, fonts_);
   shaders_.SelectWithin(loop, viewport_, fonts_);
+  surfaces_.SelectWithin(loop, viewport_, fonts_);
+  volumes_.SelectWithin(loop, viewport_, fonts_);
   spaces_.SelectWithin(loop, viewport_, fonts_);
   media_.SelectWithin(loop, viewport_);
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
@@ -1108,11 +1212,15 @@ void App::ThrowAwaySlide(Rectangle bounds, float shift) {
     axes_.BeginSelectionDrag();
     plots_.BeginSelectionDrag();
     shaders_.BeginSelectionDrag();
+    surfaces_.BeginSelectionDrag();
+    volumes_.BeginSelectionDrag();
     spaces_.BeginSelectionDrag();
     media_.BeginSelectionDrag();
     axes_.MoveSelection({-shift, 0.0f});
     plots_.MoveSelection({-shift, 0.0f});
     shaders_.MoveSelection({-shift, 0.0f});
+    surfaces_.MoveSelection({-shift, 0.0f});
+    volumes_.MoveSelection({-shift, 0.0f});
     spaces_.MoveSelection({-shift, 0.0f});
     media_.MoveSelection({-shift, 0.0f});
   }
@@ -1323,6 +1431,12 @@ void App::Update() {
   if (canvasActive && !consumed && plots_.Dragging()) {
     consumed = plots_.HandleInput(viewport_, fonts_);
   }
+  if (canvasActive && !consumed && (surfaces_.Dragging() || surfaces_.Orbiting())) {
+    consumed = surfaces_.HandleInput(viewport_, fonts_);
+  }
+  if (canvasActive && !consumed && (volumes_.Dragging() || volumes_.Orbiting())) {
+    consumed = volumes_.HandleInput(viewport_, fonts_);
+  }
   if (canvasActive && !consumed && shaders_.Dragging()) {
     consumed = shaders_.HandleInput(viewport_, fonts_);
   }
@@ -1351,6 +1465,8 @@ void App::Update() {
   if (canvasActive && !consumed) consumed = axes_.HandleInput(viewport_, fonts_, codeBlocks_);
   if (canvasActive && !consumed) consumed = plots_.HandleInput(viewport_, fonts_);
   if (canvasActive && !consumed) consumed = shaders_.HandleInput(viewport_, fonts_);
+  if (canvasActive && !consumed) consumed = surfaces_.HandleInput(viewport_, fonts_);
+  if (canvasActive && !consumed) consumed = volumes_.HandleInput(viewport_, fonts_);
   if (canvasActive && !consumed) consumed = spaces_.HandleInput(viewport_, fonts_);
   if (canvasActive && !consumed) {
     consumed = slides_.HandleInput(viewport_, fonts_, options_.slideAspect, &viewport_);
@@ -1360,7 +1476,6 @@ void App::Update() {
     // Starting one: a press on a selected window's rim moves the whole
     // selection, and a press on the background begins a loop.
     HandleSelection();
-    if (!lassoActive_ && !selectionDrag_) HandleTyping();
   } else if (!canvasActive) {
     // Only the menu opening abandons a gesture. Something else taking the
     // pointer does not: that is what the in-flight pass above is for.
@@ -1401,6 +1516,9 @@ void App::Update() {
     ThrowAwaySlide(gone.bounds, gone.shift);
   }
   media_.Advance(GetFrameTime());
+  // What each function being read is fed with, before the boxes are polled --
+  // polling is where a box puts its spread through its function.
+  FeedFunctions();
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->Poll();
 
   // A box that has just gained (or lost) number lines is a different size than
@@ -1408,25 +1526,47 @@ void App::Update() {
   // anybody. Only on the change: it is far too much work to do every frame.
   // What the canvas says about how things are drawn. Rebuilt every frame: a
   // viz is not registered, it is written down somewhere and therefore true, and
-  // the boxes saying so are edited like any others.
-  if (vizes_.Sync(codeBlocks_)) {
-    // What the canvas says about drawing has changed, so every box that has a
-    // value of one of those types is now a different program.
-    for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
-      block->SetVizSources(&vizes_.Sources());
-      if (block->VizType().empty()) block->RequestCompile();
-    }
-  }
+  // the boxes saying so are edited like any others. Nothing else has to be
+  // rebuilt when it changes -- a viz box owns its own shaders, and a window
+  // asking for one simply gets the new one.
+  vizes_.Sync(codeBlocks_);
 
   bool shapesChanged = axes_.Sync(codeBlocks_);
   shapesChanged = plots_.Sync(codeBlocks_) || shapesChanged;
   shapesChanged = shaders_.Sync(codeBlocks_) || shapesChanged;
+  shapesChanged = surfaces_.Sync(codeBlocks_) || shapesChanged;
+  shapesChanged = volumes_.Sync(codeBlocks_) || shapesChanged;
   shapesChanged = spaces_.Sync(codeBlocks_) || shapesChanged;
   if (shapesChanged) SettleBlocks();
+
+  // **The pointer and the keyboard are two different claims.** Everything above
+  // is about the pointer, and a window that has taken the pointer has not taken
+  // the keys: a box with the caret in it keeps them wherever the mouse happens
+  // to be sitting. Typing used to stand down for whatever the pointer was over,
+  // which is a rule nobody can see the edge of -- a box shrinking under a held
+  // backspace slides a number line up under a motionless pointer, and the
+  // typing stops in the middle of a word for no reason the typist can point at.
+  //
+  // The one thing that does take the keys is a video's trim time being typed
+  // into, because that is a caret too, and there cannot be two.
+  if (canvasActive && !lassoActive_ && !selectionDrag_ && !media_.Editing()) HandleTyping();
 
   // A window being hovered or dragged lights up the variable it stands for,
   // wherever that variable is written. Recomputed every frame: it is a property
   // of where the pointer is, not something to remember.
+  // Which sample the pointer is on, at either end. Cleared every frame and set
+  // again: it is a property of where the pointer is, not something to remember.
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->SetSampleHover(-1);
+  if (canvasActive) {
+    const CodeBlock* onBlock = nullptr;
+    int              onSample = -1;
+    const Vector2    pointer = GetMousePosition();
+    if (axes_.SampleUnder(pointer, viewport_, fonts_, &onBlock, &onSample) ||
+        spaces_.SampleUnder(pointer, viewport_, fonts_, &onBlock, &onSample)) {
+      if (onBlock != nullptr) onBlock->SetSampleHover(onSample);
+    }
+  }
+
   std::vector<ActiveValue> active;
   if (canvasActive) {
     axes_.ActiveVariables(viewport_, fonts_, &active);
@@ -1475,7 +1615,9 @@ void App::Update() {
   // elsewhere the deck is not what the gesture would be about, and elsewhere
   // two fingers are still the pan and the pinch.
   const bool onSlide = slides_.SlideAtCamera(viewport_, options_.slideAspect) >= 0;
-  viewport_.Update(canvasActive, !consumed, !axes_.Scrolling() && !spaces_.Orbiting(),
+  viewport_.Update(canvasActive, !consumed,
+                   !axes_.Scrolling() && !spaces_.Orbiting() && !surfaces_.Orbiting() &&
+                       !volumes_.Orbiting(),
                    onSlide);
   if (const int swipe = viewport_.TakeSwipe(); swipe != 0) {
     slides_.Step(swipe, &viewport_, options_.slideAspect);
@@ -1494,7 +1636,8 @@ void App::Update() {
   constexpr float  kGridFadeSeconds = 0.16f;
   const bool carrying = (dragBlock_ != nullptr && dragBlockMoved_) ||
                         (selectionDrag_ && selectionMoved_) || axes_.Carrying() ||
-                        plots_.Carrying() || shaders_.Carrying() || spaces_.Carrying() ||
+                        plots_.Carrying() || shaders_.Carrying() || surfaces_.Carrying() ||
+                        volumes_.Carrying() || spaces_.Carrying() ||
                         media_.Carrying();
   const bool scaling = GetMouseWheelMoveV().y != 0.0f || touch::Count() >= 2;
   if (canvasActive && (carrying || scaling)) gridUntil_ = GetTime() + kGridLinger;
@@ -1537,6 +1680,8 @@ void App::Draw() {
   axes_.Draw(viewport_, fonts_, &vizes_);
   plots_.Draw(viewport_, fonts_, &vizes_);
   shaders_.Draw(viewport_, fonts_);
+  surfaces_.Draw(viewport_, fonts_);
+  volumes_.Draw(viewport_, fonts_);
   spaces_.Draw(viewport_, fonts_);
   media_.Draw(viewport_, fonts_);
 
@@ -1555,6 +1700,9 @@ void App::Draw() {
     if (value.wired) DrawWiring(value);
   }
 
+  // And the one sample the pointer is on, joined to what it turned into.
+  DrawSampleLink();
+
   // Error balloons last, so they are never buried under a neighbouring card.
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     block->DrawOverlay(viewport_, fonts_);
@@ -1564,6 +1712,8 @@ void App::Draw() {
   axes_.DrawSelectionRims(viewport_, fonts_);
   plots_.DrawSelectionRims(viewport_, fonts_);
   shaders_.DrawSelectionRims(viewport_, fonts_);
+  surfaces_.DrawSelectionRims(viewport_, fonts_);
+  volumes_.DrawSelectionRims(viewport_, fonts_);
   spaces_.DrawSelectionRims(viewport_, fonts_);
   media_.DrawSelectionRims(viewport_);
 
@@ -1571,7 +1721,8 @@ void App::Draw() {
 
   // Carrying a window brings up the one place it can be thrown away.
   if (dragBlockMoved_ || selectionMoved_ || axes_.Carrying() || plots_.Carrying() ||
-      shaders_.Carrying() || spaces_.Carrying() || media_.Carrying()) {
+      shaders_.Carrying() || surfaces_.Carrying() || volumes_.Carrying() ||
+      spaces_.Carrying() || media_.Carrying()) {
     DrawDropTarget(OverDropTarget(GetMousePosition()));
   }
 
@@ -1666,7 +1817,7 @@ bool App::SaveCanvas(const std::string& path) {
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     const Vector2 position = block->WorldPosition();
     file << "block " << position.x << " " << position.y << " " << block->Em() << " "
-         << (block->ShowMath() ? 1 : 0) << " " << (block->Bold() ? 1 : 0) << " "
+         << block->ReadingMode() << " " << (block->Bold() ? 1 : 0) << " "
          << (block->Italic() ? 1 : 0) << " " << static_cast<int>(block->Justification())
          << " " << block->TextWidth() << " " << (block->ShowSource() ? 1 : 0) << "\n";
     for (const std::string& line : block->Lines()) file << "> " << line << "\n";
@@ -1678,7 +1829,9 @@ bool App::SaveCanvas(const std::string& path) {
       }
     }
     for (const std::string& name : block->Hidden()) file << "hide " << name << "\n";
-    if (block->ShaderHidden()) file << "hideshader\n";
+    if (block->DrawnHidden(CodeBlock::kPicture)) file << "hideshader\n";
+    if (block->DrawnHidden(CodeBlock::kSurface)) file << "hidesurface\n";
+    if (block->DrawnHidden(CodeBlock::kVolume)) file << "hidevolume\n";
     file << "end\n";
   }
 
@@ -1704,7 +1857,23 @@ bool App::SaveCanvas(const std::string& path) {
 
   for (const ShaderView& view : shaders_.Views()) {
     file << "shader " << (view.docked ? 1 : 0) << " " << view.worldPos.x << " "
-         << view.worldPos.y << " " << indexOf(view.block) << "\n";
+         << view.worldPos.y << " " << indexOf(view.block) << " " << view.centre.x << " "
+         << view.centre.y << " " << view.span << "\n";
+  }
+
+  // Where you were looking from is part of what you set up, so the orbit goes
+  // with the window -- for a surface and a volume alike.
+  for (const SurfaceView& view : surfaces_.Views()) {
+    file << "surface " << (view.docked ? 1 : 0) << " " << view.worldPos.x << " "
+         << view.worldPos.y << " " << indexOf(view.block) << " " << view.centre.x << " "
+         << view.centre.y << " " << view.span << " " << view.orbit.x << " " << view.orbit.y
+         << " " << view.orbit.z << "\n";
+  }
+  for (const VolumeView& view : volumes_.Views()) {
+    file << "volume " << (view.docked ? 1 : 0) << " " << view.worldPos.x << " "
+         << view.worldPos.y << " " << indexOf(view.block) << " " << view.centre.x << " "
+         << view.centre.y << " " << view.span << " " << view.orbit.x << " " << view.orbit.y
+         << " " << view.orbit.z << "\n";
   }
 
   // Where you were looking from is part of what you set up, so the orbit is
@@ -1756,7 +1925,9 @@ bool App::LoadCanvas(const std::string& path) {
   struct LoadedBlock {
     Vector2                                   position{};
     float                                     em = kDefaultBlockEm;
-    bool                                      showMath = false;
+    // 0 auto, 1 mathematics, 2 code. A canvas written before there was a third
+    // state says 0 or 1, which mean the same two things they always did.
+    int                                       showMath = 0;
     bool                                      bold = false;
     bool                                      italic = false;
     int                                       justify = 0;
@@ -1765,7 +1936,11 @@ bool App::LoadCanvas(const std::string& path) {
     std::vector<std::string>                  lines;
     std::vector<std::pair<std::string, float>> values;
     std::vector<std::string>                   hidden;
+    // One per kind of window a box can draw into, so closing a picture does not
+    // take the surface next to it.
     bool                                       shaderHidden = false;
+    bool                                       surfaceHidden = false;
+    bool                                       volumeHidden = false;
   };
   struct LoadedMedia {
     int         kind = 0;
@@ -1789,6 +1964,18 @@ bool App::LoadCanvas(const std::string& path) {
     bool    docked = true;
     Vector2 worldPos{};
     int     block = -1;
+    Vector2 centre{};
+    float   span = 4.0f;
+  };
+  // A surface and a volume are read the same way and differ only in what they
+  // default to, so one shape carries both.
+  struct LoadedTurned {
+    bool    docked = true;
+    Vector2 worldPos{};
+    int     block = -1;
+    Vector2 centre{};
+    float   span = 4.0f;
+    Vector3 orbit{};
   };
   struct LoadedSpace {
     int     kind = 0;
@@ -1822,6 +2009,8 @@ bool App::LoadCanvas(const std::string& path) {
   std::vector<LoadedAxis>   axes;
   std::vector<LoadedPlot>   plots;
   std::vector<LoadedShader> shaderViews;
+  std::vector<LoadedTurned> surfaceViews;
+  std::vector<LoadedTurned> volumeViews;
   std::vector<LoadedSpace>  spaceWindows;
   std::vector<LoadedMedia>  media;
   std::vector<LegacySlideText> legacy;
@@ -1866,7 +2055,7 @@ bool App::LoadCanvas(const std::string& path) {
       int showSource = 0;
       stream >> bold >> italic >> justify >> block.textWidth >> showSource;
       block.showSource = (showSource != 0);
-      block.showMath = (showMath != 0);
+      block.showMath = showMath;
       block.bold = (bold != 0);
       block.italic = (italic != 0);
       block.justify = std::clamp(justify, 0, 2);
@@ -1909,12 +2098,26 @@ bool App::LoadCanvas(const std::string& path) {
       if (!name.empty()) blocks.back().hidden.push_back(name);
     } else if (keyword == "hideshader" && inBlock) {
       blocks.back().shaderHidden = true;
+    } else if (keyword == "hidesurface" && inBlock) {
+      blocks.back().surfaceHidden = true;
+    } else if (keyword == "hidevolume" && inBlock) {
+      blocks.back().volumeHidden = true;
     } else if (keyword == "shader") {
       LoadedShader view;
       int docked = 1;
       stream >> docked >> view.worldPos.x >> view.worldPos.y >> view.block;
+      // The patch of the plane on show, absent from canvases written before a
+      // picture had one. Whatever is missing keeps its default.
+      stream >> view.centre.x >> view.centre.y >> view.span;
       view.docked = (docked != 0);
       shaderViews.push_back(view);
+    } else if (keyword == "surface" || keyword == "volume") {
+      LoadedTurned view;
+      int          docked = 1;
+      stream >> docked >> view.worldPos.x >> view.worldPos.y >> view.block >> view.centre.x >>
+          view.centre.y >> view.span >> view.orbit.x >> view.orbit.y >> view.orbit.z;
+      view.docked = (docked != 0);
+      (keyword == "surface" ? surfaceViews : volumeViews).push_back(view);
     } else if (keyword == "space") {
       LoadedSpace window;
       int docked = 1;
@@ -1980,6 +2183,8 @@ bool App::LoadCanvas(const std::string& path) {
   axes_.Clear();
   plots_.Clear();
   shaders_.Clear();
+  surfaces_.Clear();
+  volumes_.Clear();
   spaces_.Clear();
   // Every picture's texture and every video's decoder, by hand and while the
   // graphics context is still here.
@@ -1990,15 +2195,16 @@ bool App::LoadCanvas(const std::string& path) {
 
   for (LoadedBlock& loaded : blocks) {
     auto block = std::make_unique<CodeBlock>(loaded.position, loaded.em, std::move(loaded.lines));
-    block->SetVizSources(&vizes_.Sources());
-    block->SetShowMath(loaded.showMath);
+    block->SetReadingMode(loaded.showMath);
     block->SetBold(loaded.bold);
     block->SetItalic(loaded.italic);
     block->SetJustification(static_cast<CodeBlock::Justify>(loaded.justify));
     block->SetTextWidth(loaded.textWidth);
     block->SetShowSource(loaded.showSource);
     block->RestoreHidden(std::move(loaded.hidden));
-    block->SetShaderHidden(loaded.shaderHidden);
+    block->SetDrawnHidden(CodeBlock::kPicture, loaded.shaderHidden);
+    block->SetDrawnHidden(CodeBlock::kSurface, loaded.surfaceHidden);
+    block->SetDrawnHidden(CodeBlock::kVolume, loaded.volumeHidden);
     block->RestoreValues(std::move(loaded.values));
     block->RequestCompile();
     codeBlocks_.push_back(std::move(block));
@@ -2054,9 +2260,39 @@ bool App::LoadCanvas(const std::string& path) {
     view.block = codeBlocks_[static_cast<std::size_t>(loaded.block)].get();
     view.docked = loaded.docked;
     view.worldPos = loaded.worldPos;
+    view.centre = loaded.centre;
+    view.span = loaded.span;
     views.push_back(view);
   }
   shaders_.Adopt(std::move(views));
+
+  std::vector<SurfaceView> surfaceOut;
+  for (const LoadedTurned& loaded : surfaceViews) {
+    if (loaded.block < 0 || loaded.block >= static_cast<int>(codeBlocks_.size())) continue;
+    SurfaceView view;
+    view.block = codeBlocks_[static_cast<std::size_t>(loaded.block)].get();
+    view.docked = loaded.docked;
+    view.worldPos = loaded.worldPos;
+    view.centre = loaded.centre;
+    view.span = loaded.span;
+    view.orbit = loaded.orbit;
+    surfaceOut.push_back(view);
+  }
+  surfaces_.Adopt(std::move(surfaceOut));
+
+  std::vector<VolumeView> volumeOut;
+  for (const LoadedTurned& loaded : volumeViews) {
+    if (loaded.block < 0 || loaded.block >= static_cast<int>(codeBlocks_.size())) continue;
+    VolumeView view;
+    view.block = codeBlocks_[static_cast<std::size_t>(loaded.block)].get();
+    view.docked = loaded.docked;
+    view.worldPos = loaded.worldPos;
+    view.centre = loaded.centre;
+    view.span = loaded.span;
+    view.orbit = loaded.orbit;
+    volumeOut.push_back(view);
+  }
+  volumes_.Adopt(std::move(volumeOut));
 
   std::vector<SpaceWindow> spaceViews;
   for (const LoadedSpace& loaded : spaceWindows) {

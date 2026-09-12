@@ -1,8 +1,8 @@
 // Plots: the window a function is seen in.
 //
-// A real gets a number line; a function gets one of these. It draws the curve
-// from the samples the program printed back, with **input running up the
-// vertical axis and output along the horizontal one**. That is the transpose of
+// A real gets a number line; a function gets one of these. The curve is drawn
+// by calling the function per pixel, with **input running up the vertical axis
+// and output along the horizontal one**. That is the transpose of
 // the usual convention, and it is deliberate: these axes are heading towards
 // spacetime diagrams, where the vertical axis is time.
 //
@@ -63,8 +63,7 @@ class PlotPanel {
 
   bool HandleInput(const Viewport& viewport, FontStore& fonts);
   // `vizes` is how the canvas says a function should be drawn, if it says
-  // anything. Null, or silent about RealFunction, and the polyline below is
-  // what you get -- the one the app was born with.
+  // anything.
   void Draw(const Viewport& viewport, FontStore& fonts,
             const VizStore* vizes = nullptr) const;
 
@@ -91,15 +90,14 @@ class PlotPanel {
   bool Carrying() const { return drag_ == Drag::Move && dragMoved_; }
 
   // --- selection ----------------------------------------------------------
-  // The lasso catches windows by their middle. A selected one wears its rim,
-  // moves with the rest of the selection, and goes with it.
+  // As every other window: the lasso catches by the middle, a selected one
+  // wears its rim, and the whole selection moves and goes as one. The bodies
+  // are the shared ones in selection.h; what differs is what closing one means.
   void SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                     FontStore& fonts);
   void ClearSelection();
   bool AnySelected() const;
   bool SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const;
-  // Remembers where everything selected is, so a drag can place it relative to
-  // there rather than accumulating a delta frame by frame.
   void BeginSelectionDrag();
   void MoveSelection(Vector2 worldDelta);
   void DeleteSelection();
@@ -124,8 +122,6 @@ class PlotPanel {
   static bool Shown(const CurveRef& ref);
   static bool Shown(const Plot& plot);
   const mathprogram::Variable* Resolve(const CurveRef& ref) const;
-  // Opens the window out until every curve on it is in view.
-  void Reframe(Plot& plot) const;
 
   std::vector<Plot> plots_;
   const AxisPanel*  axes_ = nullptr;

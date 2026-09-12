@@ -41,10 +41,62 @@ struct ActiveValue {
   bool        wired = false;
 };
 
+// A function, drawn by being fed.
+//
+// A function has no one place to be, so it is not shown as a value: a spread of
+// samples of its input space is drawn in whatever window that type goes in,
+// every one of them is put through the function, and the answers are drawn in
+// whatever window the output type goes in -- which may well be the same window.
+// The two runs are the same length and line up index for index, which is what
+// lets pointing at one end light up the other.
+struct Sampling {
+  std::string name;         // the function being shown
+  std::string inputType;
+  std::string outputType;
+  int         count = 0;
+  int         inStride = 1;
+  int         outStride = 1;
+  std::vector<float> inputs;    // count * inStride
+  std::vector<float> outputs;   // count * outStride
+  bool        ready = false;    // the answers have come back at least once
+
+  bool Live() const { return ready && count > 0; }
+};
+
 class CodeBlock {
  public:
   CodeBlock(Vector2 worldTopLeft, float worldEm, std::vector<std::string> lines);
   ~CodeBlock();
+
+  // Everything the geometry is a function of.
+  //
+  // `Measure` is asked for a dozen times a frame per box -- by every panel, by
+  // the placement, by every hit test -- and recomputing it each time was half
+  // of all the CPU this app spent. So the answer is kept, and this is what says
+  // whether it is still the answer. Two things are deliberately *not* in here
+  // because they are read off the lines and so cannot move without `cache`
+  // moving: which algebra the box works in, and whether it is prose.
+  struct Shape {
+    float    zoom = -1.0f;
+    float    emPx = -1.0f;
+    float    measure = -1.0f;
+    float    left = 0.0f;      // where it lands, which only translates it
+    float    top = 0.0f;
+    unsigned cache = 0;        // bumped whenever a line's reading is rebuilt
+    unsigned flags = 0;        // the toggles that decide how a row is read
+    int      caret = -1;
+    int      hover = -1;
+    int      error = 0;
+    unsigned values = 0;       // what the injected numbers would say
+
+    // Everything but where it sits. A pan moves a box without reshaping it, so
+    // that case is worth telling apart: the rows are shifted rather than built.
+    bool SameShape(const Shape& other) const {
+      return zoom == other.zoom && emPx == other.emPx && measure == other.measure &&
+             cache == other.cache && flags == other.flags && caret == other.caret &&
+             hover == other.hover && error == other.error && values == other.values;
+    }
+  };
 
   // --- geometry -----------------------------------------------------------
   // Rows vary in height: a fraction needs more room than a line of code, so the
@@ -211,9 +263,13 @@ class CodeBlock {
   const std::vector<std::string>& Hidden() const { return hidden_; }
   void RestoreHidden(std::vector<std::string> names) { hidden_ = std::move(names); }
 
-  void HideShader() { shaderHidden_ = true; }
-  bool ShaderHidden() const { return shaderHidden_; }
-  void SetShaderHidden(bool hidden) { shaderHidden_ = hidden; }
+  // Closing is remembered, or the next Sync would put the window straight back.
+  // One flag per *kind* of window, because a box can define a picture and a
+  // surface at once and closing one of them must not take the other with it.
+  enum Drawn : int { kPicture = 0, kSurface = 1, kVolume = 2, kDrawnKinds = 3 };
+  void HideDrawn(int kind) { drawnHidden_[kind] = true; }
+  bool DrawnHidden(int kind) const { return drawnHidden_[kind]; }
+  void SetDrawnHidden(int kind, bool hide) { drawnHidden_[kind] = hide; }
 
   // --- making a variable from a number line --------------------------------
   //
@@ -269,10 +325,53 @@ class CodeBlock {
                   float halfWidth) const;
   void EndField() const;
 
-  // Whether this box draws anything: a shader box that never writes the colour
-  // has no picture to show. That used to be the same question as whether the
-  // box was a shader at all, and stopped being so when functions became GLSL.
-  bool Draws() const;
+  // --- what a box draws ----------------------------------------------------
+  //
+  // **A box draws because it defines a function**, not because it writes a
+  // colour, and *what kind of window* it gets is decided by how many variables
+  // that function takes. One is a curve; two is a square of pixels; three is a
+  // volume. Each is a different kind of display window, because each has a
+  // different camera -- none, an orthographic one, a perspective one -- and a
+  // window is largely its camera.
+  //
+  // Each of these is the function of that kind the box is being read inside, or
+  // the first one it defines if the caret is elsewhere.
+  int FlatPictureFunction() const;   // two in, a colour or a complex number out
+  int SurfaceFunction() const;       // two in, a real out
+  int VolumeFunction() const;        // three in
+  bool Draws() const { return FlatPictureFunction() >= 0; }
+  bool HasSurface() const { return SurfaceFunction() >= 0; }
+  bool HasVolume() const { return VolumeFunction() >= 0; }
+
+  // --- a function, drawn by being fed --------------------------------------
+  //
+  // Which function this box is being read *inside*, or -1. That is the whole
+  // trigger: put the caret on a signature, on a `return`, or on either of the
+  // braces, and the function those lines belong to is the one shown.
+  int FunctionShown() const;
+  // What is being drawn for it, empty unless a function is being shown and its
+  // samples have come back.
+  const Sampling& Samples() const { return sampling_; }
+  const std::vector<mathprogram::Function>& Functions() const { return program_.functions(); }
+  // The types this box's sampled functions take and give. A window for one of
+  // them exists whether or not that function is the one being read, so that
+  // nothing shuffles about as the caret moves.
+  std::vector<std::string> SampledTypes() const;
+  // The spread to feed it, from whatever box says how this type is spread out.
+  // Given from outside because a sampler is a box like any other and may be
+  // anywhere on the canvas.
+  void SetSampleInputs(const std::vector<float>& inputs, int count, int stride);
+  // Which sample the pointer is on, set by whichever window is showing them and
+  // cleared every frame. It lights up at both ends and a wire joins them.
+  void SetSampleHover(int index) const { sampleHover_ = index; }
+  int  SampleHover() const { return sampleHover_; }
+
+  // A sampler box -- `Samples(float, 24);` -- says how a type's space is spread
+  // out. It holds a compute program that lays the spread down, and this is what
+  // runs it. Empty until it has compiled.
+  const std::string& SamplerType() const { return program_.samplerType(); }
+  int                SamplerStride() const { return program_.samplerStride(); }
+  const std::vector<float>& SamplerRun() const;
 
   const std::string&        VizType() const { return program_.vizType(); }
   // How much geometry the last run laid down, and where it is. The vertices
@@ -287,13 +386,6 @@ class CodeBlock {
   // the mesh; it only actually dispatches when the value has changed.
   bool HasVizMesh() const { return vizMeshProgram_ != 0; }
   void RunVizMesh(float value) const;
-  // Whether C++ would have this box. A viz box that compiles is the mesh half;
-  // one that does not is the shader half.
-  bool BuildsAsCxx() const;
-  // What the canvas says about how its types are drawn. A viz's lines become
-  // part of every program that has a value of that type, so a box has to be
-  // told where to find them. Owned by the canvas, which outlives every box.
-  void SetVizSources(const mathprogram::VizSources* sources) { vizSources_ = sources; }
   bool                      HasVizShader() const { return haveVizShader_; }
   Shader                    VizShader() const { return vizShader_; }
   int                       VizUniform(const char* name) const;
@@ -301,7 +393,12 @@ class CodeBlock {
   // Draws this box's shader into a rectangle. The window that owns that
   // rectangle lives elsewhere; the GPU side of it lives here.
   bool HasShader() const { return haveShader_; }
-  void DrawShaderInto(Rectangle rect) const;
+  // `centre` and `span` are the patch of the input space each covers. `orbit`
+  // is where the eye is: yaw, pitch above the plane, and how far off -- which
+  // only a perspective camera has any use for.
+  void DrawPictureInto(Rectangle rect, Vector2 centre, float span) const;
+  void DrawSurfaceInto(Rectangle rect, Vector2 centre, float span, Vector3 orbit) const;
+  void DrawVolumeInto(Rectangle rect, Vector2 centre, float span, Vector3 orbit) const;
   void SetProbePoint(Vector2 point) const { probePoint_ = point; }
 
   // --- the live program ---------------------------------------------------
@@ -310,7 +407,6 @@ class CodeBlock {
   // Frees whatever this box holds on the GPU. Called while the window is still
   // open, because a destructor may well run after the context has gone.
   void ReleaseGpu();
-  compiler::Status Status() const { return outcome_.status; }
 
   const std::vector<mathprogram::Variable>& Variables() const { return program_.variables(); }
   // Which Clifford algebra this box works in, read off its own lines. It
@@ -345,8 +441,20 @@ class CodeBlock {
   // --- persistence --------------------------------------------------------
   Vector2 WorldPosition() const { return origin_; }
   float   Em() const { return em_; }
-  bool    ShowMath() const { return showMath_; }
-  void    SetShowMath(bool value) { showMath_ = value; }
+  // How a box reads, and whether that was decided or merely defaulted.
+  //
+  // **Auto** is where a box starts: mathematics while it is being read, and all
+  // code while it is being written, which is the rule that "editing a box means
+  // editing all of it" states. The toggle does not so much flip between two
+  // states as *settle* the question -- once pressed, the box reads that way
+  // whether or not it has the caret. A toggle that springs back the moment you
+  // click away has not done anything.
+  enum class Reading : int { Auto = 0, Maths = 1, Code = 2 };
+  int  ReadingMode() const { return static_cast<int>(reading_); }
+  void SetReadingMode(int mode) { reading_ = static_cast<Reading>(mode); }
+  // Whether the whole box is code right now, which is what the button has to
+  // ask before it can say what pressing it would do.
+  bool ReadsAsCode() const;
   bool    ShowSource() const { return showSource_; }
   void    SetShowSource(bool value) { showSource_ = value; }
   void    SetWorldPosition(Vector2 position) { origin_ = position; }
@@ -363,6 +471,10 @@ class CodeBlock {
   // size. Rebuilt only when the text or the zoom level actually changes.
   struct LineCache {
     std::string    source;
+    // Which function the line was read inside, since that is now part of what
+    // decides its reading: editing a signature has to re-read the returns under
+    // it, and the line's own text has not changed.
+    mathline::Inside inside;
     mathline::Line parsed;
     // What is actually typeset: mathline's reading of the code, or, in a text
     // box, the line's own words wrapped in \text.
@@ -457,10 +569,22 @@ class CodeBlock {
   void   InsertNewline();
   void   DeleteBefore();
   void   DeleteAt();
+  void   DeleteWordBefore();
+  void   DeleteWordAfter();
   void   MoveCaret(int dLine, int dChar);
   void   MoveCaretByWord(int direction);
   void   ClampCaret();
   void   TouchEdit();
+  int    FunctionOfKind(int kind) const;
+  void   DrawFunctionInto(Rectangle rect, int which, int shape, Vector2 centre, float span,
+                          Vector3 orbit) const;
+  // Where a word's worth of movement from the caret lands. One answer for the
+  // arrows and for the deletes, so Ctrl+Backspace takes exactly what Ctrl+Left
+  // would have skipped over.
+  int    WordBoundary(int direction) const;
+  // The lowest column the caret is allowed in on a line: past the sigil while a
+  // text box is showing its words, and zero everywhere else.
+  int    FloorCol(int line) const;
   // The selection in reading order, whichever way round it was made.
   void   SelectionRange(int* fromLine, int* fromCol, int* toLine, int* toCol) const;
   // Whether `name` is written as a whole word anywhere between two positions.
@@ -492,11 +616,11 @@ class CodeBlock {
   bool    marginDrag_ = false;
   // When focused, the box shows all code. The toggle flips it back to reading
   // as mathematics while still being editable line by line.
-  bool   showMath_ = false;
+  Reading reading_ = Reading::Auto;
   bool   absorbed_ = false;
   bool   selected_ = false;
   std::vector<std::string> hidden_;
-  bool   shaderHidden_ = false;
+  bool   drawnHidden_[kDrawnKinds] = {false, false, false};
   int    caretLine_ = 0;
   int    caretCol_ = 0;   // byte offset within lines_[caretLine_]
   // The other end of the selection. Equal to the caret when there is none, so
@@ -524,7 +648,6 @@ class CodeBlock {
   double                lastEditTime_ = -1.0;
 
   mathprogram::Program program_;
-  const mathprogram::VizSources* vizSources_ = nullptr;
 
   // The GPU side of a box whose code turned out to be GLSL: the shader itself,
   // the uniform slots its knobs drive, and a blank surface for it to cover.
@@ -558,6 +681,30 @@ class CodeBlock {
   mutable float                         vizMeshValue_ = 0.0f;
   mutable bool                          vizMeshRun_ = false;
 
+  // Feeding a function. Two buffers -- the spread in, the answers out -- and a
+  // strip of fragments to run it, one per sample. It is a pass of its own
+  // rather than a widening of the probe's, because the probe's pixels run the
+  // whole body and these must not: what a function does is in its definition.
+  void FeedFunction();
+
+  unsigned int                          fnInBuffer_ = 0;
+  unsigned int                          fnOutBuffer_ = 0;
+  RenderTexture2D                       fnTarget_{};
+  bool                                  haveFnTarget_ = false;
+  int                                   fnIndexLoc_ = -1;
+  int                                   fnCountLoc_ = -1;
+  mutable Sampling                      sampling_;
+  mutable int                           sampleHover_ = -1;
+  // What was last fed through, so nothing is re-run while nothing has moved.
+  std::vector<float>                    fnSignature_;
+
+  // A sampler box's own compute program, and the buffer it lays its spread
+  // into. The counter leads the buffer, exactly as a viz mesh's does.
+  unsigned int                          samplerProgram_ = 0;
+  unsigned int                          samplerBuffer_ = 0;
+  mutable std::vector<float>            samplerRun_;
+  mutable bool                          samplerRan_ = false;
+
   bool                                  haveFieldSurface_ = false;
   // One shader, three modes: it draws the picture, reports the values, and
   // draws the box's functions. These say which, and with what.
@@ -567,6 +714,8 @@ class CodeBlock {
   int                                   indexLoc_ = -1;
   int                                   shapeLoc_ = -1;
   int                                   thickLoc_ = -1;
+  int                                   orbitLoc_ = -1;
+  int                                   liftLoc_ = -1;
   int                                   probePointLoc_ = -1;
   RenderTexture2D                       probeTarget_{};
   bool                                  haveProbeTarget_ = false;
@@ -575,13 +724,15 @@ class CodeBlock {
   mutable Vector2                       probePoint_{0.5f, 0.5f};
   std::vector<float>                    probeSignature_;
 
-  // Legacy path: a box that declares no variables but does define
-  // `bool testFunc()` still gets its red/blue square.
-  compiler::Outcome              outcome_;
-  std::future<compiler::Outcome> pending_;
-
   mutable std::vector<LineCache> cache_;
+  // What the cache was last built at, so the common case -- nothing has moved
+  // -- costs one comparison per line rather than a re-read of every one.
+  mutable unsigned               cacheVersion_ = 0;
+  mutable unsigned               cacheStyle_ = ~0u;
+  mutable float                  cacheEmPx_ = -1.0f;
+  mutable float                  cacheWrap_ = -1.0f;
   mutable Geometry               geometry_;
+  mutable Shape                  shape_;
 };
 
 // A box of typeset mathematics, display only.

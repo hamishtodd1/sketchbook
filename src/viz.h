@@ -81,22 +81,23 @@ struct Viz {
 // is written down somewhere on the canvas and therefore true.
 class VizStore {
  public:
-  // True if what the canvas says has changed, in which case every box using one
-  // of these types has to be rebuilt: a viz's lines are part of their programs.
-  bool Sync(const std::vector<std::unique_ptr<CodeBlock>>& blocks);
-  // What to inject into those programs, by type.
-  const mathprogram::VizSources& Sources() const { return sources_; }
+  void Sync(const std::vector<std::unique_ptr<CodeBlock>>& blocks);
   // `window` names which of a type's vizes is wanted; empty asks for the one
   // that named no window.
   const Viz* Find(const std::string& type, const std::string& window = {}) const;
+  // How the canvas says a type's space is spread out -- `Samples(float, 24);`.
+  // A function is shown by being fed, and this is where the food comes from.
+  // Null if nothing on the canvas has anything to say about that type, in which
+  // case the spread the app was born with is what a function gets.
+  const CodeBlock* Sampler(const std::string& type) const;
   void       Clear() { vizes_.clear(); }
   // The one empty vertex array every viz draws through. A destructor cannot
   // free what is on the GPU, so it goes by hand.
   static void ReleaseGpu();
 
  private:
-  std::map<std::string, Viz>    vizes_;
-  mathprogram::VizSources       sources_;
+  std::map<std::string, Viz>             vizes_;
+  std::map<std::string, const CodeBlock*> samplers_;
 };
 
 }  // namespace sb
