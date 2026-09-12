@@ -39,6 +39,9 @@ struct ActiveValue {
   // values it is made of, through the operators, to here -- so the box must not
   // also draw the plain wire from its window. The names still light up.
   bool        wired = false;
+  // Being dragged, rather than merely pointed at. A wire's layout is frozen for
+  // as long as this is true: see `WireAnchor`.
+  bool        held = false;
 };
 
 // A function, drawn by being fed.
@@ -112,6 +115,12 @@ class CodeBlock {
     // at the left; prose starts wherever its justification puts it.
     float x = 0.0f;
     float width = 0.0f;
+    // How far in the line is written, for a line whose code was indented. A
+    // code row carries its own leading spaces in its text and needs none of
+    // this; a typeset row has nothing to carry them, so the indent is measured
+    // off the code and applied here. Measured in monospaced cells rather than
+    // ems, so a line does not jump sideways when it flips.
+    float indent = 0.0f;
     bool  asLatex = false;
     // Which line this row came from, and which slice of it. The slices of a
     // line partition it, so every byte -- and so every caret position -- is in
@@ -640,6 +649,10 @@ class CodeBlock {
   mutable int hoverLine_ = -1;
   mutable bool rimHot_ = false;
   bool         dragging_ = false;
+
+  // Which side each held value's wire left by. Everything else about a wire
+  // follows from that, so freezing it freezes the layout.
+  mutable std::unordered_map<std::string, bool> heldSide_;
 
   std::vector<ActiveValue> highlights_;
 

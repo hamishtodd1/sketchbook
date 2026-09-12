@@ -368,7 +368,7 @@ using Span = mathline::FunctionSpan;
 using mathline::FindFunctions;
 using mathline::SpanAt;
 
-// The signature line with both type names as GLSL spells them. `RealFunction`
+// The signature line with both type names as GLSL spells them. `RToR`
 // is the one name that is ours: it says *which* arrow a function is, where GLSL
 // only knows the thing returns a float.
 std::string GlslSignature(const std::string& raw, const mathline::FunctionHead& head) {
@@ -696,7 +696,7 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
   }
 
   // Which algebra this box works in, and which of its types it mentions. Both
-  // are read off the box itself: `Algebra(3,0,1);` on a line of its own changes
+  // are read off the box itself: `Cl(3,0,1);` on a line of its own changes
   // the signature, and everything else defaults to 3D projective geometric
   // algebra, which is what these tools are mostly for.
   clifford::Signature signature = clifford::kDefaultSignature;
@@ -748,8 +748,13 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
     // picture. Both are drawn from the definition at every point of the input,
     // so neither is sampled. Sampling is what is left for the ones with no
     // picture to be.
+    // Anything with a window of its own is drawn in it, so it is not also fed:
+    // `IsDrawn` rather than `IsPicture`, which left out the volume and marked a
+    // function of three variables as sampled. Nothing came of it -- there is no
+    // spread of a vec3 to feed it with, so the feed bailed -- but the shader
+    // was carrying the code to do it.
     const bool curve = fn.in == Space::R1 && fn.out == Space::R1;
-    fn.sampled = !curve && !fn.IsPicture();
+    fn.sampled = !curve && !fn.IsDrawn();
     functions_.push_back(fn);
   }
 
@@ -824,7 +829,7 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
 
       // A function of reals to reals is a value as far as the windows are
       // concerned: it gets a plot and a field, which are its two special cases.
-      // Its *type* is RealFunction however it was spelled, because that is what
+      // Its *type* is RToR however it was spelled, because that is what
       // a viz for one has to claim. Only that one shape: `sbEval` dispatches
       // over these by calling them with a float and returning a float, so a
       // picture in the list is a picture called with the wrong thing.

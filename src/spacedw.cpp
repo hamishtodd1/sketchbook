@@ -467,7 +467,11 @@ bool SpacePanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
       }
     } else if (orbitView_ < windows_.size()) {
       SpaceWindow& window = windows_[orbitView_];
-      window.yaw += (middle.x - orbitFrom_.x) * 0.01f;
+      // Dragging right turns the right-hand side towards you, which is a hand
+      // on a globe. Negative because this camera is built by rotating (0,0,d)
+      // about +y, where the surface and the volume put a -sin(yaw) in the eye
+      // and so get there with a plus.
+      window.yaw -= (middle.x - orbitFrom_.x) * 0.01f;
       window.pitch -= (middle.y - orbitFrom_.y) * 0.01f;
       window.pitch = std::clamp(window.pitch, -PI / 2.01f, PI / 2.01f);
       orbitFrom_ = middle;
@@ -488,7 +492,7 @@ bool SpacePanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
     const Vector2 now = GetMousePosition();
     // Dragging right turns the right-hand side towards you, the way a hand on a
     // globe does, and the same way round as every other window that turns.
-    window.yaw += (now.x - orbitFrom_.x) * 0.01f;
+    window.yaw -= (now.x - orbitFrom_.x) * 0.01f;
     window.pitch -= (now.y - orbitFrom_.y) * 0.01f;
     window.pitch = std::clamp(window.pitch, -PI / 2.01f, PI / 2.01f);
     orbitFrom_ = now;

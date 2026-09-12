@@ -1,10 +1,11 @@
-// RealFunction: a function from reals to reals.
+// RToR: a function from reals to reals.
 //
 // There is almost nothing left of this type, and that is the point: a function
-// is a GLSL function now, so `RealFunction` is only a *spelling* -- the one that
-// says which arrow a function is, where GLSL knows only that the thing returns
-// a float. What remains is the name, and the shape the app chooses when someone
-// declares a function without saying what it is.
+// is a GLSL function now, so `RToR` is only a *spelling*. It earns its keep in
+// exactly one place -- a declaration with no body, `RToR f;`, where there is no
+// signature to read the arrow off and the app has to choose a function. Given a
+// body, `RToR f(float x)` and `float f(float x)` are the same thing, because
+// the shape says the arrow.
 //
 // No raylib here, and none in any type: the mathematics and the toolchain do
 // not know that a renderer exists.
@@ -14,8 +15,9 @@
 
 namespace sb::types::realfunction {
 
-// How the type is spelled.
-inline constexpr const char* kName = "RealFunction";
+// How the type is spelled. It names the arrow, where `RealFunction` -- what it
+// was called before -- only said which reals were involved.
+inline constexpr const char* kName = "RToR";
 
 // The shape the app chose for a function nobody defined, as an expression in
 // `x`. Deterministic in the name, so a variable keeps the same example between

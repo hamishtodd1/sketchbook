@@ -634,13 +634,15 @@ void AxisPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
 
   // Dragging a handle is about exactly one variable, even on a shared axis.
   if (drag_ == Drag::Handle && dragRef_.block != nullptr && dragLine_ < lines_.size()) {
-    out->push_back({dragRef_.block, dragRef_.name, MarkerAt(dragLine_, dragRef_, viewport, fonts)});
+    out->push_back({dragRef_.block, dragRef_.name, MarkerAt(dragLine_, dragRef_, viewport, fonts),
+                    /*wired=*/false, /*held=*/true});
     return;
   }
   if (drag_ != Drag::None && dragLine_ < lines_.size()) {
     for (const AxisRef& ref : lines_[dragLine_].refs) {
       if (!Shown(ref)) continue;
-      out->push_back({ref.block, ref.name, MarkerAt(dragLine_, ref, viewport, fonts)});
+      out->push_back({ref.block, ref.name, MarkerAt(dragLine_, ref, viewport, fonts),
+                      /*wired=*/false, /*held=*/true});
     }
     return;
   }

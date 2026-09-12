@@ -993,11 +993,23 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
         layout = &cache_[i].layout;
       }
 
+      // Indentation is how code says a line is inside something, and the
+      // typeset reading has the same thing to say -- a `return` set flush left
+      // does not look like it belongs to the function above it. Prose is
+      // exempt: there a leading space is a space between words.
+      if (asLatex && !IsText()) {
+        const std::size_t lead = lines_[i].find_first_not_of(" \t");
+        if (lead != std::string::npos && lead > 0) {
+          row.indent =
+              text::Measure(fonts, Face::Mono, std::string_view(lines_[i]).substr(0, lead), g.emPx);
+        }
+      }
+
       float latexExtent = 0.0f;
       if (layout != nullptr) {
         row.width = layout->width;
         latexExtent = layout->height + layout->depth + 6.0f * g.zoom;
-        contentWidth = std::max(contentWidth, row.width);
+        contentWidth = std::max(contentWidth, row.width + row.indent);
         row.baseline = 0.0f;
       } else {
         row.width = text::Measure(fonts, Face::Mono, lines_[i], g.emPx);
@@ -1039,7 +1051,7 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
     float offset = 0.0f;
     if (row.asLatex && IsText() && justify_ == Justify::Centre) offset = slack * 0.5f;
     if (row.asLatex && IsText() && justify_ == Justify::Right) offset = slack;
-    row.x = g.textLeftTop.x + offset;
+    row.x = g.textLeftTop.x + offset + row.indent;
   }
   return g;
 }
@@ -2619,10 +2631,15 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
         }
         if (mentions.empty()) continue;
 
-        // Which side the bundle leaves by. One answer for the whole bundle, or
-        // the strands would set off in opposite directions and never meet.
-        const bool  onLeft = from.x < g.rect.x + g.rect.width * 0.5f;
-        const float outward = onLeft ? -1.0f : 1.0f;
+        // Which side a wire leaves by is a choice, and a choice re-taken every
+        // frame is one that can change its mind halfway through a drag -- which
+        // is the flick. So it is taken once, when the value is picked up, and
+        // kept until it is let go. Exactly one of the two branches below asks,
+        // so one answer is stored per value.
+        const auto side = [&](bool fresh) {
+          if (!active.held) { heldSide_.erase(active.name); return fresh; }
+          return heldSide_.try_emplace(active.name, fresh).first->second;
+        };
 
         // Tangents leave both ends horizontally, which is what makes a curve
         // read as a cable rather than as a stray line.
@@ -2633,7 +2650,7 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
 
         if (mentions.size() == 1) {
           const Rectangle box = mentions.front();
-          const bool      fromLeft = from.x < box.x + box.width * 0.5f;
+          const bool      fromLeft = side(from.x < box.x + box.width * 0.5f);
           const Vector2   target = {fromLeft ? box.x : box.x + box.width,
                                     box.y + box.height * 0.5f};
           const float     reach = std::clamp(std::abs(target.x - from.x) * 0.45f, 24.0f, 190.0f);
@@ -2641,6 +2658,11 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
           cable(from, reach * direction, target, -reach * direction);
           continue;
         }
+
+        // Which side the bundle leaves by. One answer for the whole bundle, or
+        // the strands would set off in opposite directions and never meet.
+        const bool  onLeft = side(from.x < g.rect.x + g.rect.width * 0.5f);
+        const float outward = onLeft ? -1.0f : 1.0f;
 
         // The junction sits just clear of the *names*, not of the card. A wide
         // box would otherwise send every strand off to an edge a long way from

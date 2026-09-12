@@ -21,7 +21,7 @@ namespace sb::mathprogram {
 // as LaTeX, and how to make an example of it.
 enum class Kind {
   Real,         // float / double
-  Function,     // RealFunction: a function from reals to reals
+  Function,     // RToR: a function from reals to reals
   Multivector,  // an element of a Clifford algebra: Bi, Even, ...
 };
 

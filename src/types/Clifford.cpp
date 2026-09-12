@@ -763,8 +763,10 @@ const std::vector<std::string>& DefaultTypes() {
 bool ParseAlgebra(std::string_view line, Signature* out) {
   std::size_t at = line.find_first_not_of(" \t");
   if (at == std::string_view::npos) return false;
-  if (line.compare(at, 8, "Algebra(") != 0) return false;
-  at += 8;
+  // `Cl(3,0,1)`, spelled the way the algebra itself is written and the way it
+  // is set -- Cl^{3,0,1}.
+  if (line.compare(at, 3, "Cl(") != 0) return false;
+  at += 3;
 
   int values[3] = {0, 0, 0};
   for (int i = 0; i < 3; ++i) {

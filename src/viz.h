@@ -30,7 +30,7 @@
 // **A type may have more than one viz, in more than one window.** A function is
 // a curve on a plot and a field of colour on a number line, and those are two
 // different answers to "how is one drawn" rather than one answer used twice. So
-// a viz box may name the window it is for -- `Viz(RealFunction, Axis)` -- and
+// a viz box may name the window it is for -- `Viz(RToR, Axis)` -- and
 // the two are held apart under `Type@Window`. A box that names no window is the
 // viz a window gets when it asks for a type and nothing more.
 //

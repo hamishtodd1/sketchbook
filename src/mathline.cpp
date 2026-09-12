@@ -577,7 +577,7 @@ bool MatchLambda(const std::vector<Token>& tokens, std::size_t index,
 }
 
 // `Viz(Real);` -- the line that says this box draws that type rather than using
-// one. Hand-parsed, like `Algebra(...)`, because it is a statement about the box
+// one. Hand-parsed, like `Cl(...)`, because it is a statement about the box
 // and never reaches a compiler.
 bool ParseVizSigil(std::string_view line, std::string* type, std::string* window) {
   std::size_t at = line.find_first_not_of(" 	");
@@ -863,7 +863,7 @@ bool IsMultivectorType(std::string_view type, const clifford::Signature& sig) {
   return clifford::IsMultivectorType(type, sig);
 }
 
-bool IsFunctionType(std::string_view type) { return type == "RealFunction"; }
+bool IsFunctionType(std::string_view type) { return type == "RToR"; }
 
 bool IsVectorType(std::string_view type) {
   return type == "vec2" || type == "vec3" || type == "vec4";
@@ -905,10 +905,10 @@ namespace {
 // space are powers of it, a complex number is C, and a multivector is in
 // whichever part of the algebra its grades make up.
 //
-// `RealFunction` is a real here rather than an arrow, which looks like an
-// exception and is not: `RealFunction w(float x)` is our spelling for a
-// function of reals to reals, so what the function *gives back* is a real. The
-// arrow is the whole signature, not its right-hand end.
+// `RToR` is a real here rather than an arrow, which looks like an exception and
+// is not: `RToR w(float x)` is our spelling for a function of reals to reals,
+// so what the function *gives back* is a real. The arrow is the whole
+// signature, not its right-hand end.
 std::string SetLatex(std::string_view type, const clifford::Signature& sig) {
   if (IsComplexType(type)) return "\\mathbb{C}";
   if (IsVectorType(type)) return "\\mathbb{R}^{" + std::string(1, type.back()) + "}";
@@ -1051,7 +1051,7 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
     line.name = name;
     line.hasInitialiser = false;
     // A value is an element of a set; a function is an arrow between two. The
-    // type name is what says which, and `RealFunction` is the only one of ours
+    // type name is what says which, and `RToR` is the only one of ours
     // that names an arrow rather than a set.
     line.latex = IsFunctionType(type)
                      ? Marked(name, &line.marks) + " : \\mathbb{R} \\to \\mathbb{R}"
@@ -1060,7 +1060,7 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
   }
 
   // A function is written the way GLSL writes one, because a function *is*
-  // GLSL now: `RealFunction w(float x) { return sin(x); }`. There is no `=` in
+  // GLSL now: `RToR w(float x) { return sin(x); }`. There is no `=` in
   // it, so it is looked for before one is required. Any known type may stand in
   // front of it -- a function is a shape, not a type.
   if (!type.empty() && tokens[index].kind == Tok::LParen) {

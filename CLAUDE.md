@@ -46,6 +46,17 @@ What already protects it, and should not be undone:
   that pointer -- the letters come out as smudges -- and asks for a whole face
   to be rasterised again inside the frame budget. Over budget with nothing
   evictable, the cache simply runs large for a frame.
+- **The atlas is packed by each glyph's own rectangle**, not by rows the height
+  of the size that was asked for (`BuildFont`, in `fontstore.*`). raylib's
+  `LoadFontFromMemory` does the latter, which assumes no glyph is taller than
+  its nominal size -- true of prose, wildly untrue of KaTeX's Size1..Size4,
+  where a big brace or a `\bigwedge` is several times it. Such a glyph was
+  placed at an offset the bounds check called legal and then written past the
+  end of the bitmap, and read past it again when the atlas was cut up: an
+  access violation in `memcpy`, on whichever rung the zoom happened to land on
+  when the atlas came out half height. So the font is built here rather than by
+  raylib, with the skyline packer, and a glyph that still would not fit is made
+  empty rather than left as a read off the end.
 - **Per-line LaTeX layout is cached** and rebuilt only when that line's text or
   the em size actually changes (`CodeBlock::EnsureCache`).
 - **Compiling and running happen on worker threads**, and repeated knob moves
@@ -266,6 +277,18 @@ written `2`. The trailing zeros and the trailing point are how a float is
 spelled in code, like the `f` suffix that was already being dropped -- none of
 it is mathematics. `1.5` keeps its digits; `100` is left alone.
 
+**A sigil is spelled the way the thing is written.** `Cl(3,0,1);` names the
+algebra, and it is spelled `Cl` because that is what the algebra is called and
+what it is set as -- `Cl^{3,0,1}`. It was `Algebra(...)` first, which named the
+category rather than the thing.
+
+**A renamed spelling is renamed, not aliased.** There is one name for a thing at
+a time, and the sketches are rewritten when it changes. Keeping the old one
+working was tried and undone: two spellings for one thing is two things to read
+and one of them is a lie about what the program calls it, and the cost of not
+doing it is a rewrite of a handful of text files. The same goes for `RToR`,
+which was `RealFunction`.
+
 **`:=` for a rule, `=` for a fixed value.** In code `=` always *makes* the left
 side equal to the right, which is what a mathematician writes `:=` for. But a
 line whose right-hand side is a bare number is not a rule, it fixes a value once
@@ -280,6 +303,14 @@ abstract. Concrete values live in the knobs and in the hovered code view.
 
 **The flip is per-line.** Each line of a box is independently LaTeX, hovered
 code, or code being edited. A line with no mathematical reading just stays code.
+
+**Indentation survives the flip.** Indenting is how code says a line is inside
+something, and the typeset reading has the same thing to say: a `return` set
+flush left does not look like it belongs to the function above it. So a row's
+indent is *measured off its own code*, in monospaced cells, which means a line
+sits at the same place on the page in either reading and does not jump sideways
+when it flips -- the horizontal half of the rule the height already followed.
+Prose is exempt, where a leading space is a space between words.
 
 **Editing a box means editing all of it.** Giving a box the caret turns the
 whole thing into code, and hides the injected values throughout: while you are
@@ -437,6 +468,30 @@ says which one it is the same thing as, which starts to matter as soon as two
 windows are open at once. It leaves both ends horizontally and lands on
 whichever side of the name the other end is already on, so it never crosses the
 thing it is pointing at.
+
+**A wire may not change its mind.** Where it lands used to be a choice -- the
+left edge of the name or the right, by which half of it the value was under --
+and a choice like that is a thing that flicks. Dragging a knob along under a
+name took the landing across the whole width of that name in a single frame and
+turned the wire inside out at the handle. So nothing is decided: the wire lands
+on the **nearest point of the name**, which for a value outside it is a point on
+its edge, so it still never crosses what it points at; and the bend is *signed*
+rather than a magnitude times a direction, so it passes through zero instead of
+jumping the sign. A value directly below its name now gets the straight vertical
+wire that says so.
+
+**And what is a choice is made once, when the drag begins.** Some of it cannot
+be made continuous: a bundle must gather on *one* side of the card, or its
+strands would set off in opposite directions and never meet, and no amount of
+smoothing turns that into a slider. So it is not re-decided. The side, the
+junction and the tangent at the value's end are taken when the value is picked
+up and kept until it is let go -- the value moves, and the thing it points at
+stays where it was put.
+
+That is the general shape of it, and it is worth keeping: **a choice re-taken
+every frame is a choice that can change its mind mid-gesture.** Freezing costs
+one small map on the box, cleared for anything no longer held, and it is the
+only honest fix where the alternative is a decision with no middle.
 
 **A name written five times is still one variable, so the wires converge.**
 They gather at a junction just clear of the *names* -- not of the card, which on
@@ -1450,7 +1505,12 @@ the seams to cut when this becomes a real extension point.
 
 ### Functions from reals to reals
 
-The second type. `RealFunction` is the C++ behind `f : R -> R`, and it is
+The second type. `RToR` is the GLSL behind `f : R -> R` -- named for the arrow
+it is, where `RealFunction` only said which reals were involved. What follows describes
+the vector space it used to be, which is gone; a function composes by being
+called now.
+
+`RealFunction` was the C++ behind `f : R -> R`, and it was
 literally a `std::function<float(float)>`:
 
 ```cpp
@@ -1520,7 +1580,7 @@ They run **ascending**, because that is the order a name is written back out in
 and a type has to be spelled the way it was generated: `BiTri` is one, `TriBi`
 is not.
 
-**The signature is written the way it is spoken.** `Algebra(3,0,1);` on a line
+**The signature is written the way it is spoken.** `Cl(3,0,1);` on a line
 of its own says p generators squaring to +1, q to -1 and r to 0 -- and that line
 is a statement *about* the box rather than one *in* it, so it leaves a blank
 behind rather than being compiled, and it reads as the sentence that names the
@@ -2038,6 +2098,14 @@ globe does, in every window that turns. It used to be the other way about, which
 is the hand *behind* the globe pushing it -- a real convention, and the wrong one
 for a thing you are holding rather than standing inside.
 
+**In every window that turns** is the whole of it, and it was not, for a while:
+the surface and the volume were turned round and the space window was left
+behind, so two of the three agreed and the third did not. The sign of the drag
+is not what to compare -- all three add it -- because a camera built by rotating
+a point about +y orbits the opposite way from one built with a `-sin(yaw)` in
+its eye, and those are the two constructions in the tree. What has to match is
+where the camera ends up.
+
 **The output decides the colour.** A real is viridis, signed, and it is the same
 map a real gets in every other window, so green means the same number wherever
 it is read. A `vec3` *is* a colour and is used as one. A complex number has an
@@ -2442,14 +2510,6 @@ sections above.
 - A multivector has no knob for the same reason a function has none: its chosen
   value is written into the source rather than sent down argv, so changing one
   is a rebuild. Several floats down argv would fix it.
-
-- **`Algebra(3,0,1);` is a guess at the syntax.** It reads well, it parses, and
-  now that it is set as `A = R^{3,0,1}` it no longer *looks* like a statement in
-  the program -- but it is still C++ that is silently not compiled, which is a
-  small lie. The alternative floated was to hang the signature on the type
-  names, `Una301` and `Bi301`, which would make the algebra a property of the
-  thing rather than of the box and would let two algebras share one canvas. A
-  deck of slides about one algebra would rather say it once, though.
 
 - **A multivector shows no injected value.** A real shows its number and a
   function shows its lambda, but a multivector of Cl(3,0,1) has sixteen

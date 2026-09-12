@@ -226,6 +226,73 @@ void FontStore::EvictIfNeeded() {
   }
 }
 
+namespace {
+
+// The atlas raylib would have built for us, built here instead.
+//
+// `LoadFontFromMemory` packs with method 0, which lays glyphs in rows of
+// `fontSize` and copies each glyph's full height into one. That assumes no
+// glyph is taller than the size it was asked for -- true of prose faces, and
+// wildly untrue of KaTeX's Size1..Size4, where a big brace or a \bigwedge is
+// several times the nominal size. Such a glyph is placed at an offset the
+// bounds check calls legal and then written past the end of the bitmap, and
+// `ImageFromImage` reads past it again a moment later. That is the crash: an
+// access violation inside memcpy, under LoadFontFromMemory, reached from a
+// box carrying an algebra whenever the zoom happened to land on a rung whose
+// atlas came out half-height.
+//
+// So: method 1, which packs by each glyph's real rectangle and copies nothing
+// it could not place. That alone is not quite enough -- raylib fills in a
+// full-size rec for an unpacked glyph as well, and the read off the end would
+// come back -- so anything that does not lie wholly inside the atlas is made
+// empty before the atlas is cut up.
+Font BuildFont(const std::vector<unsigned char>& file, const std::vector<int>& codepoints,
+               int request) {
+  constexpr int kPadding = 4;   // raylib's FONT_TTF_DEFAULT_CHARS_PADDING
+
+  Font font{};
+  font.baseSize = request;
+  font.glyphCount = static_cast<int>(codepoints.size());
+  font.glyphPadding = kPadding;
+  font.glyphs = LoadFontData(file.data(), static_cast<int>(file.size()), request,
+                             const_cast<int*>(codepoints.data()), font.glyphCount, FONT_DEFAULT);
+  if (font.glyphs == nullptr) {
+    font.glyphCount = 0;
+    return font;
+  }
+
+  Image atlas = GenImageFontAtlas(font.glyphs, &font.recs, font.glyphCount, request, kPadding,
+                                  /*packMethod=*/1);
+  if (atlas.data == nullptr) {
+    UnloadFontData(font.glyphs, font.glyphCount);
+    font.glyphs = nullptr;
+    font.glyphCount = 0;
+    return font;
+  }
+
+  // A glyph that did not fit is nothing rather than a read off the end. Checked
+  // against the bitmap rather than against the size that was asked for, which
+  // is the assumption that was wrong in the first place.
+  for (int i = 0; i < font.glyphCount; ++i) {
+    Rectangle& r = font.recs[i];
+    if (r.x < 0.0f || r.y < 0.0f || r.width <= 0.0f || r.height <= 0.0f ||
+        r.x + r.width > static_cast<float>(atlas.width) ||
+        r.y + r.height > static_cast<float>(atlas.height)) {
+      r = {0.0f, 0.0f, 0.0f, 0.0f};
+    }
+  }
+
+  font.texture = LoadTextureFromImage(atlas);
+  for (int i = 0; i < font.glyphCount; ++i) {
+    UnloadImage(font.glyphs[i].image);
+    font.glyphs[i].image = ImageFromImage(atlas, font.recs[i]);
+  }
+  UnloadImage(atlas);
+  return font;
+}
+
+}  // namespace
+
 FontStore::Sized* FontStore::Acquire(Face face, float emPx) {
   const int faceIdx = static_cast<int>(face);
   FaceData& fd = faces_[faceIdx];
@@ -253,8 +320,7 @@ FontStore::Sized* FontStore::Acquire(Face face, float emPx) {
 
   Sized sized;
   sized.emPx = em;
-  sized.font = LoadFontFromMemory(".ttf", fd.file.data(), static_cast<int>(fd.file.size()), request,
-                                  fd.codepoints.data(), static_cast<int>(fd.codepoints.size()));
+  sized.font = BuildFont(fd.file, fd.codepoints, request);
   if (sized.font.glyphCount <= 0 || sized.font.texture.id == 0) {
     UnloadFont(sized.font);
     return nullptr;

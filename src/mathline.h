@@ -47,7 +47,7 @@ enum class Kind {
   Unparsed,     // valid C++ perhaps, but no mathematical reading
   Declaration,  // `float a;` or `float c = <expr>;`
   Assignment,   // `c = <expr>;`
-  Algebra,      // `Algebra(3,0,1);` -- which algebra the box works in
+  Algebra,      // `Cl(3,0,1);` -- which algebra the box works in
   Viz,          // `Viz(Real);` -- this box draws that type, rather than using it
   Samples,      // `Samples(float, 24);` -- this box spreads that type out
   Signature,    // `vec3 swirl(vec2 p) {` -- an arrow between two spaces
@@ -183,13 +183,13 @@ std::vector<FunctionSpan> FindFunctions(const std::vector<std::string>& lines,
 // Which of them holds this line, or -1 for a line out in the open.
 int SpanAt(const std::vector<FunctionSpan>& spans, int line);
 
-// What a type is called in the shader. `RealFunction` is the one name that is
+// What a type is called in the shader. `RToR` is the one name that is
 // ours rather than GLSL's: it says *which* arrow a function is, where GLSL only
 // knows the thing returns a float.
 std::string GlslTypeName(std::string_view type);
 
 // The name a declaration of this type gives its variable, or empty if the type
-// is not one we know. `float` and `double` are reals; `RealFunction` is a
+// is not one we know. `float` and `double` are reals; `RToR` is a
 // function from reals to reals.
 bool IsRealType(std::string_view type);
 bool IsFunctionType(std::string_view type);
