@@ -23,11 +23,13 @@ set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 # where 330 is enough -- it is forward compatible into a 4.3 context.
 set(OPENGL_VERSION "4.3" CACHE STRING "" FORCE)
 
+# The release tarball rather than a git clone: the same source, without a .git
+# directory -- which, shallow clone or not, was 261 MB of the 336 MB fetched.
+# Pinned by hash, so a changed archive fails the configure instead of building.
 FetchContent_Declare(raylib
-  GIT_REPOSITORY https://github.com/raysan5/raylib.git
-  GIT_TAG        5.5
-  GIT_SHALLOW    TRUE
-  GIT_PROGRESS   TRUE)
+  URL      https://github.com/raysan5/raylib/archive/refs/tags/5.5.tar.gz
+  URL_HASH SHA256=aea98ecf5bc5c5e0b789a76de0083a21a70457050ea4cc2aec7566935f5e258e
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_MakeAvailable(raylib)
 
 # --------------------------------------------------------------------- sources
@@ -88,6 +90,13 @@ if(MSVC)
 else()
   target_compile_options(sketchbook PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
+
+# A build has to succeed while the app is open, since it usually is. Windows
+# will not overwrite a running executable but will rename one, so the old one is
+# moved aside just before the link (cmake/MoveAsideRunning.cmake).
+add_custom_command(TARGET sketchbook PRE_LINK
+  COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:sketchbook>
+          -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MoveAsideRunning.cmake")
 
 add_custom_command(TARGET sketchbook POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory

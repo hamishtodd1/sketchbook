@@ -12,6 +12,13 @@ cmake --build --preset mingw
 ./build/sketchbook.exe
 ```
 
+**Building while the app is open works.** Windows will not overwrite or delete a
+running executable, but it will rename one, so a step before the link moves the
+old `sketchbook.exe` aside (`cmake/MoveAsideRunning.cmake`) and the new one is
+written under the usual name. The running copy carries on; launching again gets
+the new build. A moved-aside copy is deleted by the first build after nothing is
+running it. So there is one build directory, and nobody has to close anything.
+
 Dev flags for capturing a frame without a human at the keyboard:
 `--screenshot <file.png> --frames <n> --width <w> --height <h>`.
 
@@ -57,6 +64,15 @@ What already protects it, and should not be undone:
   when the atlas came out half height. So the font is built here rather than by
   raylib, with the skyline packer, and a glyph that still would not fit is made
   empty rather than left as a read off the end.
+- **Nothing is measured off an atlas.** A glyph's advance and the box round its
+  outline come from the font's own tables (`hmtx`, `glyf`), which are exactly
+  proportional to the size asked for; the atlas bitmap is only where the pixels
+  come from. raylib's advances are whole pixels at the rung they were
+  rasterised at, so measuring them gave a line a different width on every rung
+  -- and since the zoom picks the rung, **a window changed size as the canvas
+  zoomed**, by a few percent in width and, once rows were rounded to whole dots,
+  by a whole dot in height. A window's size in world units must not depend on
+  the zoom: render a box at several zooms and divide by the zoom to check.
 - **Per-line LaTeX layout is cached** and rebuilt only when that line's text or
   the em size actually changes (`CodeBlock::EnsureCache`).
 - **Compiling and running happen on worker threads**, and repeated knob moves
@@ -139,6 +155,27 @@ frame, worst frame 4 to 7 ms, against an 8.3 ms budget at 120 Hz. The one real
 spike is the frame a canvas is *loaded* on -- 100 to 200 ms, every shader on it
 compiled at once -- and that is a load, not an interaction.
 
+### Every edge is smooth
+
+The window is 4x multisampled, and anything drawn onto it as geometry -- a line,
+a card, a marker, a mesh -- comes out smooth for nothing. **Two ways of drawing
+do not get that, and every window using either has to arrange it itself:**
+
+- **Into a render target.** raylib's render textures are single-sampled, so a
+  window that draws into one and puts the result on screen loses the window's
+  multisampling entirely. The space window does this, and draws into a
+  multisampled framebuffer that is resolved into its texture (`glext`'s
+  `MakeMultisample` and `Resolve`, since raylib can blit a framebuffer but
+  cannot make a multisampled one).
+- **In a fragment shader.** Multisampling smooths the edges of geometry; an edge
+  a fragment shader decides for itself -- a band it discards outside, a ray that
+  hits or misses -- is not the edge of any geometry and stays a staircase. So
+  such an edge is written as *coverage*: how much of the pixel is inside,
+  measured with `fwidth` or found by looking again, never yes or no.
+
+A new window is checked the same way these were: magnify a screenshot with no
+smoothing and look at an edge.
+
 ### raylib is not permanent
 
 raylib is a convenience, not a foundation. Assume it will be swapped one day and
@@ -204,6 +241,10 @@ restricted subset. Nobody hand-writes the LaTeX.
 and it renders as `a \in \mathbb{R}`. To actually compile, the app injects an
 initialiser so it becomes `float a = 0.2385;`. Every variable gets one,
 including function arguments.
+
+**A function is declared abstract the same way**, with a prototype --
+`float u(vec3 q);` -- and what is injected is a body. That is one of the main
+things the app is for; see *Functions nobody wrote a body for*.
 
 The injected text is **not part of the editable source**. It is generated, per
 type, by an `exampleGenerator` for that type. So each supported type needs two
@@ -279,7 +320,7 @@ it is mathematics. `1.5` keeps its digits; `100` is left alone.
 
 **A sigil is spelled the way the thing is written.** `Cl(3,0,1);` names the
 algebra, and it is spelled `Cl` because that is what the algebra is called and
-what it is set as -- `Cl^{3,0,1}`. It was `Algebra(...)` first, which named the
+what it is set as -- `Cl_{3,0,1}`. It was `Algebra(...)` first, which named the
 category rather than the thing.
 
 **A renamed spelling is renamed, not aliased.** There is one name for a thing at
@@ -351,21 +392,31 @@ second afterwards, since a resize is a run of separate wheel clicks and a grid
 that came and went between them would be a flicker, and they fade rather than
 blink, because the dots appearing is information rather than an event.
 
-**There is one dot per line of type.** The spacing is not an arbitrary lattice
-laid over the canvas: it is the height of a line at the default size, measured
-from the font at startup rather than written down. So the grid is ruled paper,
-and a box put down on it has its lines sitting in the gaps between rows of dots
-rather than straddling them.
+**There are two dots per line of type.** The spacing is not an arbitrary
+lattice laid over the canvas: it is half the height of a line at the default
+size, measured from the font at startup rather than written down
+(`kDotsPerLine`). So the grid is ruled paper, and a box put down on it has every
+line boundary on a row of dots.
 
-That last part needs one more thing: **it is the text that lands on the grid,
-not the card's corner.** A box's padding is not a whole number of anything, so
-snapping the corner would leave the lines wherever the padding happened to put
-them. Snapping the first character instead makes the alignment true, and the
-corner lands half a padding off a dot, which nobody can see.
+**A card's padding is one dot**, on every side, so the two things that used to
+compete -- the card's corner on a dot, and the text on the dots -- are the same
+thing. It used to be one dot per line with a padding that was no whole number of
+anything, and the rule had to choose: snapping the text left the corner visibly
+off the grid, and snapping the corner left the text off it. Making the dots finer
+until the padding could *be* one was the way out of choosing. A row the
+mathematics makes taller than a line -- a fraction, a big operator -- is rounded
+up to a whole number of dots, so the lines under it stay on the grid too.
+
+The dots are therefore twice as dense as they were, and the on-screen band the
+spacing is kept in was halved to match (`kGridMinPx`, `kGridMaxPx`), so at the
+default zoom the dots you see are the dots the padding is. Drawing them all at
+1920x1080 costs half a millisecond, and only while they are up.
 
 **Every window sits on the grid, and boxes never overlap.** A window's top-left
-corner snaps to the nearest dot of the grid *as drawn* -- the text's corner, for
-a box -- so placement gets finer as you zoom in. That holds for boxes, number lines, plots and
+corner snaps to the nearest dot of the grid *as drawn* -- the in-between dots
+only once they have faded at least halfway in (`SnapStep`), since a corner on a
+dot you cannot see does not look like it is on anything -- so placement gets
+finer as you zoom in. That holds for boxes, number lines, plots and
 pictures alike (`SnapToGrid`, in `grid.*`, next to the code that draws the
 dots). Boxes
 additionally never overlap: one put down on top of another steps clear along
@@ -387,6 +438,25 @@ the window system offers -- GLFW's "hand" is the pointing one -- so the system
 cursor is hidden and ours takes its place, in two passes so it reads on the pale
 canvas and on a dark card alike. Losing the window counts as letting go, so the
 cursor can never be left hidden underneath somebody else's app.
+
+**Nothing is hovered while something is held.** A knob being dragged, a 3D
+window being turned, a window carried or cropped, the canvas panned, a lasso
+drawn, a finger down: the pointer is busy doing that, and whatever it passes over
+on the way is not being pointed at. **The Escape menu counts too**: while it is
+up the pointer is choosing from it, and the canvas under the scrim stays still. Before this, sweeping a knob up across a box
+flipped the line under the cursor to code, rims came and went, markers lit up,
+and another box's windows jumped to the row the cursor happened to cross -- the
+canvas answering questions nobody asked, in the middle of a gesture that wants
+the screen to hold still.
+
+The mechanism is one flag and one function (`hover.h`). The app sets the flag
+once a frame, after input, from the list of gestures that is already written out
+where each one is handed the pointer. Every *hover* reads `hover::Pointer()`,
+which is the real pointer normally and nowhere while the flag is up; the
+gesture's own code keeps reading the real one. So what the held thing says about
+*itself* is untouched -- the knob's own boxes and wires, the carried window's
+rim, the crop handle under the hand, the drop target swelling -- because none of
+that was ever hover.
 
 **A drag in flight owns the pointer.** Hovering a rim claims the pointer, so
 without this rule letting go of one window over another window's rim would never
@@ -413,7 +483,7 @@ Two mechanisms so far, and both should be extended rather than replaced:
 **Colour is identity.** Every variable has its own colour, taken from
 **viridis** by its position in its box (`VariableColor`, in `theme.h`), and
 everything standing for that variable wears it: the handle or marker on its
-number line, its curve on a plot, its name written beside either. Viridis
+number line, its curve on a plot, its name written beside its marker. Viridis
 because it is perceptually even -- two colours the same distance apart on the
 map look equally different -- and the walk along it is by the golden ratio, so
 neighbouring variables land far apart and adding one never recolours the others.
@@ -447,9 +517,13 @@ up: you are holding the window and everything on it. A plot has no handles and
 nothing finer to point at than the window itself, so hovering one lights every
 curve on it -- the granularity follows what the window has to offer.
 
-**And it works from the other end.** Highlight a mention of a variable in the
-text and the same things light up: the name wherever else it is written, the
-wires converging, and the viz blinking at the far end. Taking hold of a name in
+**And it works from the other end.** Point at a mention of a variable in the
+text -- or highlight one -- and the same things light up: the name wherever else
+it is written, the wires converging, and the viz blinking at the far end. It is
+the *same set*, gathered by one function in the app, so hovering a window and
+hovering its name cannot come to disagree about what "this variable" lights up.
+Pointing is a hover like any other, so a gesture sweeping across a box leaves
+its names alone. Taking hold of a name in
 the code and taking hold of its window are the same statement made from
 opposite sides, so they had better look the same -- and it is the same gesture
 that pulls a variable out of the code onto an axis of its own, read as a
@@ -469,29 +543,24 @@ windows are open at once. It leaves both ends horizontally and lands on
 whichever side of the name the other end is already on, so it never crosses the
 thing it is pointing at.
 
-**A wire may not change its mind.** Where it lands used to be a choice -- the
-left edge of the name or the right, by which half of it the value was under --
-and a choice like that is a thing that flicks. Dragging a knob along under a
-name took the landing across the whole width of that name in a single frame and
-turned the wire inside out at the handle. So nothing is decided: the wire lands
-on the **nearest point of the name**, which for a value outside it is a point on
-its edge, so it still never crosses what it points at; and the bend is *signed*
-rather than a magnitude times a direction, so it passes through zero instead of
-jumping the sign. A value directly below its name now gets the straight vertical
-wire that says so.
+**A wire's side is chosen once, when the value is picked up.** Which side a wire
+leaves by -- the left edge of a name or the right, the left of the card or the
+right -- is a genuine choice with no middle: a bundle must gather on *one* side
+or its strands would set off in opposite directions and never meet. And a
+choice re-taken every frame is a choice that can change its mind halfway
+through a drag, which is exactly what it did: dragging a knob across the card
+flipped the whole bundle to the other side in a single frame.
 
-**And what is a choice is made once, when the drag begins.** Some of it cannot
-be made continuous: a bundle must gather on *one* side of the card, or its
-strands would set off in opposite directions and never meet, and no amount of
-smoothing turns that into a slider. So it is not re-decided. The side, the
-junction and the tangent at the value's end are taken when the value is picked
-up and kept until it is let go -- the value moves, and the thing it points at
-stays where it was put.
+So it is not re-decided. The side is taken when the value is taken hold of and
+kept until it is let go; everything else about the wire follows from it, so
+freezing that one bool freezes the layout. **A choice re-taken every frame is a
+choice that can change its mind mid-gesture** is the rule, and this is the
+cheapest thing that obeys it -- one bool per held value, and four lines.
 
-That is the general shape of it, and it is worth keeping: **a choice re-taken
-every frame is a choice that can change its mind mid-gesture.** Freezing costs
-one small map on the box, cleared for anything no longer held, and it is the
-only honest fix where the alternative is a decision with no middle.
+Making the geometry *continuous* instead was tried and undone. It worked, but it
+was a second mechanism for a problem the freeze already covers -- while a
+gesture is running nothing is re-decided, and while merely hovering the value
+does not move -- and the wiring is meant to stay simple.
 
 **A name written five times is still one variable, so the wires converge.**
 They gather at a junction just clear of the *names* -- not of the card, which on
@@ -597,13 +666,20 @@ A window standing for it therefore has to answer *when*, and there are two
 answers depending on whether the box is being read or being written.
 
 **A window shows the value at the line the box is being read at.** That line is
-the box's **executed up to here**, and it is exactly where you are looking:
+the box's **executed up to here**:
 
-- the **caret's** line, if the box has one;
-- otherwise the line the **pointer** is over, since pointing at a line is asking
-  what things were once it had run;
-- otherwise **the end** -- which is what a box nobody has touched this session
-  shows, and what the whole block came to.
+- the **caret's** line, while the box is selected;
+- otherwise **the end**, which is what the whole block came to.
+
+It used to follow the pointer as well, and to remember where the caret had been
+left. Both made an unselected box's windows depend on where the mouse happened to
+be passing, so a number line flickered between values as the pointer crossed the
+card on its way somewhere else. A box nobody has selected is not being read a
+line at a time.
+
+**A hovered declaration shows the literal it is given**, not the value at the
+reading line: `float a;` hovered reads `float a = 0.4;`, what the knob chose,
+even when a line further down has made `a` something else by the end.
 
 Nothing is run again to answer that. The shader writes **every real's value
 after every line** into one shader storage buffer, in the single invocation that
@@ -670,9 +746,7 @@ An earlier note here said a free real could not be assigned over, because it
 
 **A variable not yet declared where you are reading is not shown at all.**
 Before its declaration it does not exist, so a window for it would be reporting
-a value it does not have; it disappears rather than showing a stale one. That is
-a fact about the program rather than about the reading, so it holds whether the
-line was chosen by the caret or by the pointer.
+a value it does not have; it disappears rather than showing a stale one.
 
 ### Display windows and vizes
 
@@ -783,7 +857,7 @@ because every viz needs it and a place box should be one line.
 It is:
 
 ```
-Viz(float);                                Viz(RealFunction);
+Viz(float);                                Viz(RToR);
 p = sbMap(vec2(value, 0.0)) + p*sbScale;   p = sbMap(p);
 ```
 
@@ -791,7 +865,7 @@ for the marker on a number line and the curve on a plot respectively. The mesh
 halves are the ring, and the sampling:
 
 ```
-Viz(float);                                Viz(RealFunction);
+Viz(float);                                Viz(RToR);
 for (int i = 0; i < 20; ++i) {             float px = value(-8.0f), py = -8.0f;
   float s = 6.2832f * i / 20.0f;           for (int i = 1; i < 129; ++i) {
   float e = 6.2832f * (i + 1) / 20.0f;       float y = -8.0f + 16.0f*i/128.0f;
@@ -868,7 +942,7 @@ questions under different names.
 A function is a curve on a plot and a field of colour on a number line. Those
 are two different answers to "how is one drawn", not one answer used twice --
 so **a type may have several vizes, in several windows**, and a viz box may say
-which window it is for: `Viz(RealFunction, Axis)`. The two are held apart as
+which window it is for: `Viz(RToR, Axis)`. The two are held apart as
 `Type@Window`, and a box naming no window is the one a window gets when it asks
 for a type and nothing more.
 
@@ -895,17 +969,6 @@ and dropping one row onto another is how they come to share a scale, exactly as
 it is for values. A box of nothing but functions still gets rows, which is new:
 a number line used to mean a box had reals.
 
-**How the function reaches the shader is by its samples, not as source.** Every
-`RealFunction` is already sampled and printed back -- that is how the plot draws
-it -- so the field hands those samples to the fragment shader in a one-row
-texture and reads them back per pixel. Storing the function as a GLSL string
-instead would mean translating arbitrary C++ (a lambda, `f + 2 * g`) into GLSL,
-which is a translator we do not have and did not need: the picture is the same
-either way. It is worth knowing that the same trick scales -- an R3Function
-sampled onto a 3D texture is exactly what a volume renderer wants to read
-anyway -- so the samples route may be the answer there too rather than a
-stopgap.
-
 ### Space and spacetime
 
 The third and fourth dws, and the first with a camera of their own. A number
@@ -915,9 +978,20 @@ they differ in exactly two things: the algebra whose `Tri` they take, and the
 sky. **Cl(3,0,1) is space and Cl(2,1,1) is spacetime**, where the third axis is
 time. A box working in neither algebra gets neither window.
 
-Like the number line, **a box gets one and all of its points share it**: a stack
-of one-point windows would say nothing about how the points compare, and the
-points in a box are read together.
+Like the number line, **a box gets one and all of its points share it** to begin
+with: a stack of one-point windows would say nothing about how the points
+compare, and the points in a box are read together. And like the number line,
+that is only where they start. A point can be pulled out into a window of its
+own and dropped onto another -- of the same space; a spacetime point has no place
+in a space -- so a window holds whichever points were put in it, and `Sync`
+keeps that arrangement: a point already in some window stays there, and only a
+new one goes to its box's **home** window, which is also the one that shows the
+spread a function of the box is being fed. The canvas file records each window's
+points, and a canvas written before this has every window as its box's home.
+
+**A point's colour is its variable's.** It used to be its index in the window,
+which happened to agree while every window held its whole box in order, and would
+have recoloured a point as it was pulled out.
 
 **A Tri's coefficients are homogeneous coordinates**, and which one is which
 axis needs no table. A grade-3 blade of a four-generator algebra *omits* exactly
@@ -947,8 +1021,13 @@ in and out, like every other window's wheel is its own. A number line already
 claims the right button for its scroll; this claims it for its camera, and says
 so, so the canvas leaves its own pan alone for as long as the gesture lasts.
 
-Three things about the GPU here were learnt the hard way and should not be
+Four things about the GPU here were learnt the hard way and should not be
 undone:
+
+- **It draws multisampled.** Into a 4x framebuffer, resolved into the shared
+  texture before that is put on screen. A render texture on its own is
+  single-sampled, which gave every wall, wire and point a staircase edge the
+  rest of the canvas did not have.
 
 - **One render target between all of them**, not one each. It is drawn into and
   blitted at once, so the next window has it straight back -- which is what
@@ -985,19 +1064,13 @@ screen; if the window is not the deck's shape, the sides are what get lost.
 anyone has ever clicked through does. It is a row of places you can scroll along
 and zoom out of, rather than a list beside the work.
 
-The **new slide button lives on the canvas**, not in a toolbar, and it stands at
-the **end of the deck** -- in the gap just past the last slide, rather than out
-in the middle of where the next one is going to be. That is what makes it read
-as the place the deck stops. Clicking it puts a slide clear of the last one,
-with the same gap between them that every pair of slides has, and walks the
-button along to the new end; so the next click lands the next slide further
-right again, and the button is always where the deck runs out.
-
-**A canvas with no deck has no button**, because there is no end for it to stand
-at -- and because a canvas that has just been opened should be empty. The first
-slide of a deck is asked for from the Escape menu; after that the button on the
-canvas is where slides come from, since by then there is a deck for it to mark
-the end of.
+**Slides come from the Escape menu, and only from there.** "New slide" puts one
+at the end of the deck, clear of the last slide with the same gap every pair of
+slides has, so a deck grows to the right by itself. There used to be a button
+on the canvas as well, standing at the end of the deck and walking along past
+each slide it made. It is gone: the canvas is for what is on the slides, and a
+control standing among them was one more thing on the canvas that was not the
+work.
 
 **And the arrow keys go through it.** Once the camera is framing a slide, left
 and right flick to the one before or after -- instantly, because going through a
@@ -1077,7 +1150,7 @@ decided by each window's middle, which is exactly how the lasso decides what it
 caught -- so a caption half over an edge belongs to whichever slide holds its
 middle, and there is one answer to that question rather than two. The deck then
 **closes the gap**: every slide to the right comes back by one slide and one
-gap, and so does everything standing on them, and so does the new-slide button.
+gap, and so does everything standing on them.
 A deck is a row, and a row has no holes in it.
 
 The aspect is a deck-wide setting, chosen from the Escape menu as one of the few
@@ -1100,7 +1173,7 @@ and one derived from them, the smallest thing that shows the whole loop -- and
 that is a thing to delete before beginning rather than a thing to begin from.
 Typing with nothing selected still starts a box wherever you are looking, so
 nothing is harder to reach; there is simply nothing there until you put it
-there. The new-slide button is gone with it until there is a deck.
+there.
 
 ### Windows, and closing them
 
@@ -1355,6 +1428,44 @@ of them is in view. Free variables get a draggable handle, derived ones a
 read-only marker that moves when its inputs do; they are told apart by shape,
 and told from each other by colour, exactly as before.
 
+**And a viz is pulled out of the window it is in.** Hold Ctrl and drag a marker
+off its number line, a curve off its plot, or a point out of its space window --
+or, on a tablet, hold the window with one finger and drag the viz out with
+another. Nothing happens while it is still inside the window; the moment it
+leaves, it is a window of its own, under the pointer, being carried. Letting go
+on another window of the same kind merges them, exactly as dropping any carried
+window does, and letting go inside the window it came from does nothing.
+
+That last property is the design, not a detail: **pulling out ends in an
+ordinary carry**, so the drop -- onto the canvas, onto another window to merge,
+onto the cross -- is the code every window already had. What is new is only how
+the carry starts. It is the same move as pulling a variable out of the code,
+made from a window instead of from text.
+
+What is under the pointer is asked the same way for the mouse and the finger
+(`App::FindPullable`), so the two cannot disagree. Two things about asking:
+
+- **A curve cannot be found from this side.** It is drawn by the GPU, and the
+  CPU has no way to evaluate a GLSL function to see where it runs. So a plot with
+  several curves is asked on the next frame: while it draws, it reads back the
+  few pixels round the pointer before and after each curve, and the last curve to
+  change them is the one on top. One tiny readback, once per gesture. A plot with
+  one curve needs no question -- press anywhere in it.
+- **A field is under the pointer everywhere across its row**, so off every
+  marker, the field painted last is the one taken.
+
+**A carry can follow a finger** (`carry.h`). For a mouse, a panel following the
+pointer is exactly right. With two fingers down, the system's emulated mouse
+follows the *first* one -- the finger holding still -- so a window pulled out by
+the second would never move. The panels' carry code asks `carry::` for where the
+pointer is and whether it is down, which is the mouse unless the app has handed
+the carry to a finger.
+
+Known edge: holding a *number line* with a finger presses on it, and a press on
+the bare axis makes a new value. So the tablet gesture on a number line creates a
+stray value before the pull begins; plots and space windows have no such press.
+Untested on a touchscreen, since there is none here to test it on.
+
 **A variable earns an axis of its own by being pulled out of the code.** Select
 part of where it is written -- any part of any mention of it -- and drag it out
 of the box. It comes away as an axis carrying just that variable, following the
@@ -1482,7 +1593,7 @@ A type is three concerns, and they are three files:
 
 | file | what it holds |
 | --- | --- |
-| `RealFunction.*` | the type itself: the C++ the app injects so `RealFunction f;` compiles, and the statement that prints one back |
+| `RealFunction.*` | the body the app writes for a function nobody defined, and the key a function of reals is drawn under |
 | `Clifford.*` | a whole family of types: it writes out the structs and products of Cl(p,q,r) on demand |
 | `RealFunctionViz.*` | how one is shown and how an example of one is made -- the *viz*, plus the plot it is shown in |
 | `RealViz.*` | the same two things for a real: the number line (a *dw*) and the marker on it (a *viz*) |
@@ -1499,62 +1610,57 @@ only because the toolchain has to call them and the toolchain does not include
 raylib.
 
 What is still *outside* `src/types/` and would have to move before a type could
-really be dropped in: `mathline` knows the spelling `RealFunction` and its LaTeX
-reading, and `mathprogram` has a `Kind` enum with one entry per type. Those are
+really be dropped in: `mathline` knows the type names it reads and their LaTeX,
+and `mathprogram` has a `Kind` enum with one entry per type. Those are
 the seams to cut when this becomes a real extension point.
 
-### Functions from reals to reals
+### Functions nobody wrote a body for
 
-The second type. `RToR` is the GLSL behind `f : R -> R` -- named for the arrow
-it is, where `RealFunction` only said which reals were involved. What follows describes
-the vector space it used to be, which is gone; a function composes by being
-called now.
+This is one of the things the app is *for*, and it is easy to lose sight of:
+**a function you say things about without saying which function it is.** Much
+of the mathematics this is aimed at -- PDEs above all -- is about functions in
+general: `u` satisfies this, its derivative is that. So `u` is declared and
+never defined, exactly as `a` is declared in `float a;` and never given a
+number.
 
-`RealFunction` was the C++ behind `f : R -> R`, and it was
-literally a `std::function<float(float)>`:
+It is written the way GLSL already writes a function with no body, as a
+**prototype**, and it reads as the arrow and nothing more -- no brace, because
+nothing has been said about what travels along it:
 
-```cpp
-struct RealFunction : std::function<float(float)> {
-  using std::function<float(float)>::function;
-};
+```
+float k;                                     k \in R
+float u(vec3 q);                             u : R^3 -> R
+float v(vec3 q) { return u(q) * k; }         v(q) := u(q) k
 ```
 
-Nothing to learn and nothing to take on trust: it is exactly what a C++
-programmer already means by a function from floats to floats. It is defined in
-the prologue, along with the operators that make these functions a **vector
-space** -- `+`, `-`, unary `-`, and multiplication by a scalar either way round.
-Pointwise `*` and division by a scalar come along too, which makes it an algebra
-as well, but the vector space is the part that matters.
+**The body is injected, exactly as a value is.** A program cannot run a
+function in general, so the app chooses one, and the choice is a *body* written
+for that signature (`ExampleFunctionBody`, in `types/RealFunction.*`). It is one
+of four recognisable shapes -- a wave, a parabola, a bump, a line -- of whatever
+single number the parameter offers: the parameter itself for a real, how far out
+it is for a point, its size for a complex number; and one shape per component
+when the answer has several. Deterministic in the function's name, like every
+other example. Hovering the prototype shows it in blue, standing where the
+semicolon was; editing hides it, because it is not yours. Everything downstream
+treats the result as a function like any other: it gets its plot, its field, its
+picture or its volume, and other functions may call it.
 
-So a box reads:
+**Unless the box gives it a body.** A prototype followed anywhere in the same box
+by a definition of the same function is not a function of its own. It is a
+forward declaration, which is what GLSL already calls it: it is hoisted as
+written -- which is what lets a function *above* that body call it -- and nothing
+is injected. So a box can begin `float u(vec3 q);`, say things about `u`, and
+later say what `u` is, without a line being deleted.
 
-```cpp
-RealFunction f;                                  f : R -> R
-RealFunction g = [](float x) {                   g(x) = sin(1.4x)
-    return sin(1.4f * x); };
-RealFunction h = f + 2 * g;                      h = f + 2g
-```
+**There is no type name for any of this.** There used to be one: `RealFunction
+f;`, then `RToR f;`. It could only ever name one arrow, and given a body it said
+nothing the signature did not. The signature *is* the type, so a declaration
+declares a value and a prototype declares a function, and those are two
+different shapes of line. `RToR` survives only as the key a function of reals is
+drawn under, which is what a `Viz(RToR)` box would name.
 
-Three things follow from the settled decisions, and each needed a choice:
-
-**A concrete function is a lambda.** Not an expression DSL with a magic `x`: a
-lambda is what a C++ programmer writes, its parameter cannot collide with a
-variable in the box, and it reads as a definition. `mathline` reads a lambda
-only as a whole initialiser, and renders it the way a function is defined, as
-`f(x) = ...` rather than point-free.
-
-**The example generator produces source, not a number.** `ExampleFunction` picks
-one of four recognisable shapes -- a wave, a parabola, a bump, a line -- with a
-coefficient, and writes out the lambda. It is deterministic in the variable's
-name, like `ExampleFloat`.
-
-**A function reaches the screen as samples.** There is no other way to send one
-back from a program: the generated code calls `sb_plot`, which prints the
-function's value at `kSampleCount` points across a fixed window, and the plot
-draws the polyline. A free *real* reaches the program through argv, so moving
-its knob is a re-run; a free *function* cannot, so its example is written into
-the source and changing it would be a rebuild. That is why a function has no
-knob yet.
+A multivector parameter offers no single number to shape the answer with, so a
+function *of* one is given a constant. That is a gap, not a choice.
 
 ### Clifford algebras
 
@@ -1675,35 +1781,39 @@ written when it is wanted: name the type and the operator appears with it, and
 where the exact type was never asked for the sum widens to the nearest one that
 exists rather than going missing.
 
-**The algebra gets a name, and everything else is said in terms of it.** The
-line that chooses it is not a statement in the program, it is a statement of
-mathematics, and it is set as one: `Algebra(3,0,1);` reads
+**The algebra is considered, not named.** The line that chooses it is not a
+statement in the program, it is the sentence a text opens a section with, and it
+is set as one: `Cl(3,0,1);` reads
 
->   A = Cl^{3,0,1}
+>   Consider Cl_{3,0,1}
 
-with a **script A**, chosen so that an ordinary variable called `A` is a
-different letter and there is nothing to collide with. After that the types need
-no signature of their own:
+and every type after it names the algebra outright:
 
 | type | reads |
 | --- | --- |
-| `Una`, `Bi`, `Tri` | an exterior power, `\bigwedge^{k} A` |
-| `Even` | `A^{+}` |
-| `Odd` | `A^{-}` |
-| `Multivector` | `A` |
+| `Una`, `Bi`, `Tri` | an exterior power, `\bigwedge^{k} Cl_{3,0,1}` |
+| `Even` | `Cl_{3,0,1}^{+}` |
+| `Odd` | `Cl_{3,0,1}^{-}` |
+| `Multivector` | `Cl_{3,0,1}` |
 | `ScalarQuad` and other compounds | the direct sum of their parts |
 
-The `+` and `-` are the Z/2 grading, which is what even and odd *are*. That
-superscript says something different from the one on `\bigwedge^{1} A`,
-which is why a single grade always wears its wedge rather than being shortened
-to `A`.
+It used to bind a letter -- `A = Cl^{3,0,1}`, with a script A so an ordinary
+variable called `A` would not collide -- and say every type in terms of `A`. That
+is a definition, and there is nothing to define: a name for the algebra is one
+more thing to look back up, and the full name costs a subscript.
 
-**`A` is the algebra, and the exterior power is of the space underneath it.**
-Those are two different objects: the quadratic space has dimension p+q+r, the
-algebra over it has dimension 2^(p+q+r), and only the algebra has an even and an
-odd half. Naming `A` as the algebra is what makes `A^{+}` mean anything; the
-price is that `\bigwedge^{k} A` is then an exterior power of an algebra,
-which is not literally what is wanted.
+**The signature goes under, because the grading goes over.** The `+` and `-` are
+the Z/2 grading, which is what even and odd *are*, and a superscript already
+holding the signature leaves them nowhere to go. That superscript says something
+different from the one on `\bigwedge^{1}`, which is why a single grade always
+wears its wedge rather than being shortened to the algebra.
+
+**The exterior power is of the space underneath the algebra, and is written of
+the algebra.** Those are two different objects: the quadratic space has
+dimension p+q+r, the algebra over it has dimension 2^(p+q+r), and only the
+algebra has an even and an odd half. Writing the algebra is what makes its `+`
+mean anything; the price is that `\bigwedge^{k} Cl_{3,0,1}` is then an exterior
+power of an algebra, which is not literally what is wanted.
 
 It is a standard abuse and the usual justification holds: a Clifford algebra is
 isomorphic to the exterior algebra of its space *as a graded vector space*,
@@ -1749,15 +1859,15 @@ identifier is followed by a bracket and the rewrite reads a *call* of `return`.
 So it is lifted out before the climb starts, and the operator then wraps only
 what is being returned.
 
-**A function is a GLSL function.** `RealFunction w(float x) { return sin(x); }`
+**A function is a GLSL function.** `float w(float x) { return sin(x); }`
 -- written the way GLSL writes one, because that is what it becomes. It is
 hoisted above `main`, since GLSL has nowhere else to put a function, and the
 hoisted block is padded to one line per line of the box so the two halves keep
 the same shape.
 
-That is what replaced the vector space. `h = f + 2 * g` needed `RealFunction` to
-be a `std::function` with operators on it; now the same thing is written
-`RealFunction h(float x) { return f(x) + 2.0 * g(x); }`, which composes by
+That is what replaced the vector space. `h = f + 2 * g` needed a function to be
+a `std::function` with operators on it; now the same thing is written
+`float h(float x) { return f(x) + 2.0 * g(x); }`, which composes by
 calling rather than by overloading, is honest about what the GPU will do, and
 costs nothing at run time. A function's *parameters* can then be uniforms, which
 is the whole point: dragging a knob reshapes a function at display rate with
@@ -1855,6 +1965,12 @@ product between the types it mentions.
 
 ### A function is drawn by being called
 
+**A curve covers part of a pixel.** The band either side of the curve used to be
+in or out -- `discard` beyond it -- and in or out is a staircase that
+multisampling cannot touch. So it fades over one pixel, using `fwidth` to turn
+a distance in value units into one in pixels, and weighs the same as before.
+
+
 A function is GLSL, so nothing samples one any more. The box owns a third
 generated shader -- its own functions, and a `main` that calls whichever one it
 is asked for -- and a window drawing a function *evaluates* it, per pixel.
@@ -1914,9 +2030,8 @@ default, since the end of such a box is inside the function. Read anywhere else
 and the spread goes, because nothing is being asked.
 
 **A function is recognised by its shape, not by a type name.** `Tri p(float t)`
-is a function exactly as `float f(float x)` is. `RealFunction` survives only as
-one spelling of a float-returning one, because it says *which* arrow a function
-is where GLSL only knows the thing returns a float. A function runs from its
+is a function exactly as `float f(float x)` is, and `float f(float x);` is one
+too, with the app supplying the body. A function runs from its
 signature to the brace that closes it, so it may be as many lines as it likes,
 and every line of it is hoisted -- which is what makes "the caret is inside this
 function" a question with an answer.
@@ -1989,8 +2104,12 @@ before this was written down. `realfunction.sketch` did not compile at all --
 `undefined variable "a"` -- and so drew no curves and no fields, silently,
 because a box whose diagnostic nobody is looking at fails quietly.
 
-A curve and a field return before the body, so before the modes branch every
-variable is set to the value it was *given* where it was declared. That is the
+Every way of drawing a function returns before the body -- a curve, a field, a
+picture, a surface, a volume -- so before any of them every variable is set to
+the value it was *given* where it was declared. *Before any of them* is the part
+that went wrong: the picture, the surface and the volume were added above that
+line, and drew with every variable at nought, so their knobs did nothing and
+nothing complained. That is the
 right thing for them to go on: what a knob moves is exactly one of those
 literals. A function reading a variable the body *computes* is a different
 matter, and a drawing of it reads whatever the declaration left -- the body is
@@ -2161,6 +2280,21 @@ front to back so what is nearer hides what is behind it.
 It starts *turned*, where a surface starts flat -- a volume looked at square is
 a wash with no depth in it, so there is no discovery to save for later.
 
+**A surface's edges are supersampled, and only its edges.** Whether a ray hits
+is yes or no, so a silhouette -- or a near hill hiding a far one -- is a
+staircase, and not one multisampling can see. Four rays for every pixel would be
+four times a 160-step march on every pixel every frame, which a large window
+cannot afford. So each pixel marches once, and notices whether it was *next to
+an edge*: either it passed within a pixel and a half of the surface before
+landing, or it clipped a crest and came back out before it was that deep. Only
+those pixels march four more rays across themselves and average them by
+coverage. That is a line a few pixels wide along each edge, not the window.
+
+A pixel and a half rather than one, because the march samples its approach a
+dozen pixels apart along the ray and can see it a pixel further off than it was.
+Both sides of an edge are looked for, because an edge found only from outside
+blends half its pixels and leaves the other half stepped.
+
 **Where the ray crosses is found properly, not stepped to.** A surface's colour
 is the height *at the point the ray hit*, so how precisely that point is found is
 not a question about smoothness -- it is a question about whether the colour is
@@ -2206,8 +2340,10 @@ a box with a picture and a space window put one on top of the other. The order
 is settled once, where the panels are chained (`App::Init`), and each kind only
 has to know how many slots the kinds before it have taken -- so no one of them
 owns the arrangement and adding a fifth is one line. It lives in `dock.h`, with
-one size for all of them, since two columns that do not line up in rows are not
-columns.
+one height for all of them, since two columns that do not line up in rows are not
+columns. Most are square at that height; **a space window is 16:9**, the shape a
+view into a space is looked at in, and its shared render target is 16:9 too so
+the camera's projection comes out the right shape without a crop.
 
 **The ones a box is *read against* are not in it.** Its number lines and its
 plots stay under it, as wide as it is, because a number line is a scale the
@@ -2230,7 +2366,12 @@ a diagonal. Everything else follows the number lines: a plot starts docked under
 its box (below the number lines), is moved by its rim, snaps to the grid, zooms
 on its own wheel, and **merges with another plot when dropped onto it**. That
 last one is how the vector space becomes visible: f, g and f + 2g against one
-set of axes, each curve named in its own colour.
+set of axes, each curve in its own colour.
+
+**A plot does not write its curves' names.** It used to, in the top-left
+corner, and a letter in a corner is a second, weaker way of saying which curve
+is which -- the colour already says it, and pointing at either end says it
+properly, by lighting up the name where it is actually written.
 
 ### First proof of concept
 
@@ -2329,6 +2470,18 @@ Canvases save and load: Escape menu buttons, Ctrl+S (straight back to where the
 canvas came from) and Ctrl+O, plus `--open <file>` on the command line. The
 format is plain text, one record per line, in `App::SaveCanvas`.
 
+**The menu has no title**, since everybody who pressed Escape knows which menu
+it is, and its last button takes the app **fullscreen** and back. Borderless
+rather than exclusive: the window covers the monitor and loses its title bar
+with no change of display mode, so it is instant, disturbs nothing else, and
+leaving puts the window back exactly where it was. **And not always on top**:
+raylib's own `ToggleBorderlessWindowed` also makes the window topmost, so
+alt-tabbing away brought another app to the front *underneath* it and clicks
+went to a window you could not see. So it is done by hand -- title bar off,
+window over the monitor -- and the app tabs away and back like any other. The button says what pressing
+it gives you, like every toggle here, and pressing it closes the menu -- asking
+for the whole screen is asking to look at the canvas.
+
 **The menu lists the canvases opened lately**, most recent first, and one click
 goes back to one. The point is that going back to what you were just working on
 should not be a trip through a file dialog -- it is the commonest thing anyone
@@ -2368,17 +2521,18 @@ variables from two different boxes at once.
 Functions work end to end as well. A box of
 
 ```
-RealFunction f;
-RealFunction g;
-RealFunction h = f + 2 * g;
+float a;
+float f(float x);
+float g(float x);
+float h(float x) { return f(x) + a * g(x); }
 ```
 
-renders as `f : R -> R`, `g : R -> R`, `h = f + 2g`, with three plots docked
-underneath drawing the curves. Hovering a declaration shows the lambda the app
+renders as `a \in R`, `f : R -> R`, `g : R -> R`, `h(x) := f(x) + a g(x)`, with
+plots and fields docked underneath. Hovering a prototype shows the body the app
 chose for it, in blue. Dropping one plot on another puts both curves on one set
-of axes in different colours. Reals and functions mix in one box: `float a;` with
-`RealFunction g = a * f;` gives a knob that reshapes a curve as you drag it,
-still without recompiling.
+of axes in different colours, and `a`'s knob reshapes `h` as you drag it without
+recompiling. A prototype of any signature works the same way -- `float u(vec3 q);`
+is a volume of a function nobody wrote.
 
 Every window is moved by the **rim** around its edge, which appears on hover.
 Boxes are sized for the worst case across both readings -- **in height as well
@@ -2434,7 +2588,7 @@ with no viz boxes keeps the drawing the app was born with.
 A function from a real to a point works end to end. A box of
 
 ```
-Algebra(3,0,1);
+Cl(3,0,1);
 float k;
 Tri p(float t) {
   float s = t * (1.0 + k);
@@ -2454,6 +2608,8 @@ how to make an example of it, how to draw it), `blocks.*` (per-line rendering
 and editing, code and prose alike), `selection.h` (the lasso, and the eight
 things every panel does with what it caught), `compiler.*` (what is left of the
 toolchain: reading a driver's log), `dock.h` (where a window a box makes goes before anybody moves it),
+`hover.h` (what the pointer is over, which is nothing while a gesture is held),
+`carry.h` (what a carried window follows: the mouse, or one finger),
 `logging.h` (what the log says, and mostly what it does not),
 `shaderwindow.*` (a colour-valued map of the plane, flat), `surfacedw.*` (a
 real-valued one, as relief under an orthographic camera), `volumedw.*` (a
@@ -2512,7 +2668,7 @@ sections above.
   is a rebuild. Several floats down argv would fix it.
 
 - **A multivector shows no injected value.** A real shows its number and a
-  function shows its lambda, but a multivector of Cl(3,0,1) has sixteen
+  function shows its body, but a multivector of Cl(3,0,1) has sixteen
   components, and a box sized for the worst case across both readings would be
   wider than the screen even with the injection hidden. So nothing is shown,
   which is honest but unhelpful -- the answer is a window that displays one,
@@ -2525,28 +2681,26 @@ sections above.
   pictures do not. A caption sitting on a photograph is normal, so this seems
   right, but it means the two kinds of window follow different placement rules.
 
-- **What is a knob for a function?** A real has a slider because its value goes
-  down argv. A function's example is compiled in, so today there is nothing to
-  drag -- the only way to change `f` is to type a different lambda. Options: put
-  knobs on the *coefficients* inside the generated lambda (`sin(1.4x)` gets a
-  slider for the 1.4), or accept that choosing a function means a rebuild.
+- **What is a knob for a function?** A real has a slider on the uniform behind
+  its literal. A function nobody defined has its body compiled in, so there is
+  nothing to drag -- the only way to change `u` is to give it a body. Options:
+  make the *coefficients* of the generated body uniforms (`sin(1.4x)` gets a
+  slider for the 1.4), or accept that choosing a function means choosing a body.
 
 - **Composition.** The old TypeScript version left the same question open: "have
   a compose function, but how? Maybe `|`?". `f | g`, `f(g)`, or `compose(f, g)`?
   Whatever it is has to read as `f o g`.
 
-- **The injected lambda is long**, and boxes are sized for the worst case across
-  both readings, so any box declaring a function is wide even when the injection
-  is hidden. Live with it, or let hovered code overflow the card?
-
-- Functions are sampled over a fixed window, so zooming a plot out far enough
-  runs out of curve. The alternative is to let the plot's view drive the
-  sampling and re-run on every zoom step, exactly as a knob does.
+- **The injected body is long**, and boxes are sized for the worst case across
+  both readings, so a box with a prototype is wide even when the injection is
+  hidden -- and for an answer with several components, a `Complex` or a `Tri`,
+  it runs off the side of the screen. Live with it, let hovered code overflow the
+  card, or give the body a row of its own?
 
 - `vec2` is the next type after that, and it is where a 2D knob would be needed.
 
 - Should the prologue be visible anywhere? It is the app's half of the bargain
-  -- what `RealFunction` is, what operators exist -- and right now nothing in the
+  -- what `Complex` and an algebra are, what operators exist -- and nothing in the
   program shows it to you.
 
 - A shader's derived values are read at one point. Would a number line be

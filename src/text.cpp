@@ -35,8 +35,8 @@ void Draw(FontStore& fonts, Face face, std::string_view utf8, Vector2 pen, float
     const int cp = NextCodepoint(utf8, &i);
     const Glyph g = fonts.GetGlyph(face, cp, emPx);
     if (!g.present) continue;
-    if (g.atlas != nullptr && g.width > 0.0f && g.height > 0.0f) {
-      const Rectangle dst = {pen.x + g.bearingX, pen.y - g.top, g.width, g.height};
+    if (g.atlas != nullptr && g.drawWidth > 0.0f && g.drawHeight > 0.0f) {
+      const Rectangle dst = {pen.x + g.drawLeft, pen.y - g.drawTop, g.drawWidth, g.drawHeight};
       DrawTexturePro(*g.atlas, g.src, dst, {0.0f, 0.0f}, 0.0f, tint);
     }
     pen.x += g.advance;

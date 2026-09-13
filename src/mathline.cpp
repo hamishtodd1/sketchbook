@@ -524,8 +524,8 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
 // The types a declaration or a parameter may be written in: the reals, the one
 // function spelling, and whatever the box's algebra calls its elements.
 bool IsKnownType(std::string_view text, const clifford::Signature& sig) {
-  return IsRealType(text) || IsFunctionType(text) || mathline::IsVectorType(text) ||
-         mathline::IsComplexType(text) || mathline::IsMultivectorType(text, sig);
+  return IsRealType(text) || mathline::IsVectorType(text) || mathline::IsComplexType(text) ||
+         mathline::IsMultivectorType(text, sig);
 }
 
 bool MatchFunctionTail(const std::vector<Token>& tokens, std::size_t index,
@@ -753,7 +753,7 @@ Flow Wiring(std::string_view source, const clifford::Signature& sig) {
 
   std::size_t index = 0;
   if (tokens[index].kind == Tok::Ident &&
-      (IsRealType(tokens[index].text) || IsFunctionType(tokens[index].text) ||
+      (IsRealType(tokens[index].text) ||
        mathline::IsMultivectorType(tokens[index].text, sig))) {
     ++index;
   }
@@ -813,9 +813,10 @@ bool ParseFunctionHead(std::string_view source, FunctionHead* out,
   ++index;
   if (tokens[index].kind != Tok::RParen) return false;
   ++index;
-  if (tokens[index].kind != Tok::LBrace) return false;
+  const bool body = tokens[index].kind == Tok::LBrace;
+  if (!body && tokens[index].kind != Tok::Semi) return false;
 
-  if (out != nullptr) *out = {returnType, name, parameterType, parameter};
+  if (out != nullptr) *out = {returnType, name, parameterType, parameter, body};
   return true;
 }
 
@@ -825,6 +826,15 @@ std::vector<FunctionSpan> FindFunctions(const std::vector<std::string>& lines,
   for (std::size_t i = 0; i < lines.size(); ++i) {
     FunctionHead head;
     if (!ParseFunctionHead(lines[i], &head, sig)) continue;
+
+    // A prototype has no body to find the end of. It is still a function --
+    // the app supplies what the user did not -- so it gets a span of its own,
+    // one line long, and everything that asks "which function is this line in"
+    // gets the same kind of answer for it as for any other.
+    if (!head.body) {
+      spans.push_back({head, static_cast<int>(i), static_cast<int>(i)});
+      continue;
+    }
 
     int         depth = 0;
     std::size_t end = i;
@@ -852,7 +862,6 @@ int SpanAt(const std::vector<FunctionSpan>& spans, int line) {
 }
 
 std::string GlslTypeName(std::string_view type) {
-  if (IsFunctionType(type)) return "float";
   if (type == "double") return "float";
   return std::string(type);
 }
@@ -862,8 +871,6 @@ bool IsRealType(std::string_view type) { return type == "float" || type == "doub
 bool IsMultivectorType(std::string_view type, const clifford::Signature& sig) {
   return clifford::IsMultivectorType(type, sig);
 }
-
-bool IsFunctionType(std::string_view type) { return type == "RToR"; }
 
 bool IsVectorType(std::string_view type) {
   return type == "vec2" || type == "vec3" || type == "vec4";
@@ -982,8 +989,12 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
   // to another. That is the whole of what the head of a definition claims --
   // what it actually does is in the lines below it, and the `return` at the end
   // is the equality that settles it.
-  if (FunctionHead head; !BracesBalance(source) && ParseFunctionHead(source, &head, sig)) {
-    line.kind = Kind::Signature;
+  // A prototype always reads as the arrow; a head that opens a body reads as
+  // one only when that body runs on past this line, since a whole definition
+  // written on one line already reads as the equality it is.
+  if (FunctionHead head;
+      ParseFunctionHead(source, &head, sig) && (!head.body || !BracesBalance(source))) {
+    line.kind = head.body ? Kind::Signature : Kind::Prototype;
     line.type = head.returnType;
     line.name = head.name;
     // The brace the code opens is kept, set as mathematics rather than as
@@ -991,7 +1002,11 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
     // something a mathematician would also want said: the arrow claims what the
     // function is, and the brace says the working for it starts here.
     line.latex = Marked(head.name, &line.marks) + " : " + SetLatex(head.paramType, sig) +
-                 " \\to " + SetLatex(head.returnType, sig) + " \\;\\{";
+                 " \\to " + SetLatex(head.returnType, sig);
+    // A prototype opens no brace, so it gets none -- which is the whole of what
+    // it looks like on the page: an arrow, and nothing said about what travels
+    // along it.
+    if (head.body) line.latex += " \\;\\{";
     return line;
   }
 
@@ -1034,7 +1049,7 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
   std::size_t index = 0;
   std::string type;
   if (tokens[index].kind == Tok::Ident &&
-      (IsRealType(tokens[index].text) || IsFunctionType(tokens[index].text) ||
+      (IsRealType(tokens[index].text) ||
        mathline::IsMultivectorType(tokens[index].text, sig))) {
     type = tokens[index].text;
     ++index;
@@ -1050,12 +1065,10 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
     line.type = type;
     line.name = name;
     line.hasInitialiser = false;
-    // A value is an element of a set; a function is an arrow between two. The
-    // type name is what says which, and `RToR` is the only one of ours
-    // that names an arrow rather than a set.
-    line.latex = IsFunctionType(type)
-                     ? Marked(name, &line.marks) + " : \\mathbb{R} \\to \\mathbb{R}"
-                     : Marked(name, &line.marks) + " \\in " + SetLatex(type, sig);
+    // A declaration declares a *value*, and a value is an element of a set. An
+    // arrow is declared by a prototype, above, which is a different shape of
+    // line entirely.
+    line.latex = Marked(name, &line.marks) + " \\in " + SetLatex(type, sig);
     return line;
   }
 

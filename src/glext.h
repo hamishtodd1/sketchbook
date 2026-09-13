@@ -48,6 +48,38 @@ void DrawArrays(unsigned int mode, int first, int count);
 bool ParallelCompile();
 void UseAllCompilerThreads();
 
+// --- multisampled render targets -------------------------------------------
+//
+// The window is multisampled, and anything drawn straight onto it is smooth. A
+// render texture is not: raylib makes only single-sampled ones, so a window
+// that draws into one and then puts the result on screen -- the space window
+// does, so its 3D scene can be clipped to its own square -- comes out with every
+// edge a staircase. raylib can bind and blit a framebuffer but cannot allocate
+// a multisampled one, so these do.
+struct MultisampleTarget {
+  unsigned int framebuffer = 0;
+  unsigned int color = 0;
+  unsigned int depth = 0;
+  int          width = 0;
+  int          height = 0;
+};
+
+// False, with nothing left allocated, if the driver will not give one -- and
+// then whoever asked should carry on single-sampled rather than not drawing.
+bool MakeMultisample(int width, int height, int samples, MultisampleTarget* out);
+
+// Averages what was drawn into `from` down into an ordinary framebuffer, the
+// same size, which is what can then be drawn from as a texture.
+void Resolve(const MultisampleTarget& from, unsigned int intoFramebuffer);
+
+// By hand, like every other GPU resource here: a destructor has no context.
+void Release(MultisampleTarget* target);
+
+// glReadPixels into `rgba`, which must hold width * height * 4 bytes, from the
+// framebuffer that is bound. Origin bottom-left, as GL has it. A stall, so only
+// for a handful of pixels on the frame something is actually being asked.
+void ReadPixels(int x, int y, int width, int height, unsigned char* rgba);
+
 // Whether the driver advertises an extension, by name. Asked of the extension
 // string rather than of an entry point, because a driver can have one without
 // the other and the difference is worth being able to see.

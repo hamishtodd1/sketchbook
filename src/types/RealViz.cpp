@@ -10,13 +10,15 @@
 #include "types/examples.h"
 #include "tex/tex.h"
 #include "text.h"
+#include "carry.h"
+#include "hover.h"
 #include "theme.h"
 
 namespace sb {
 namespace {
 
 // All in world units, so the lines scale with the canvas like everything else.
-constexpr float kRowHeight = 46.0f;
+constexpr float kRowHeight = 61.0f;
 // Enough gap that a docked row's rim never touches the one above it.
 constexpr float kRowGap = 12.0f;
 constexpr float kFloatWidth = 340.0f;
@@ -434,32 +436,39 @@ bool AxisPanel::Sync(const Blocks& blocks) {
 }
 
 bool AxisPanel::BeginPullOut(CodeBlock* block, const std::string& name, Vector2 pointer,
-                             const Viewport& viewport) {
+                             const Viewport& viewport, bool field) {
   if (block == nullptr || name.empty() || drag_ != Drag::None) return false;
 
   // Off whatever axis it was sharing, and the one it leaves reframes around
   // what is left on it.
   bool found = false;
   for (NumberLine& line : lines_) {
-    const std::size_t before = line.refs.size();
-    line.refs.erase(std::remove_if(line.refs.begin(), line.refs.end(),
-                                   [&](const AxisRef& ref) {
-                                     return ref.block == block && ref.name == name;
-                                   }),
-                    line.refs.end());
-    if (line.refs.size() != before) {
+    std::vector<AxisRef>& from = field ? line.fields : line.refs;
+    const std::size_t     before = from.size();
+    from.erase(std::remove_if(from.begin(), from.end(),
+                              [&](const AxisRef& ref) {
+                                return ref.block == block && ref.name == name;
+                              }),
+               from.end());
+    if (from.size() != before) {
       found = true;
       Reframe(line);
     }
   }
   if (!found) return false;
+  // Only a row with nothing left on it goes. It used to be any row with no
+  // *values*, which took a function's field row away with it whenever a value
+  // was pulled out of the code.
   lines_.erase(std::remove_if(lines_.begin(), lines_.end(),
-                              [](const NumberLine& line) { return line.refs.empty(); }),
+                              [](const NumberLine& line) {
+                                return line.refs.empty() && line.fields.empty() &&
+                                       line.samples.empty();
+                              }),
                lines_.end());
 
   const float zoom = viewport.Zoom();
   NumberLine  line;
-  line.refs.push_back({block, name});
+  (field ? line.fields : line.refs).push_back({block, name});
   line.dock = block;
   line.docked = false;
   line.centre = 0.0f;
@@ -647,7 +656,7 @@ void AxisPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
     return;
   }
 
-  const Vector2 pointer = GetMousePosition();
+  const Vector2 pointer = hover::Pointer();
   for (std::size_t i = 0; i < lines_.size(); ++i) {
     if (!Shown(lines_[i])) continue;
     const Rectangle row = RectFor(i, viewport, fonts);
@@ -718,6 +727,31 @@ const AxisRef* AxisPanel::MarkerNear(std::size_t index, Vector2 pointer,
   if (!CheckCollisionPointRec(pointer, row) && !PointOnRim(row, pointer)) return nullptr;
   return NearestOn(lines_[index], AxisArea(row), row.height / kRowHeight, pointer.x,
                    /*freeOnly=*/false, *this);
+}
+
+bool AxisPanel::VizUnder(Vector2 point, const Viewport& viewport, FontStore& fonts,
+                         AxisRef* out, bool* field, Rectangle* window) const {
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    if (!Shown(lines_[i])) continue;
+    const Rectangle row = RectFor(i, viewport, fonts);
+    if (!CheckCollisionPointRec(point, row) || PointOnRim(row, point)) continue;
+    *window = row;
+    if (const AxisRef* at = MarkerNear(i, point, viewport, fonts); at != nullptr) {
+      *out = *at;
+      *field = false;
+      return true;
+    }
+    // Off every marker, a function's field is still under the point: it has a
+    // value all the way across. The one painted last is the one you can see.
+    for (auto it = lines_[i].fields.rbegin(); it != lines_[i].fields.rend(); ++it) {
+      if (!Shown(*it)) continue;
+      *out = *it;
+      *field = true;
+      return true;
+    }
+    return false;
+  }
+  return false;
 }
 
 bool AxisPanel::ValueAt(Vector2 point, const Viewport& viewport, FontStore& fonts,
@@ -802,7 +836,7 @@ std::size_t AxisPanel::OfferedRow(Vector2 pointer, const Viewport& viewport,
 
 CodeBlock* AxisPanel::InsertTarget(const Viewport& viewport, FontStore& fonts) const {
   if (drag_ != Drag::None) return nullptr;
-  const std::size_t index = OfferedRow(GetMousePosition(), viewport, fonts);
+  const std::size_t index = OfferedRow(hover::Pointer(), viewport, fonts);
   return index == kNoRow ? nullptr : Owner(lines_[index]);
 }
 
@@ -841,7 +875,7 @@ Rectangle AxisPanel::AxisArea(Rectangle row) {
 
 bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Blocks& blocks) {
   if (lines_.empty()) return false;
-  const Vector2 pointer = GetMousePosition();
+  const Vector2 pointer = carry::Position();
 
   auto valueAt = [](Rectangle area, const NumberLine& line, float x) {
     return line.centre + line.span * ((x - area.x) / area.width - 0.5f);
@@ -878,7 +912,7 @@ bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Bl
     // whether the button is still down rather than for the release itself, so a
     // release lost to another window cannot leave a row stuck to the cursor.
     const int button = (drag_ == Drag::Pan) ? MOUSE_BUTTON_RIGHT : MOUSE_BUTTON_LEFT;
-    if (!IsMouseButtonDown(button)) {
+    if (!carry::Down(button)) {
       if (drag_ == Drag::Move && dragMoved_) {
         bool merged = false;
         // Dropped on another line? Then they share an axis from now on. This
@@ -1004,7 +1038,7 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts,
 
   // The row offering to take a value, if any. The box being pointed into shows
   // *where* the declaration would land; this shows *what* value it would have.
-  const Vector2     pointer = GetMousePosition();
+  const Vector2     pointer = hover::Pointer();
   const std::size_t offered =
       drag_ == Drag::None ? OfferedRow(pointer, viewport, fonts) : kNoRow;
 
@@ -1029,7 +1063,7 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts,
     const bool carried = (drag_ == Drag::Move && dragMoved_ && i == dragLine_);
     // Absorbed by the drop target, or belonging to a box that is: gone from the
     // canvas until you pull off it.
-    if (carried && OverDropTarget(GetMousePosition())) continue;
+    if (carried && OverDropTarget(carry::Position())) continue;
     if (line.docked && line.dock != nullptr && line.dock->Absorbed()) continue;
     // Nothing on it is being talked about, so there is nothing for it to say.
     if (!Shown(line)) continue;
@@ -1048,7 +1082,7 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts,
       DrawField(area, line, ref);
     }
 
-    if (carried || PointOnRim(row, GetMousePosition())) DrawRim(row, zoom, carried);
+    if (carried || PointOnRim(row, hover::Pointer())) DrawRim(row, zoom, carried);
 
 
     const float axisY = row.y + row.height * 0.58f;

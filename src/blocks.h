@@ -322,11 +322,10 @@ class CodeBlock {
   // --- executed up to here -------------------------------------------------
   //
   // A variable is mutable, so a window showing one has to say *when*. This is
-  // that when: the line the box is being read at. It is where the caret is, or
-  // where the pointer is over the box, and for a box nobody has touched this
-  // session it is the end -- which is what the whole block came to.
+  // that when: the line the box is being read at. It is the caret's line while
+  // the box is selected, and otherwise the end -- which is what the whole block
+  // came to.
   int  ExecutedUpTo() const;
-  void SetPointerRow(int row) { pointerRow_ = row; }
   // `mode` is 0 for a field across an axis and 1 for a curve on a plot.
   // Returns false if there is nothing to draw with, in which case nothing was
   // begun and EndField must not be called.
@@ -433,6 +432,10 @@ class CodeBlock {
   // from.
   std::vector<Rectangle> MentionsOf(const std::string& name, const Viewport& viewport,
                                     FontStore& fonts) const;
+  // The variable whose name is written under this point, or empty -- in
+  // whichever reading that line is showing.
+  std::string            MentionAt(Vector2 screenPoint, const Viewport& viewport,
+                                   FontStore& fonts) const;
   mathline::Flow         FlowFor(const std::string& name) const;
 
   // Every variable in this box has a colour of its own, taken from where it
@@ -443,6 +446,8 @@ class CodeBlock {
   // The variables to draw a box round this frame -- set by whichever window is
   // being hovered or dragged, and refilled every frame.
   void  SetHighlights(std::vector<ActiveValue> values);
+  // A text box's measure being dragged: a gesture like any other.
+  bool  SettingMeasure() const { return marginDrag_; }
   void SetVariableValue(const std::string& name, float value);
   // Knob positions from a loaded canvas, adopted on the next rebuild.
   void RestoreValues(std::vector<std::pair<std::string, float>> values);
@@ -678,8 +683,6 @@ class CodeBlock {
   // the one-pixel-per-variable target it answers into.
   // The shader that draws one of this box's functions.
   // Where the box is being read. -1 for neither, which means the end.
-  mutable int                           pointerRow_ = -1;
-  mutable bool                          everTouched_ = false;
   unsigned int                          traceBuffer_ = 0;
   int                                   traceFloats_ = 0;
 

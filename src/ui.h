@@ -19,6 +19,10 @@ struct Options {
   // how wide it is, and what the camera has to be at for one to fill the
   // window.
   float slideAspect = kDefaultSlideAspect;
+  // Whether the app is filling the screen. About the window rather than the
+  // canvas, so it is not saved; it is here so the menu can say which way its
+  // button goes.
+  bool fullscreen = false;
 };
 
 // The shapes the menu offers. A deck is made for one of them, not for an
@@ -29,7 +33,7 @@ inline constexpr float kAspects[kAspectCount] = {kDefaultSlideAspect, 16.0f / 9.
 inline constexpr const char* kAspectNames[kAspectCount] = {"3:2", "16:9", "4:3", "1:1"};
 
 // What the menu is asking the app to do this frame.
-enum class MenuAction { None, Save, Load, Insert, NewSlide, OpenRecent };
+enum class MenuAction { None, Save, Load, Insert, NewSlide, OpenRecent, Fullscreen };
 
 // The Escape menu. Drawn in screen space at a fixed pixel size, so it does not
 // take part in the canvas zoom.

@@ -82,6 +82,13 @@ class App {
   // Returns true while the gesture owns the input.
   bool HandleCompose();
   void DrawCompose();
+  // Pulling a viz out of the window it is in. Ctrl and a left drag, or a finger
+  // holding the window while another drags the viz; once it leaves the window
+  // it is a window of its own, being carried. Returns true while it owns input.
+  bool HandlePull();
+  // Fills the monitor the window is on, without a title bar, or puts the window
+  // back as it was.
+  void SetFullscreen(bool on);
   // Feeding every function that is being read, from whatever the canvas says a
   // spread of its input type looks like.
   void FeedFunctions();
@@ -186,6 +193,39 @@ class App {
 
   // What is in use this frame, decided while updating and drawn afterwards.
   std::vector<ActiveValue> active_;
+
+  // Where the window was, and how big, before it filled the screen.
+  Vector2 windowedAt_{};
+  int     windowedWidth_ = 0;
+  int     windowedHeight_ = 0;
+
+  // A viz being pulled out of its window, until it leaves it.
+  enum class PullFrom { None, Axis, Space, Plot };
+  struct Pull {
+    PullFrom    from = PullFrom::None;
+    CodeBlock*  block = nullptr;
+    std::string name;
+    bool        field = false;    // a function's field on an axis, not a value
+    Rectangle   window{};         // the window it has to leave
+    // A plot with several curves on it cannot say which is under the pointer
+    // until it has drawn them, so the pull waits for that answer.
+    bool        picking = false;
+    // Pulled by a finger rather than the mouse, and which one.
+    bool         byFinger = false;
+    unsigned int finger = 0;
+  };
+  Pull pull_;
+  // The viz under a point, as a pull that has not started yet. Shared by the
+  // mouse and the finger, so the two cannot disagree about what is pullable.
+  bool FindPullable(Vector2 at, Pull* out);
+  // A window pulled out by a finger is carried by that finger (carry.h) until
+  // it lifts.
+  bool         fingerCarry_ = false;
+  unsigned int fingerCarryId_ = 0;
+  // Which fingers were down last frame, so a finger that has just landed can be
+  // told from one that was already holding something.
+  unsigned int touchSeen_[touch::kMaxPoints]{};
+  int          touchSeenCount_ = 0;
 
   // The two-finger gesture that composes two values into a third.
   enum class Compose { None, Holding, Menu };

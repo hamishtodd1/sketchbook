@@ -3,23 +3,28 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
+#include "glext.h"
 #include "grid.h"
 #include "rlgl.h"
 #include "selection.h"
 #include "types/examples.h"
 #include "tex/tex.h"
 #include "text.h"
+#include "carry.h"
+#include "hover.h"
 #include "theme.h"
 
 namespace sb {
 namespace {
 
 // World units, like everything else on the canvas.
-constexpr float kPlotSide = 260.0f;
+constexpr float kPlotSide = 347.0f;
 constexpr float kGap = 12.0f;
-constexpr float kLabelEm = 15.0f;
 constexpr float kTickEm = 11.0f;
+// The square of pixels round the pointer a curve has to change to be picked.
+constexpr int kPickSide = 9;
 
 constexpr float kMinSpan = 1e-3f;
 constexpr float kMaxSpan = 1e6f;
@@ -239,7 +244,7 @@ void PlotPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
     return;
   }
 
-  const Vector2 pointer = GetMousePosition();
+  const Vector2 pointer = hover::Pointer();
   for (std::size_t i = 0; i < plots_.size(); ++i) {
     if (!Shown(plots_[i])) continue;
     const Rectangle rect = RectFor(i, viewport, fonts);
@@ -278,7 +283,7 @@ Rectangle PlotPanel::DockedBounds(const CodeBlock* block, const Viewport& viewpo
 
 bool PlotPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
   if (plots_.empty()) return false;
-  const Vector2 pointer = GetMousePosition();
+  const Vector2 pointer = carry::Position();
 
   // Where a screen point falls in value space: x is output, y is input.
   auto valueAt = [](Rectangle rect, const Plot& plot, Vector2 point) {
@@ -302,7 +307,7 @@ bool PlotPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
       dragScreenPos_ = {pointer.x - dragGrab_.x, pointer.y - dragGrab_.y};
     }
 
-    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+    if (carry::Released(MOUSE_BUTTON_LEFT)) {
       if (drag_ == Drag::Move && dragMoved_) {
         bool merged = false;
         for (std::size_t i = 0; i < plots_.size(); ++i) {
@@ -395,6 +400,83 @@ void PlotPanel::ReleaseGpu() {
   haveCurveSurface_ = false;
 }
 
+void PlotPanel::SamplePick(unsigned char* rgba) const {
+  // Screen points are in window units; the framebuffer may be finer, and GL
+  // counts rows from the bottom.
+  const float sx = static_cast<float>(GetRenderWidth()) / std::max(1, GetScreenWidth());
+  const float sy = static_cast<float>(GetRenderHeight()) / std::max(1, GetScreenHeight());
+  const int   x = static_cast<int>(pickAt_.x * sx) - kPickSide / 2;
+  const int   y = GetRenderHeight() - static_cast<int>(pickAt_.y * sy) - kPickSide / 2;
+  glext::ReadPixels(x, y, kPickSide, kPickSide, rgba);
+}
+
+bool PlotPanel::PlotUnder(Vector2 point, const Viewport& viewport, FontStore& fonts,
+                          std::size_t* plot, Rectangle* window, CurveRef* curve) const {
+  for (std::size_t i = plots_.size(); i-- > 0;) {
+    if (!Shown(plots_[i])) continue;
+    const Rectangle rect = RectFor(i, viewport, fonts);
+    if (!CheckCollisionPointRec(point, rect) || PointOnRim(rect, point)) continue;
+    *plot = i;
+    *window = rect;
+    int         shown = 0;
+    for (const CurveRef& ref : plots_[i].refs) {
+      if (Resolve(ref) == nullptr || !Shown(ref)) continue;
+      *curve = ref;
+      ++shown;
+    }
+    if (shown != 1) *curve = CurveRef{};
+    return shown > 0;
+  }
+  return false;
+}
+
+void PlotPanel::AskCurveAt(std::size_t plot, Vector2 point) {
+  pick_ = Pick::Pending;
+  pickPlot_ = plot;
+  pickAt_ = point;
+}
+
+PlotPanel::Pick PlotPanel::CurveAnswer(CurveRef* out) const {
+  if (pick_ == Pick::Found && out != nullptr) *out = pickRef_;
+  return pick_;
+}
+
+bool PlotPanel::BeginPullOut(CodeBlock* block, const std::string& name, Vector2 pointer,
+                             const Viewport& viewport) {
+  if (block == nullptr || name.empty() || drag_ != Drag::None) return false;
+  std::size_t from = plots_.size();
+  for (std::size_t i = 0; i < plots_.size() && from == plots_.size(); ++i) {
+    for (const CurveRef& ref : plots_[i].refs) {
+      if (ref.block == block && ref.name == name) { from = i; break; }
+    }
+  }
+  if (from == plots_.size()) return false;
+
+  Plot made;
+  made.refs.push_back({block, name});
+  made.centre = plots_[from].centre;
+  made.span = plots_[from].span;
+  made.docked = false;
+  made.dock = block;
+
+  std::vector<CurveRef>& refs = plots_[from].refs;
+  refs.erase(std::remove_if(refs.begin(), refs.end(),
+                            [&](const CurveRef& ref) { return ref.block == block && ref.name == name; }),
+             refs.end());
+  if (refs.empty()) plots_.erase(plots_.begin() + static_cast<std::ptrdiff_t>(from));
+  plots_.push_back(std::move(made));
+
+  // Carried from its middle, and from here an ordinary carried plot.
+  const float side = kPlotSide * viewport.Zoom();
+  dragPlot_ = plots_.size() - 1;
+  dragGrab_ = {side * 0.5f, side * 0.5f};
+  dragScreenPos_ = {pointer.x - dragGrab_.x, pointer.y - dragGrab_.y};
+  plots_.back().worldPos = viewport.ToWorld(dragScreenPos_);
+  drag_ = Drag::Move;
+  dragMoved_ = true;
+  return true;
+}
+
 void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts, const VizStore* vizes) const {
   const float zoom = viewport.Zoom();
   if (zoom < 0.02f) return;
@@ -417,7 +499,7 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts, const VizStore*
   for (std::size_t i = 0; i < plots_.size(); ++i) {
     const Plot& plot = plots_[i];
     const bool carried = (drag_ == Drag::Move && dragMoved_ && i == dragPlot_);
-    if (carried && OverDropTarget(GetMousePosition())) continue;
+    if (carried && OverDropTarget(carry::Position())) continue;
     if (plot.docked && plot.dock != nullptr && plot.dock->Absorbed()) continue;
     // Nothing on it is being talked about, so there is nothing for it to say.
     if (!Shown(plot)) continue;
@@ -438,7 +520,7 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts, const VizStore*
     DrawRectangleRounded(rect, 0.06f, 8, kAxisBg);
     DrawRectangleRoundedLinesEx(rect, 0.06f, 8, 1.0f, kAxisBorder);
 
-    if (carried || PointOnRim(rect, GetMousePosition())) DrawRim(rect, zoom, carried);
+    if (carried || PointOnRim(rect, hover::Pointer())) DrawRim(rect, zoom, carried);
 
     // Nothing spills out of the card, so a steep curve does not scribble over
     // the rest of the canvas.
@@ -491,65 +573,70 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts, const VizStore*
                kAxisLine);
 
     // One polyline per function on these axes.
+    unsigned char pickBefore[kPickSide * kPickSide * 4];
+    bool          pickHit = false;
     for (std::size_t c = 0; c < plot.refs.size(); ++c) {
       const mathprogram::Variable* variable = Resolve(plot.refs[c]);
       if (variable == nullptr || !Shown(plot.refs[c])) continue;
       const Color tint =
           Blink(plot.refs[c].block->VariableColor(plot.refs[c].name), inUse(plot.refs[c]));
       const float thickness = std::max(1.4f, 2.0f * scale);
-
-      // The canvas says how a function is drawn, so it is drawn that way. Its
-      // lines ran inside the program that owns the function -- the only place
-      // one can be sampled -- so what arrives here is already this curve.
-      if (curveViz != nullptr && curveViz->Ready()) {
-        rlSetLineWidth(thickness);
-        curveViz->Draw(0.0f, rect,
-                       {plot.centre.x, plot.centre.y, plot.span * rect.width / rect.height,
-                        plot.span},
-                       scale, tint);
-        rlSetLineWidth(1.0f);
-        continue;
+      // Asked which curve is under a point: look at the pixels round it before
+      // this curve goes down, and again after.
+      const bool picking = pick_ == Pick::Pending && pickPlot_ == i;
+      if (picking) {
+        rlDrawRenderBatchActive();
+        SamplePick(pickBefore);
       }
-      // A function is GLSL, so the curve is where the shader says the output
-      // actually is -- evaluated per pixel rather than joined up between
-      // samples. Nothing runs out of curve when the plot is zoomed, and a knob
-      // reshapes it without anything being rebuilt.
-      const CodeBlock* owner = plot.refs[c].block;
-      if (owner != nullptr && owner->HasFieldShader()) {
-        const float wide = plot.span * rect.width / rect.height;
-        const Vector2 across = {plot.centre.x - wide * 0.5f, plot.centre.x + wide * 0.5f};
-        // Input runs *up* the vertical axis here, so the top of the rectangle is
-        // the larger input and the shader is told so.
-        const Vector2 up = {plot.centre.y + plot.span * 0.5f, plot.centre.y - plot.span * 0.5f};
-        // Half the line's width, in the value units the shader compares in.
-        const float halfWidth = thickness * 0.5f * wide / std::max(1.0f, rect.width);
-        if (owner->BeginField(plot.refs[c].name, /*mode=*/1, across, up, halfWidth)) {
-          EnsureCurveSurface();
-          DrawTexturePro(curveSurface_, {0.0f, 0.0f, 1.0f, 1.0f}, rect, {0.0f, 0.0f}, 0.0f, tint);
-          owner->EndField();
-          continue;
+      DrawCurve(plot, c, rect, scale, thickness, tint, curveViz);
+      if (picking) {
+        rlDrawRenderBatchActive();
+        unsigned char after[sizeof(pickBefore)];
+        SamplePick(after);
+        if (std::memcmp(pickBefore, after, sizeof(after)) != 0) {
+          pickRef_ = plot.refs[c];
+          pickHit = true;
         }
       }
-
     }
+    if (pick_ == Pick::Pending && pickPlot_ == i) pick_ = pickHit ? Pick::Found : Pick::None;
 
     EndScissorMode();
+  }
+}
 
-    // Name each curve, in its own colour, in the corner.
-    const float nameEm = kLabelEm * zoom;
-    if (nameEm >= 6.0f) {
-      float x = rect.x + 10.0f * scale;
-      const float baseline = rect.y + 6.0f * scale + nameEm;
-      for (std::size_t c = 0; c < plot.refs.size(); ++c) {
-        const mathprogram::Variable* variable = Resolve(plot.refs[c]);
-        if (variable == nullptr || !Shown(plot.refs[c])) continue;
-        const tex::Layout layout =
-            tex::Render(variable->latexName, fonts, nameEm, /*display=*/false);
-        tex::DrawLayout(
-            layout, fonts, {x, baseline},
-            Blink(plot.refs[c].block->VariableColor(plot.refs[c].name), inUse(plot.refs[c])));
-        x += layout.width + 12.0f * scale;
-      }
+void PlotPanel::DrawCurve(const Plot& plot, std::size_t c, Rectangle rect, float scale,
+                          float thickness, Color tint, const Viz* curveViz) const {
+  // The canvas says how a function is drawn, so it is drawn that way. Its
+  // lines ran inside the program that owns the function -- the only place
+  // one can be sampled -- so what arrives here is already this curve.
+  if (curveViz != nullptr && curveViz->Ready()) {
+    rlSetLineWidth(thickness);
+    curveViz->Draw(0.0f, rect,
+                   {plot.centre.x, plot.centre.y, plot.span * rect.width / rect.height,
+                    plot.span},
+                   scale, tint);
+    rlSetLineWidth(1.0f);
+    return;
+  }
+  // A function is GLSL, so the curve is where the shader says the output
+  // actually is -- evaluated per pixel rather than joined up between
+  // samples. Nothing runs out of curve when the plot is zoomed, and a knob
+  // reshapes it without anything being rebuilt.
+  const CodeBlock* owner = plot.refs[c].block;
+  if (owner != nullptr && owner->HasFieldShader()) {
+    const float wide = plot.span * rect.width / rect.height;
+    const Vector2 across = {plot.centre.x - wide * 0.5f, plot.centre.x + wide * 0.5f};
+    // Input runs *up* the vertical axis here, so the top of the rectangle is
+    // the larger input and the shader is told so.
+    const Vector2 up = {plot.centre.y + plot.span * 0.5f, plot.centre.y - plot.span * 0.5f};
+    // Half the line's width, in the value units the shader compares in.
+    const float halfWidth = thickness * 0.5f * wide / std::max(1.0f, rect.width);
+    if (owner->BeginField(plot.refs[c].name, /*mode=*/1, across, up, halfWidth)) {
+      EnsureCurveSurface();
+      DrawTexturePro(curveSurface_, {0.0f, 0.0f, 1.0f, 1.0f}, rect, {0.0f, 0.0f}, 0.0f, tint);
+      owner->EndField();
+      return;
     }
   }
 }

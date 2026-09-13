@@ -143,8 +143,15 @@ class AxisPanel {
   // carrying it as an axis of its own, from the pointer. The drop is the same
   // drop any other carried row gets -- onto the canvas, onto another axis to
   // merge, or onto the cross.
+  // `field` pulls out a function's field rather than a value's marker.
   bool BeginPullOut(CodeBlock* block, const std::string& name, Vector2 pointer,
-                    const Viewport& viewport);
+                    const Viewport& viewport, bool field = false);
+
+  // The viz under a point, if there is one, and the window it is in: a marker
+  // where the point is on one, and otherwise the field painted across the row.
+  // Not the rim -- the rim is the window.
+  bool VizUnder(Vector2 point, const Viewport& viewport, FontStore& fonts, AxisRef* out,
+                bool* field, Rectangle* window) const;
 
   // What a ref currently stands for, or null. Public because the nearest-marker
   // search is a free function shared by two callers.

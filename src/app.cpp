@@ -12,6 +12,8 @@
 #include "recent.h"
 #include "resize.h"
 #include "text.h"
+#include "carry.h"
+#include "hover.h"
 #include "theme.h"
 #include "touch.h"
 
@@ -33,7 +35,7 @@ bool App::Init(const std::string& assetDir, std::string* error) {
 
   // One dot to a line of type. The grid is ruled paper rather than an arbitrary
   // lattice, so it is measured from the font rather than guessed at.
-  SetGridBaseStep(text::LineHeight(fonts_, Face::Mono, kDefaultBlockEm));
+  SetGridBaseStep(text::LineHeight(fonts_, Face::Mono, kDefaultBlockEm) / kDotsPerLine);
 
   viewport_.Reset({0.0f, 0.0f}, kDefaultZoom);
   // Everything docked under a box stacks in one column, each kind asking the
@@ -126,14 +128,9 @@ Rectangle App::Footprint(const CodeBlock* block) {
 
 void App::PlaceBlock(CodeBlock* block, Vector2 desired) {
   if (block == nullptr) return;
-  // What lands on the grid is the text, not the card's corner. There is one dot
-  // per line of type, so a box put down this way has its lines sitting in the
-  // gaps between rows of dots; snapping the corner instead would put them
-  // wherever the padding happened to leave them.
-  const Vector2 pad = block->TextOffset();
-  const Vector2 at =
-      sb::SnapToGrid({desired.x + pad.x, desired.y + pad.y}, viewport_.Zoom());
-  block->SetWorldPosition({at.x - pad.x, at.y - pad.y});
+  // The card's top-left corner lands on a dot, as every other window's does --
+  // and since a card's padding is one dot, its text lands on one too.
+  block->SetWorldPosition(sb::SnapToGrid(desired, viewport_.Zoom()));
   ResolveOverlaps(block);
 }
 
@@ -146,7 +143,7 @@ void App::SettleBlocks() {
 void App::ResolveOverlaps(CodeBlock* block) {
   if (block == nullptr) return;
 
-  const float step = GridStep(viewport_.Zoom());
+  const float step = SnapStep(viewport_.Zoom());
   // Rims are drawn outside their box, so boxes that merely touch would have
   // fused rims. Keep both of them clear.
   const float margin = 2.0f * kRimThickness / std::max(viewport_.Zoom(), 1e-6f);
@@ -247,6 +244,7 @@ void App::RemoveBlock(CodeBlock* block) {
     textBlock_ = nullptr;
     textDrag_ = TextDrag::None;
   }
+  if (pull_.block == block) pull_ = Pull{};
   axes_.Forget(block);
   plots_.Forget(block);
   shaders_.Forget(block);
@@ -661,10 +659,199 @@ void App::ComposeInto(const std::string& op) {
   // real. Nothing else has a viz to have been touched.
   const bool function = left->kind == mathprogram::Kind::Function ||
                         right->kind == mathprogram::Kind::Function;
-  const std::string type = function ? std::string(types::realfunction::kName) : "float";
   const std::string name = composeBlock_->FreshName();
-  composeBlock_->InsertDeclaration(type + " " + name + " = " + composeNames_[0] + " " + op +
-                                   " " + composeNames_[1] + ";");
+  if (!function) {
+    composeBlock_->InsertDeclaration("float " + name + " = " + left->name + " " + op + " " +
+                                     right->name + ";");
+    return;
+  }
+  // Functions combine by being called, so the answer is a definition. Its
+  // parameter is the first of a few letters neither side is called, so a real
+  // named x is not shadowed by the x the definition introduces.
+  std::string param = "x";
+  for (const char* candidate : {"x", "t", "s", "u"}) {
+    if (left->name != candidate && right->name != candidate) { param = candidate; break; }
+  }
+  const auto term = [&](const mathprogram::Variable* v) {
+    return v->kind == mathprogram::Kind::Function ? v->name + "(" + param + ")" : v->name;
+  };
+  composeBlock_->InsertDeclaration("float " + name + "(float " + param + ") { return " +
+                                   term(left) + " " + op + " " + term(right) + "; }");
+}
+
+void App::SetFullscreen(bool on) {
+  if (on == options_.fullscreen) return;
+  // Done by hand rather than with raylib's ToggleBorderlessWindowed, which also
+  // makes the window *topmost*: alt-tab then brings another app to the front
+  // underneath this one, and clicks go to a window you cannot see. Taking the
+  // title bar off and covering the monitor is all that filling the screen needs,
+  // and an ordinary window can be tabbed away from and back to like any other.
+  // No change of display mode, so it is instant and disturbs nothing else.
+  if (on) {
+    windowedAt_ = GetWindowPosition();
+    windowedWidth_ = GetScreenWidth();
+    windowedHeight_ = GetScreenHeight();
+    const int     monitor = GetCurrentMonitor();
+    const Vector2 corner = GetMonitorPosition(monitor);
+    SetWindowState(FLAG_WINDOW_UNDECORATED);
+    SetWindowPosition(static_cast<int>(corner.x), static_cast<int>(corner.y));
+    SetWindowSize(GetMonitorWidth(monitor), GetMonitorHeight(monitor));
+  } else {
+    ClearWindowState(FLAG_WINDOW_UNDECORATED);
+    SetWindowSize(windowedWidth_, windowedHeight_);
+    SetWindowPosition(static_cast<int>(windowedAt_.x), static_cast<int>(windowedAt_.y));
+  }
+  options_.fullscreen = on;
+}
+
+bool App::FindPullable(Vector2 at, Pull* out) {
+  AxisRef   ref;
+  bool      field = false;
+  Rectangle window{};
+  if (axes_.VizUnder(at, viewport_, fonts_, &ref, &field, &window)) {
+    *out = Pull{PullFrom::Axis, ref.block, ref.name, field, window};
+    return true;
+  }
+  if (PointRef point; spaces_.VizUnder(at, viewport_, fonts_, &point, &window)) {
+    *out = Pull{PullFrom::Space, point.block, point.name, false, window};
+    return true;
+  }
+  std::size_t plot = 0;
+  CurveRef    curve;
+  if (plots_.PlotUnder(at, viewport_, fonts_, &plot, &window, &curve)) {
+    *out = Pull{PullFrom::Plot, curve.block, curve.name, false, window};
+    // One curve on it and there is no question which. Several, and the frame is
+    // asked: whatever is drawn under the pointer, drawn last, is the one.
+    if (curve.block == nullptr) {
+      plots_.AskCurveAt(plot, at);
+      out->picking = true;
+    }
+    return true;
+  }
+  return false;
+}
+
+bool App::HandlePull() {
+  const int           count = std::min(touch::Count(), touch::kMaxPoints);
+  const touch::Point* points = touch::Points();
+  // Which fingers are new this frame. Remembered on the way out, whatever path
+  // is taken, so the next frame compares against this one.
+  const auto landed = [&](int i) {
+    for (int k = 0; k < touchSeenCount_; ++k) {
+      if (touchSeen_[k] == points[i].id) return false;
+    }
+    return true;
+  };
+  const auto remember = [&]() {
+    touchSeenCount_ = count;
+    for (int i = 0; i < count; ++i) touchSeen_[i] = points[i].id;
+  };
+
+  // A window a finger pulled out follows that finger, and on the frame it lifts
+  // reports one "up" so the panel carrying it drops it. Not a gesture of this
+  // function's any more: the panel owns the carry, so this owns no input.
+  if (fingerCarry_) {
+    bool present = false;
+    for (int i = 0; i < count; ++i) {
+      if (points[i].id != fingerCarryId_) continue;
+      carry::FollowFinger(points[i].position, true);
+      present = true;
+    }
+    if (!present) {
+      if (carry::Down(MOUSE_BUTTON_LEFT)) {
+        carry::FollowFinger(carry::Position(), false);
+      } else {
+        carry::FollowMouse();
+        fingerCarry_ = false;
+      }
+    }
+    remember();
+    return false;
+  }
+
+  if (pull_.from != PullFrom::None) {
+    Vector2 at = GetMousePosition();
+    bool    down = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    if (pull_.byFinger) {
+      down = false;
+      for (int i = 0; i < count; ++i) {
+        if (points[i].id != pull_.finger) continue;
+        at = points[i].position;
+        down = true;
+      }
+    }
+    remember();
+    // Let go inside the window: nothing was pulled, and nothing happens.
+    if (!down) {
+      if (pull_.picking) plots_.ForgetPick();
+      pull_ = Pull{};
+      return true;
+    }
+    if (pull_.picking) {
+      CurveRef found;
+      switch (plots_.CurveAnswer(&found)) {
+        case PlotPanel::Pick::Found:
+          pull_.block = found.block;
+          pull_.name = found.name;
+          pull_.picking = false;
+          plots_.ForgetPick();
+          break;
+        case PlotPanel::Pick::None:
+          // Pressed on the plot but on no curve of it: there is nothing to pull.
+          plots_.ForgetPick();
+          pull_ = Pull{};
+          return true;
+        default:
+          return true;   // not drawn yet; it will be by the next frame
+      }
+    }
+    if (CheckCollisionPointRec(at, pull_.window)) return true;
+    // Out of the window: from here it is a window of its own, carried by the
+    // panel exactly as any window picked up by its rim would be -- which is what
+    // makes the drop onto another window a merge without anything new.
+    bool began = false;
+    if (pull_.from == PullFrom::Axis) {
+      began = axes_.BeginPullOut(pull_.block, pull_.name, at, viewport_, pull_.field);
+    } else if (pull_.from == PullFrom::Space) {
+      began = spaces_.BeginPullOut(pull_.block, pull_.name, at, viewport_);
+    } else if (pull_.from == PullFrom::Plot) {
+      began = plots_.BeginPullOut(pull_.block, pull_.name, at, viewport_);
+    }
+    if (began && pull_.byFinger) {
+      fingerCarry_ = true;
+      fingerCarryId_ = pull_.finger;
+      carry::FollowFinger(at, true);
+    }
+    pull_ = Pull{};
+    return true;
+  }
+
+  // With a finger: one already down inside a window, and another landing on a
+  // viz in that same window. The one standing still is holding the window; the
+  // one that just arrived is taking something out of it.
+  if (count == 2 && compose_ == Compose::None) {
+    int fresh = -1;
+    int holding = -1;
+    for (int i = 0; i < 2; ++i) (landed(i) ? fresh : holding) = i;
+    Pull found;
+    if (fresh >= 0 && holding >= 0 && FindPullable(points[fresh].position, &found) &&
+        CheckCollisionPointRec(points[holding].position, found.window)) {
+      // Whatever the holding finger's emulated press had started on a handle is
+      // undone: it was holding the window, not moving a value.
+      axes_.AbandonDrag();
+      found.byFinger = true;
+      found.finger = points[fresh].id;
+      pull_ = found;
+      remember();
+      return true;
+    }
+  }
+  remember();
+
+  // With the mouse: Ctrl and a press on a viz.
+  const bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+  if (!ctrl || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return false;
+  return FindPullable(GetMousePosition(), &pull_);
 }
 
 bool App::HandleCompose() {
@@ -1131,7 +1318,7 @@ void App::FurnishSlide(Vector2 centre, const std::string& title,
   const float measure = SlidePanel::ContentWidth(aspect) - 2.0f * CodeBlock::PaddingX(em);
 
   const float zoom = viewport_.Zoom();
-  const float step = GridStep(zoom);
+  const float step = SnapStep(zoom);
   const float margin = 2.0f * kRimThickness / std::max(zoom, 1e-6f);
 
   auto make = [&](Vector2 where, std::vector<std::string> lines, bool bold) {
@@ -1335,6 +1522,12 @@ void App::Update() {
   const bool menuOwnsPress = menu_.Visible();
 
   switch (menu_.Update(&options_)) {
+    case MenuAction::Fullscreen:
+      // The menu goes, since asking for the whole screen is asking to look at
+      // the canvas.
+      SetFullscreen(!options_.fullscreen);
+      menu_.Close();
+      break;
     case MenuAction::Save: {
       const std::string path = filedialog::Save("canvas.sketch");
       if (!path.empty() && !SaveCanvas(path)) {
@@ -1422,6 +1615,7 @@ void App::Update() {
   // Two fingers on two values mean something neither means alone, so this is
   // asked before anything that could move one of them.
   if (canvasActive && !consumed) consumed = HandleCompose();
+  if (canvasActive && !consumed) consumed = HandlePull();
   if (canvasActive && textDrag_ != TextDrag::None) consumed = HandleTextGesture();
   if (canvasActive && !consumed && dragBlock_ != nullptr) consumed = HandleBlockDrag();
   if (canvasActive && !consumed && media_.Busy()) consumed = media_.HandleInput(viewport_);
@@ -1482,12 +1676,16 @@ void App::Update() {
     lassoActive_ = false;
     textDrag_ = TextDrag::None;
     textBlock_ = nullptr;
+    pull_ = Pull{};
   }
 
   // Keys that act on the selection, and only while no box is being typed into.
   // Not while a selection is being carried: the drag is holding raw pointers to
   // the very boxes these would destroy.
-  const bool keysActOnSelection = canvasActive && focus_ == nullptr && !selectionDrag_;
+  // Nor while a viz is being pulled out: Ctrl is already down, so Ctrl+X is a
+  // keystroke away from freeing the box the pull is pointing into.
+  const bool keysActOnSelection =
+      canvasActive && focus_ == nullptr && !selectionDrag_ && pull_.from == PullFrom::None;
   if (keysActOnSelection && AnySelected() && IsKeyPressed(KEY_DELETE)) {
     DeleteSelection();
   }
@@ -1506,7 +1704,6 @@ void App::Update() {
     if (IsKeyPressed(KEY_LEFT)) slides_.Step(-1, &viewport_, options_.slideAspect);
   }
 
-  slides_.Advance(GetFrameTime());
   // A slide that has just appeared gets its title and its body, as two windows
   // of the canvas rather than as text the slide owns.
   if (const NewSlide fresh = slides_.TakeNewSlide(); fresh.made) {
@@ -1556,11 +1753,32 @@ void App::Update() {
   // of where the pointer is, not something to remember.
   // Which sample the pointer is on, at either end. Cleared every frame and set
   // again: it is a property of where the pointer is, not something to remember.
+  // Whether a gesture is in flight, which is what turns hovering off (hover.h).
+  // Every gesture is already listed in the pass above that hands it the
+  // pointer; this is the same list, asked once for all of them. A finger down
+  // counts, since touch has no hover to lose and a pan or a pinch sweeps across
+  // everything on the way.
+  bool held = lassoActive_ || selectionDrag_ || compose_ != Compose::None ||
+              pull_.from != PullFrom::None || fingerCarry_ ||
+              textDrag_ != TextDrag::None || dragBlock_ != nullptr ||
+              (media_.Busy() && !media_.Editing()) || axes_.Dragging() || plots_.Dragging() ||
+              shaders_.Dragging() || surfaces_.Dragging() || surfaces_.Orbiting() ||
+              volumes_.Dragging() || volumes_.Orbiting() || spaces_.Dragging() ||
+              spaces_.Orbiting() || viewport_.PanningWithMouse() || touch::Count() > 0;
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    held = held || block->SettingMeasure();
+  }
+  // And while the menu is up, the canvas behind it is not being pointed at
+  // either: the pointer is choosing from the menu, and a box flipping to code
+  // under the scrim is the canvas answering a question nobody asked.
+  held = held || menu_.Visible();
+  hover::SetHeld(held);
+
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->SetSampleHover(-1);
   if (canvasActive) {
     const CodeBlock* onBlock = nullptr;
     int              onSample = -1;
-    const Vector2    pointer = GetMousePosition();
+    const Vector2    pointer = hover::Pointer();
     if (axes_.SampleUnder(pointer, viewport_, fonts_, &onBlock, &onSample) ||
         spaces_.SampleUnder(pointer, viewport_, fonts_, &onBlock, &onSample)) {
       if (onBlock != nullptr) onBlock->SetSampleHover(onSample);
@@ -1579,13 +1797,30 @@ void App::Update() {
   // written, the wire, and the viz blinking at the other end. The reverse of
   // pulling a variable out of the code, and the same gesture -- highlight a
   // mention -- read from the other side.
+  const auto lightUp = [&](CodeBlock* block, const std::string& name) {
+    if (name.empty()) return;
+    for (const ActiveValue& value : active) {
+      if (value.block == block && value.name == name) return;
+    }
+    Vector2 at{};
+    if (axes_.MarkerFor(block, name, viewport_, fonts_, &at) ||
+        plots_.MarkerFor(block, name, viewport_, fonts_, &at)) {
+      active.push_back({block, name, at});
+    }
+  };
   if (canvasActive && focus_ != nullptr) {
-    for (const std::string& name : focus_->HighlightedVariables()) {
-      Vector2 at{};
-      if (axes_.MarkerFor(focus_, name, viewport_, fonts_, &at) ||
-          plots_.MarkerFor(focus_, name, viewport_, fonts_, &at)) {
-        active.push_back({focus_, name, at});
-      }
+    for (const std::string& name : focus_->HighlightedVariables()) lightUp(focus_, name);
+  }
+  if (canvasActive && pull_.from != PullFrom::None) lightUp(pull_.block, pull_.name);
+  // **And pointing at a mention is pointing at the thing.** Hovering a window
+  // boxes its name and wires the two together, so hovering the name does the
+  // same from the other end -- the same set, so the two cannot come to disagree
+  // about what "this variable" lights up. Through the hover pointer, like every
+  // other hover, so a gesture sweeping across a box leaves its names alone.
+  if (canvasActive) {
+    const Vector2 aim = hover::Pointer();
+    if (CodeBlock* over = BlockAt(aim); over != nullptr) {
+      lightUp(over, over->MentionAt(aim, viewport_, fonts_));
     }
   }
   // Pointing at the bare part of a number line is an offer to put a value into
@@ -1669,7 +1904,6 @@ void App::Draw() {
   fonts_.BeginFrame();
 
   DrawDotGrid(viewport_, gridShow_);
-
   // Under everything else: a slide is a region of the canvas, and whatever is
   // on it stands on top of it.
   slides_.Draw(viewport_, fonts_, options_.slideAspect);
@@ -1723,7 +1957,7 @@ void App::Draw() {
   if (dragBlockMoved_ || selectionMoved_ || axes_.Carrying() || plots_.Carrying() ||
       shaders_.Carrying() || surfaces_.Carrying() || volumes_.Carrying() ||
       spaces_.Carrying() || media_.Carrying()) {
-    DrawDropTarget(OverDropTarget(GetMousePosition()));
+    DrawDropTarget(OverDropTarget(carry::Position()));
   }
 
   menu_.Draw(fonts_, options_);
@@ -1806,8 +2040,6 @@ bool App::SaveCanvas(const std::string& path) {
   const Vector2 centre = viewport_.Centre();
   file << "view " << centre.x << " " << centre.y << " " << viewport_.Zoom() << "\n";
   file << "aspect " << options_.slideAspect << "\n";
-  const Vector2 newSlide = slides_.ButtonPosition();
-  file << "newslide " << newSlide.x << " " << newSlide.y << "\n";
   // A slide is only its rim now: its title and its body are text boxes, and so
   // they are saved as boxes along with every other window.
   for (const Slide& slide : slides_.Slides()) {
@@ -1882,7 +2114,13 @@ bool App::SaveCanvas(const std::string& path) {
     file << "space " << (window.kind == SpaceKind::Space ? 0 : 1) << " "
          << (window.docked ? 1 : 0) << " " << window.worldPos.x << " " << window.worldPos.y
          << " " << indexOf(window.dock) << " " << window.yaw << " " << window.pitch << " "
-         << window.dist << " " << (window.cullOutside ? 1 : 0) << "\n";
+         << window.dist << " " << (window.cullOutside ? 1 : 0) << " " << (window.home ? 1 : 0)
+         << "\n";
+    // Which points it holds, since a point can have been pulled out of its box's
+    // window or merged into another box's.
+    for (const PointRef& ref : window.refs) {
+      file << "point " << indexOf(ref.block) << " " << ref.name << "\n";
+    }
   }
 
   // Pictures and video. The path goes last and takes the rest of the line,
@@ -1986,6 +2224,8 @@ bool App::LoadCanvas(const std::string& path) {
     float   pitch = -0.25f;
     float   dist = 11.0f;
     bool    cull = true;
+    bool    home = true;
+    std::vector<std::pair<int, std::string>> points;
   };
   struct LoadedAxis {
     bool                                     docked = true;
@@ -2018,7 +2258,6 @@ bool App::LoadCanvas(const std::string& path) {
   float   zoom = 1.0f;
   bool    inBlock = false;
   float   aspect = kDefaultSlideAspect;
-  Vector2 newSlide = SlidePanel::DefaultButtonPosition();
   std::vector<Slide> slides;
 
   std::string raw;
@@ -2068,8 +2307,6 @@ bool App::LoadCanvas(const std::string& path) {
       blocks.back().values.emplace_back(name, value);
     } else if (keyword == "aspect") {
       stream >> aspect;
-    } else if (keyword == "newslide") {
-      stream >> newSlide.x >> newSlide.y;
     } else if (keyword == "slide") {
       Slide slide;
       stream >> slide.centre.x >> slide.centre.y;
@@ -2126,7 +2363,17 @@ bool App::LoadCanvas(const std::string& path) {
           window.block >> window.yaw >> window.pitch >> window.dist >> cull;
       window.docked = (docked != 0);
       window.cull = (cull != 0);
+      // A canvas written before windows could be split has no flag, and every
+      // window in it was its box's own.
+      int home = 1;
+      if (!(stream >> home)) home = 1;
+      window.home = (home != 0);
       spaceWindows.push_back(window);
+    } else if (keyword == "point" && !spaceWindows.empty()) {
+      int         index = -1;
+      std::string name;
+      stream >> index >> name;
+      spaceWindows.back().points.emplace_back(index, name);
     } else if (keyword == "end") {
       inBlock = false;
     } else if (keyword == "axis") {
@@ -2306,6 +2553,11 @@ bool App::LoadCanvas(const std::string& path) {
     window.pitch = loaded.pitch;
     window.dist = loaded.dist;
     window.cullOutside = loaded.cull;
+    window.home = loaded.home;
+    for (const auto& [index, name] : loaded.points) {
+      if (index < 0 || index >= static_cast<int>(codeBlocks_.size())) continue;
+      window.refs.push_back({codeBlocks_[static_cast<std::size_t>(index)].get(), name});
+    }
     spaceViews.push_back(window);
   }
   spaces_.Adopt(std::move(spaceViews));
@@ -2322,7 +2574,7 @@ bool App::LoadCanvas(const std::string& path) {
   }
 
   options_.slideAspect = (aspect > 0.05f) ? aspect : kDefaultSlideAspect;
-  slides_.Adopt(std::move(slides), newSlide);
+  slides_.Adopt(std::move(slides));
   viewport_.Reset(centre, zoom);
 
   // An older canvas kept its slide text on the slide. Give it the two windows

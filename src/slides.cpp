@@ -4,16 +4,14 @@
 #include <cmath>
 
 #include "text.h"
+#include "hover.h"
 #include "theme.h"
 
 namespace sb {
 namespace {
 
-// The button, in world units.
-constexpr float kButtonWidth = 176.0f;
-constexpr float kButtonHeight = 52.0f;
-constexpr float kButtonEm = 22.0f;
-constexpr float kButtonSeconds = 0.55f;
+// Where the first slide of a deck goes: just left of where the camera opens.
+constexpr Vector2 kFirstSlide = {-520.0f, 0.0f};
 
 // How long the camera takes to arrive at a slide.
 constexpr float kGlideSeconds = 0.6f;
@@ -33,17 +31,10 @@ constexpr float kDeleteHeight = 27.0f;
 constexpr float kPadFraction = 0.07f;
 constexpr float kTextEm = 44.0f;
 
-float Smoothstep(float t) {
-  const float clamped = std::clamp(t, 0.0f, 1.0f);
-  return clamped * clamped * (3.0f - 2.0f * clamped);
-}
-
 }  // namespace
 
 void SlidePanel::Reset() {
   slides_.clear();
-  buttonPos_ = DefaultButtonPosition();
-  buttonMoving_ = false;
   pending_ = {};
   removal_ = {};
   hoverSlide_ = -1;
@@ -92,11 +83,6 @@ void SlidePanel::RemoveSlide(int index, float aspect) {
   for (Slide& slide : slides_) {
     if (slide.centre.x > gone.centre.x) slide.centre.x -= shift;
   }
-  if (buttonPos_.x > gone.centre.x) {
-    buttonPos_.x -= shift;
-    // A glide still running would put the button straight back where it was.
-    buttonMoving_ = false;
-  }
   hoverSlide_ = -1;
 }
 
@@ -115,23 +101,11 @@ std::vector<int> SlidePanel::Order() const {
 }
 
 Vector2 SlidePanel::NextCentre(float aspect) const {
-  // The very first slide is made where the button is. After that one goes at
-  // the end of the deck, clear of the last slide with a gap between them --
-  // never on top of it, which is what a button standing beside a slide rather
-  // than in the middle of the next one has to be careful about.
-  if (slides_.empty()) return buttonPos_;
+  // At the end of the deck, clear of the last slide with a gap between them.
+  if (slides_.empty()) return kFirstSlide;
   const Slide&    last = slides_[static_cast<std::size_t>(Order().back())];
   const Rectangle bounds = Bounds(last, aspect);
   return {bounds.x + bounds.width + kSlideGap + bounds.width * 0.5f, last.centre.y};
-}
-
-Vector2 SlidePanel::ButtonHome(float aspect) const {
-  if (slides_.empty()) return DefaultButtonPosition();
-  const Slide&    last = slides_[static_cast<std::size_t>(Order().back())];
-  const Rectangle bounds = Bounds(last, aspect);
-  // In the gap just past the last slide: at the end of the deck, rather than
-  // out in the middle of where the next slide is going to be.
-  return {bounds.x + bounds.width + kSlideGap + kButtonWidth * 0.5f, last.centre.y};
 }
 
 int SlidePanel::SlideAtCamera(const Viewport& camera, float aspect) const {
@@ -182,10 +156,8 @@ Vector2 SlidePanel::TitleAnchor(Vector2 centre, float aspect) {
 }
 
 
-void SlidePanel::Adopt(std::vector<Slide> slides, Vector2 buttonPosition) {
+void SlidePanel::Adopt(std::vector<Slide> slides) {
   slides_ = std::move(slides);
-  buttonPos_ = buttonPosition;
-  buttonMoving_ = false;
   removal_ = {};
   hoverSlide_ = -1;
 }
@@ -205,73 +177,23 @@ float SlidePanel::ZoomToFill(const Slide& slide, float aspect) {
   return std::max(byWidth, byHeight) * 1.01f;
 }
 
-Rectangle SlidePanel::ButtonRect(const Viewport& viewport) const {
-  const float zoom = viewport.Zoom();
-  const Vector2 centre = viewport.ToScreen(buttonPos_);
-  return {centre.x - kButtonWidth * 0.5f * zoom, centre.y - kButtonHeight * 0.5f * zoom,
-          kButtonWidth * zoom, kButtonHeight * zoom};
-}
-
 void SlidePanel::AddSlide(float aspect, Viewport* camera) {
   Slide slide;
   slide.centre = NextCentre(aspect);
   slides_.push_back(slide);
+  // The title and the body are windows like any other, and windows belong to
+  // the canvas rather than to this panel. So it says a slide has appeared and
+  // lets the canvas furnish it.
   pending_ = {true, slide.centre};
-
-  buttonFrom_ = buttonPos_;
-  buttonTo_ = ButtonHome(aspect);
-  buttonElapsed_ = 0.0f;
-  buttonMoving_ = true;
 
   // Making a slide is a way of saying "I am working here now", so the canvas
   // takes you there.
   if (camera != nullptr) camera->GlideTo(slide.centre, ZoomToFill(slide, aspect), 0.45f);
 }
 
-void SlidePanel::Advance(float seconds) {
-  if (!buttonMoving_) return;
-  buttonElapsed_ += seconds;
-  const float t = Smoothstep(buttonElapsed_ / kButtonSeconds);
-  buttonPos_ = {buttonFrom_.x + (buttonTo_.x - buttonFrom_.x) * t,
-                buttonFrom_.y + (buttonTo_.y - buttonFrom_.y) * t};
-  if (buttonElapsed_ >= kButtonSeconds) {
-    buttonPos_ = buttonTo_;
-    buttonMoving_ = false;
-  }
-}
-
 bool SlidePanel::HandleInput(const Viewport& viewport, FontStore& fonts, float aspect,
                              Viewport* camera) {
   const Vector2 pointer = GetMousePosition();
-
-  const Rectangle button = ButtonRect(viewport);
-  if (!slides_.empty() && CheckCollisionPointRec(pointer, button)) {
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !buttonMoving_) {
-      // The slide goes at the end of the deck, clear of the last one; the
-      // button then walks along past it, so the next click lands the next slide
-      // further right again and the deck reads left to right.
-      Slide slide;
-      slide.centre = NextCentre(aspect);
-      slides_.push_back(slide);
-      // The title and the body are windows like any other, and windows belong
-      // to the canvas rather than to this panel. So it says a slide has
-      // appeared and lets the canvas furnish it.
-      pending_ = {true, slide.centre};
-
-      buttonFrom_ = buttonPos_;
-      buttonTo_ = ButtonHome(aspect);
-      buttonElapsed_ = 0.0f;
-      buttonMoving_ = true;
-
-      // And the camera goes to look at what was just made, exactly as it would
-      // if the slide's rim had been clicked. Making a slide is a way of saying
-      // "I am working here now".
-      if (camera != nullptr) {
-        camera->GlideTo(slide.centre, ZoomToFill(slide, aspect), kGlideSeconds);
-      }
-    }
-    return true;   // hovering claims it, so a click never falls through
-  }
 
   // A slide is entered by its rim. Its inside belongs to whatever is on it.
   int onRim = -1;
@@ -313,7 +235,7 @@ bool SlidePanel::HandleInput(const Viewport& viewport, FontStore& fonts, float a
 
 void SlidePanel::Draw(const Viewport& viewport, FontStore& fonts, float aspect) const {
   const float zoom = viewport.Zoom();
-  const Vector2 pointer = GetMousePosition();
+  const Vector2 pointer = hover::Pointer();
 
   for (const Slide& slide : slides_) {
     const Rectangle bounds = Bounds(slide, aspect);
@@ -350,24 +272,6 @@ void SlidePanel::Draw(const Viewport& viewport, FontStore& fonts, float aspect) 
                  kDeleteEm, kDropMark);
     }
   }
-
-  // The new-slide button last, so it is never behind a slide it stands next to.
-  // It marks where the deck *stops*, so a canvas with no deck has nothing for
-  // it to stand at the end of and it is not drawn: an empty canvas is empty.
-  // The first slide is asked for from the menu instead.
-  if (slides_.empty()) return;
-  const Rectangle button = ButtonRect(viewport);
-  if (button.width < 2.0f) return;
-  const bool hovered = CheckCollisionPointRec(pointer, button);
-  DrawRectangleRounded(button, 0.3f, 10, hovered ? kAccentHover : kAccent);
-
-  const float em = kButtonEm * zoom;
-  if (em < 3.0f) return;
-  const float width = text::Measure(fonts, Face::MainRegular, "New slide", em);
-  text::Draw(fonts, Face::MainRegular, "New slide",
-             {button.x + (button.width - width) * 0.5f,
-              button.y + button.height * 0.5f + em * 0.34f},
-             em, RAYWHITE);
 }
 
 }  // namespace sb

@@ -11,7 +11,6 @@ namespace sb {
 namespace {
 
 constexpr float kPanelWidth = 420.0f;
-constexpr float kTitleEm = 27.0f;
 constexpr float kLabelEm = 19.0f;
 constexpr float kHintEm = 15.0f;
 
@@ -33,6 +32,7 @@ struct MenuLayout {
   Rectangle load;
   Rectangle insert;
   Rectangle slide;
+  Rectangle fullscreen;
 };
 
 // The panel is as tall as what is in it, since what is in it changes: the slide
@@ -46,8 +46,9 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   const float inner = kPanelWidth - inset * 2.0f;
 
   // Laid out relative to the panel's top, so the height can be totalled before
-  // anywhere on screen has been decided.
-  float y = 92.0f;
+  // anywhere on screen has been decided. No title: everybody who has pressed
+  // Escape knows which menu this is.
+  float y = inset;
   m.aspectHeader = {inset, y, inner, kRowHeight};
   y += kRowHeight;
   if (aspectOpen) {
@@ -84,6 +85,10 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   // A deck's first slide. After that the button on the canvas is where slides
   // come from, since it stands at the end of the deck and there is one.
   m.slide = {inset, y, inner, kButtonHeight};
+  y += kButtonHeight + 8.0f;
+  // The whole screen, title bar and all. It is a thing done to the window
+  // rather than to the canvas, so it comes last.
+  m.fullscreen = {inset, y, inner, kButtonHeight};
   y += kButtonHeight;
   y += 48.0f;   // the hint, and the panel's own bottom margin
 
@@ -105,6 +110,7 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   place(&m.load);
   place(&m.insert);
   place(&m.slide);
+  place(&m.fullscreen);
   m.recentLabelTop += at.y;
   return m;
 }
@@ -198,6 +204,7 @@ MenuAction OptionsMenu::Update(Options* options) {
   if (CheckCollisionPointRec(mouse, m.load)) return MenuAction::Load;
   if (CheckCollisionPointRec(mouse, m.insert)) return MenuAction::Insert;
   if (CheckCollisionPointRec(mouse, m.slide)) return MenuAction::NewSlide;
+  if (CheckCollisionPointRec(mouse, m.fullscreen)) return MenuAction::Fullscreen;
   return MenuAction::None;
 }
 
@@ -209,13 +216,6 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
 
   DrawRectangleRounded(m.panel, 0.06f, 12, kPanelBg);
   DrawRectangleRoundedLines(m.panel, 0.06f, 12, kPanelBorder);
-
-  const float titleBaseline = m.panel.y + 26.0f + text::Ascent(fonts, Face::MainRegular, kTitleEm);
-  text::Draw(fonts, Face::MainRegular, "Options", {m.panel.x + 24.0f, titleBaseline}, kTitleEm,
-             kPanelText);
-
-  DrawRectangle(static_cast<int>(m.panel.x + 24.0f), static_cast<int>(m.panel.y + 74.0f),
-                static_cast<int>(m.panel.width - 48.0f), 1, kPanelBorder);
 
   const Vector2 mouse = GetMousePosition();
 
@@ -289,6 +289,10 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
   DrawButton(fonts, m.insert, "Insert picture or video",
              CheckCollisionPointRec(mouse, m.insert));
   DrawButton(fonts, m.slide, "New slide", CheckCollisionPointRec(mouse, m.slide));
+  // Says what pressing it would give you, like every other toggle here.
+  DrawButton(fonts, m.fullscreen,
+             options.fullscreen ? "Leave fullscreen" : "Fullscreen",
+             CheckCollisionPointRec(mouse, m.fullscreen));
 
   const float hintBaseline = m.panel.y + m.panel.height - 22.0f;
   text::Draw(fonts, Face::MainRegular, "Esc to close", {m.panel.x + 24.0f, hintBaseline}, kHintEm,

@@ -25,10 +25,12 @@ namespace sb {
 
 class CodeBlock;
 
-// One size for all of them, so the two columns line up in rows rather than
-// stepping raggedly down the sides of the box.
-inline constexpr float kFlankSide = 240.0f;   // world units
+// One height for all of them, so the two columns line up in rows rather than
+// stepping raggedly down the sides of the box. Most are square at that height;
+// a space window is 16:9, the shape a view into a space is looked at in.
+inline constexpr float kFlankSide = 320.0f;   // world units
 inline constexpr float kFlankGap = 16.0f;
+inline constexpr float kSpaceAspect = 16.0f / 9.0f;
 
 // A kind of window that flanks a box.
 class Flanking {
@@ -46,14 +48,16 @@ inline int FlankBase(const std::vector<const Flanking*>& before, const CodeBlock
 }
 
 // The n-th slot beside a card, in screen space. `zoom` scales the gap and the
-// side the way it scales everything else on the canvas.
-inline Rectangle FlankRect(Rectangle card, int slot, float zoom) {
-  const float side = kFlankSide * zoom;
+// side the way it scales everything else on the canvas; `aspect` is how many
+// times wider than tall this kind of window is.
+inline Rectangle FlankRect(Rectangle card, int slot, float zoom, float aspect = 1.0f) {
+  const float tall = kFlankSide * zoom;
+  const float wide = tall * aspect;
   const float gap = kFlankGap * zoom;
   const int   column = slot & 1;            // 0 to the right, 1 to the left
   const int   row = slot >> 1;
-  const float x = (column == 0) ? card.x + card.width + gap : card.x - gap - side;
-  return {x, card.y + static_cast<float>(row) * (side + gap), side, side};
+  const float x = (column == 0) ? card.x + card.width + gap : card.x - gap - wide;
+  return {x, card.y + static_cast<float>(row) * (tall + gap), wide, tall};
 }
 
 }  // namespace sb

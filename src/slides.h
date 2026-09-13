@@ -9,13 +9,11 @@
 // showed at zoom 1, and the width is that times the aspect the deck is being
 // made for, so a slide viewed at its own scale is exactly a screenful.
 //
-// The **new slide** button sits on the canvas rather than in a toolbar, at the
-// **end of the deck**: right beside the last slide rather than out in the
-// middle of where the next one will go, so it reads as the place the deck
-// stops. Clicking it puts a slide clear of that one, with a gap between them,
-// and walks the button along to the new end. A deck therefore grows **left to
-// right**, and is a row you can scroll along rather than a list beside the
-// work.
+// A slide is asked for from the Escape menu, and goes at the **end of the
+// deck**: clear of the last slide, with a gap between them. A deck therefore
+// grows **left to right**, and is a row you can scroll along rather than a list
+// beside the work. Nothing on the canvas makes slides -- the canvas is for what
+// is on them.
 //
 // Which slide follows which is decided by where they sit, left to right --
 // nothing else records an order, and nothing else needs to.
@@ -33,7 +31,7 @@ namespace sb {
 // One screenful at zoom 1, with the window this app opens at. A slide is that
 // tall; how wide depends on the aspect being worked in.
 inline constexpr float kSlideHeight = 800.0f;
-// Between one slide and the next, and between the last slide and the button.
+// Between one slide and the next.
 inline constexpr float kSlideGap = 60.0f;
 
 struct Slide {
@@ -62,10 +60,6 @@ struct SlideRemoval {
 
 class SlidePanel {
  public:
-  // Where the button starts: just left of where the camera opens, so it is
-  // there to be found without being in the way of the middle of the canvas.
-  static Vector2 DefaultButtonPosition() { return {-520.0f, 0.0f}; }
-
   void Reset();
 
   // Taken once: asking clears it, so a slide is furnished exactly once.
@@ -90,11 +84,9 @@ class SlidePanel {
   // a deck is not travelling to it, and a glide per keypress would be seasick.
   // False if the camera is not on a slide, or there is no next one.
   bool Step(int direction, Viewport* camera, float aspect) const;
-  // Starts a deck where the button would have been. The button only stands at
-  // the *end* of a deck, so before there is one it has nowhere to stand and the
-  // first slide is asked for from the menu instead.
+  // A slide at the end of the deck, or the first one of a new deck. The camera
+  // goes to it.
   void AddSlide(float aspect, Viewport* camera);
-  void Advance(float seconds);
   void Draw(const Viewport& viewport, FontStore& fonts, float aspect) const;
 
   // The world rectangle a slide occupies at this aspect.
@@ -105,11 +97,9 @@ class SlidePanel {
 
   // --- persistence --------------------------------------------------------
   const std::vector<Slide>& Slides() const { return slides_; }
-  Vector2                   ButtonPosition() const { return buttonPos_; }
-  void Adopt(std::vector<Slide> slides, Vector2 buttonPosition);
+  void Adopt(std::vector<Slide> slides);
 
  private:
-  Rectangle ButtonRect(const Viewport& viewport) const;
   // Where a slide's delete button sits, given where the slide is on screen.
   // Returns a zero-size rectangle when the slide is too small on screen to
   // carry one.
@@ -118,18 +108,10 @@ class SlidePanel {
   void      RemoveSlide(int index, float aspect);
   // The slides in the order they read, which is the order they sit in.
   std::vector<int> Order() const;
-  // Where the next slide goes, and where the button belongs once it is there.
+  // Where the next slide goes.
   Vector2   NextCentre(float aspect) const;
-  Vector2   ButtonHome(float aspect) const;
 
   std::vector<Slide> slides_;
-
-  // The button, and the glide it is making along past the slide just made.
-  Vector2 buttonPos_ = DefaultButtonPosition();
-  Vector2 buttonFrom_{};
-  Vector2 buttonTo_{};
-  float   buttonElapsed_ = 0.0f;
-  bool    buttonMoving_ = false;
 
   NewSlide     pending_;
   SlideRemoval removal_;

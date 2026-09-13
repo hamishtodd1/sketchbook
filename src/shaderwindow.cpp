@@ -7,6 +7,7 @@
 
 #include "grid.h"
 #include "selection.h"
+#include "hover.h"
 #include "theme.h"
 
 namespace sb {
@@ -132,7 +133,7 @@ void ShaderPanel::DrawSelectionRims(const Viewport& viewport, FontStore& fonts) 
 void ShaderPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
                                  std::vector<ActiveValue>* out) const {
   if (out == nullptr) return;
-  const Vector2 pointer = GetMousePosition();
+  const Vector2 pointer = hover::Pointer();
   for (std::size_t i = 0; i < views_.size(); ++i) {
     if (views_[i].block == nullptr) continue;
     // Inside the picture only: on the rim you are holding the window, not
@@ -215,14 +216,14 @@ void ShaderPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     // one back needs a point chosen first. Pointing at the picture chooses it;
     // otherwise it is read at the middle.
     Vector2 probe = {0.5f, 0.5f};
-    if (CheckCollisionPointRec(pointer, rect)) {
-      probe = {(pointer.x - rect.x) / rect.width, (pointer.y - rect.y) / rect.height};
+    if (const Vector2 aim = hover::Pointer(); CheckCollisionPointRec(aim, rect)) {
+      probe = {(aim.x - rect.x) / rect.width, (aim.y - rect.y) / rect.height};
     }
     view.block->SetProbePoint(probe);
 
     view.block->DrawPictureInto(rect, view.centre, view.span);
     DrawRectangleLinesEx(rect, std::max(1.0f, 1.0f * zoom), Fade(kCodeFg, 0.25f));
-    if (carried || PointOnRim(rect, pointer)) DrawRim(rect, zoom, carried);
+    if (carried || PointOnRim(rect, hover::Pointer())) DrawRim(rect, zoom, carried);
   }
 }
 

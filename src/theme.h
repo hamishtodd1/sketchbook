@@ -198,8 +198,12 @@ inline void DrawGrabCursor(Vector2 at) {
 inline constexpr Color kCanvasBg   = { 232, 232, 232, 255 };  // pure light gray
 inline constexpr Color kGridDot    = { 148, 148, 148, 255 };
 
-// World units between the finest grid dots at zoom 1.
-inline constexpr float kGridBaseStep = 40.0f;
+// World units between the finest grid dots at zoom 1, until a line of type has
+// been measured. The measured step is a line divided by kDotsPerLine, and a
+// box's padding is one step, so a card whose corner is on a dot has its text on
+// one too.
+inline constexpr float kGridBaseStep = 17.0f;
+inline constexpr float kDotsPerLine = 2.0f;
 
 // Where the camera opens: one notch of the wheel in from unity, which is where
 // a box of the default type size is comfortable to read.
@@ -208,8 +212,8 @@ inline constexpr float kDefaultZoom = kZoomStep;
 // The grid subdivides/coarsens to keep the on-screen dot spacing in this band.
 // The band spans exactly one doubling, and zoom 1 sits well inside it so the
 // intermediate dots read as a full grid rather than a faint half-grid.
-inline constexpr float kGridMinPx    = 24.0f;
-inline constexpr float kGridMaxPx    = 48.0f;
+inline constexpr float kGridMinPx    = 12.0f;
+inline constexpr float kGridMaxPx    = 24.0f;
 
 // ------------------------------------------------------------------- cards
 // Monokai, background included.

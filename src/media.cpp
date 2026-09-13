@@ -8,6 +8,7 @@
 #include "grid.h"
 #include "selection.h"
 #include "text.h"
+#include "hover.h"
 #include "theme.h"
 
 namespace sb {
@@ -597,8 +598,13 @@ void MediaPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     // Being anywhere on the picture is enough to bring up the crop corners --
     // they have to be findable -- but the rim answers to the rim, exactly as it
     // does on every other window.
-    const bool hovered = CheckCollisionPointRec(pointer, rect) || PointOnRim(rect, pointer);
-    const bool onRim = PointOnRim(rect, pointer);
+    // The picture being held is not being hovered, it is being worked on, so it
+    // keeps the real pointer and its handles stay where the hand is. Every other
+    // picture sees the hover pointer, which is nowhere while anything is held.
+    const bool    heldHere = drag_ != Drag::None && dragIndex_ == i;
+    const Vector2 here = heldHere ? pointer : hover::Pointer();
+    const bool    hovered = CheckCollisionPointRec(here, rect) || PointOnRim(rect, here);
+    const bool    onRim = PointOnRim(rect, here);
 
     // --- the transport ----------------------------------------------------
     if (item.kind == MediaKind::Video && !item.broken && rect.height > 40.0f) {
@@ -670,7 +676,7 @@ void MediaPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
         rect.height - footer > 40.0f) {
       for (int corner = 0; corner < 4; ++corner) {
         const Rectangle handle = CornerHandle(rect, corner, footer);
-        const bool      hot = CheckCollisionPointRec(pointer, handle);
+        const bool      hot = CheckCollisionPointRec(here, handle);
         // An L-bracket rather than a square: it reads as a corner of a frame,
         // which is what dragging it moves.
         const float thickness = std::max(2.0f, handle.width * 0.16f);

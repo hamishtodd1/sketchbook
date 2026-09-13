@@ -19,15 +19,18 @@
 #include "highlight.h"
 #include "rlgl.h"
 #include "text.h"
+#include "hover.h"
 #include "theme.h"
+#include "grid.h"
 #include "types/examples.h"
 
 namespace sb {
 namespace {
 
-// Card geometry, in world units so it scales with the canvas.
-constexpr float kPadX = 18.0f;
-constexpr float kPadY = 14.0f;
+// Card geometry, in world units so it scales with the canvas. The padding is one
+// grid step, the same on every side: a card snapped by its corner then has its
+// text on a dot as well.
+float CardPad() { return GridBaseStep(); }
 constexpr float kRadius = 8.0f;
 // The type size those numbers were chosen against. Padding is kept in
 // proportion to it so that resizing a box is genuinely uniform: at the default
@@ -439,13 +442,26 @@ bool CodeBlock::ShowsCode(int line) const {
 std::string CodeBlock::Injection(int line) const {
   if (line < 0 || line >= static_cast<int>(cache_.size())) return {};
   const mathline::Line& parsed = cache_[static_cast<std::size_t>(line)].parsed;
-  if (parsed.kind != mathline::Kind::Declaration || parsed.hasInitialiser) return {};
 
-  // A function's chosen value is a piece of code rather than a number, and
-  // unlike a real's it does not move under a knob -- there is nothing to drag.
-  if (mathline::IsFunctionType(parsed.type)) {
-    return " = " + types::realfunction::ExampleBody(parsed.name);
+  // A function nobody gave a body has one chosen for it, and the choice is a
+  // piece of code rather than a number: it takes the place of the semicolon.
+  // Not if the box defines the function further down, since then the body is
+  // the user's own and this line is only saying it is coming.
+  if (parsed.kind == mathline::Kind::Prototype) {
+    mathline::FunctionHead head;
+    if (!mathline::ParseFunctionHead(lines_[static_cast<std::size_t>(line)], &head, Algebra())) {
+      return {};
+    }
+    for (const mathprogram::Function& fn : program_.functions()) {
+      if (fn.name != head.name || fn.firstLine != line) continue;
+      return " { return " +
+             types::realfunction::ExampleFunctionBody(head.returnType, head.paramType,
+                                                      head.paramName, head.name, Algebra()) +
+             "; }";
+    }
+    return {};
   }
+  if (parsed.kind != mathline::Kind::Declaration || parsed.hasInitialiser) return {};
   // A multivector gets no injection shown at all. Not because there is nothing
   // to show -- there is, and it is real code the way a function's is -- but
   // because a box is sized for the worst case across both readings, and a
@@ -455,8 +471,16 @@ std::string CodeBlock::Injection(int line) const {
   // window that displays one; that is the next thing.
   if (mathline::IsMultivectorType(parsed.type, Algebra())) return {};
 
+  // The literal this line is given, which is what the knob chose -- not what the
+  // variable has become by wherever the box is being read, since a line further
+  // down may have assigned over it.
   for (const mathprogram::Variable& variable : program_.variables()) {
-    if (variable.name == parsed.name) return " = " + FormatInjected(variable.value);
+    if (variable.name != parsed.name) continue;
+    const int governing = variable.GoverningLiteral(line);
+    if (governing >= 0) {
+      return " = " + FormatInjected(variable.literals[static_cast<std::size_t>(governing)].value);
+    }
+    return " = " + FormatInjected(variable.value);
   }
   return " = " + FormatInjected(types::ExampleReal(parsed.name));
 }
@@ -471,6 +495,21 @@ std::vector<Rectangle> CodeBlock::MentionsOf(const std::string& name, const View
     for (const Rectangle& box : MentionRects(r, name, g, fonts)) found.push_back(box);
   }
   return found;
+}
+
+std::string CodeBlock::MentionAt(Vector2 screenPoint, const Viewport& viewport,
+                                 FontStore& fonts) const {
+  if (absorbed_ || IsText()) return {};
+  const Geometry& g = Measure(viewport, fonts);
+  if (g.emPx < 0.4f || !CheckCollisionPointRec(screenPoint, g.rect)) return {};
+  const int row = RowAt(screenPoint, viewport, fonts);
+  if (row < 0) return {};
+  for (const mathprogram::Variable& variable : program_.variables()) {
+    for (const Rectangle& box : MentionRects(static_cast<std::size_t>(row), variable.name, g, fonts)) {
+      if (CheckCollisionPointRec(screenPoint, box)) return variable.name;
+    }
+  }
+  return {};
 }
 
 mathline::Flow CodeBlock::FlowFor(const std::string& name) const {
@@ -925,8 +964,8 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
   // Padding is in proportion to the type, so growing a box grows the whole
   // card and not just what is written in it.
   const float padScale = em_ / kBaseEm;
-  const float padX = kPadX * padScale * g.zoom;
-  const float padY = kPadY * padScale * g.zoom;
+  const float padX = CardPad() * padScale * g.zoom;
+  const float padY = CardPad() * padScale * g.zoom;
 
   float y = topLeft.y + padY;
 
@@ -1026,7 +1065,11 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
         latexExtent = std::max(latexExtent, both.height + both.depth + 6.0f * g.zoom);
       }
 
+      // And a whole number of dots tall, so a line that a fraction makes taller
+      // does not leave every line under it between the rows of dots.
+      const float dot = g.lineHeight / kDotsPerLine;
       row.height = std::max(g.lineHeight, latexExtent);
+      row.height = std::ceil(row.height / dot - 0.01f) * dot;
       if (layout != nullptr) {
         row.baseline =
             row.y + (row.height - (layout->height + layout->depth)) * 0.5f + layout->height;
@@ -1056,11 +1099,11 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
   return g;
 }
 
-float CodeBlock::PaddingX(float em) { return kPadX * (em / kBaseEm); }
+float CodeBlock::PaddingX(float em) { return CardPad() * (em / kBaseEm); }
 
 Vector2 CodeBlock::TextOffset() const {
   const float scale = em_ / kBaseEm;
-  return {kPadX * scale, kPadY * scale};
+  return {CardPad() * scale, CardPad() * scale};
 }
 
 Rectangle CodeBlock::WorldBounds(const Viewport& viewport, FontStore& fonts) const {
@@ -1123,7 +1166,8 @@ CodeBlock::Chrome CodeBlock::ChromeRects(const Geometry& g) const {
 }
 
 bool CodeBlock::ChromeVisible(const Geometry& g, Vector2 pointer) const {
-  if (focused_) return true;
+  // The measure being dragged keeps its own bar, however the pointer wanders.
+  if (focused_ || marginDrag_) return true;
   // Only a text box shows controls without the caret: they are how its words
   // are set, which is a thing you want to change without starting to type.
   if (!IsText() || absorbed_) return false;
@@ -1812,7 +1856,7 @@ bool CodeBlock::HandleChrome(const Viewport& viewport, FontStore& fonts) {
   // go -- like every other drag on this canvas.
   if (marginDrag_) {
     const float zoom = std::max(g.zoom, 1e-6f);
-    const float padX = kPadX * (em_ / kBaseEm) * zoom;
+    const float padX = CardPad() * (em_ / kBaseEm) * zoom;
     const float wanted = (pointer.x + kRimGrabInside - g.rect.x - 2.0f * padX) / zoom;
     textWidth_ = std::clamp(wanted, em_ * 3.0f, em_ * 400.0f);
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) marginDrag_ = false;
@@ -2070,11 +2114,11 @@ void CodeBlock::FeedFunction() {
 }
 
 int CodeBlock::ExecutedUpTo() const {
-  // The caret first: if you are writing on a line, that line is where the box
-  // has got to. Then the pointer, which is the same question asked by hovering.
+  // The caret's line while the box is being written in, and otherwise the end.
+  // A box nobody has selected is not being read a line at a time, so what its
+  // windows show is what the whole box came to -- not wherever the pointer
+  // happens to be passing, and not where the caret was left last time.
   if (focused_ && caretUsed_) return caretLine_;
-  if (pointerRow_ >= 0) return pointerRow_;
-  if (everTouched_ && caretUsed_) return caretLine_;
   return -1;   // the end
 }
 
@@ -2364,17 +2408,14 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
   hoverLine_ = -1;
   const Geometry& probe = Measure(viewport, fonts);
   if (probe.emPx < 0.4f) return;
-  const Vector2 pointer = GetMousePosition();
+  const Vector2 pointer = hover::Pointer();
   rimHot_ = PointOnRim(probe.rect, pointer);
-  pointerRow_ = -1;
   // Reaching for the rim should not flip the line underneath it to code.
   if (!rimHot_ && CheckCollisionPointRec(pointer, probe.rect)) {
     const int row = RowAt(pointer, viewport, fonts);
     if (row >= 0 && row < static_cast<int>(probe.rows.size())) {
       hoverLine_ = probe.rows[static_cast<std::size_t>(row)].line;
       // Pointing at a line is asking what things were once it had run.
-      pointerRow_ = hoverLine_;
-      everTouched_ = true;
     }
   }
 
@@ -2451,12 +2492,15 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
 
     const std::size_t semicolon = source.rfind(';');
     const std::size_t split = (semicolon == std::string::npos) ? source.size() : semicolon;
+    // A value's injection goes before the semicolon; a body *replaces* it.
+    const bool        body = cache_[i].parsed.kind == mathline::Kind::Prototype;
+    const std::size_t resume = (body && split < source.size()) ? split + 1 : split;
 
     float x = row.x;
     x += DrawSpans(fonts, source, spans, 0, split, {x, row.baseline}, g.emPx);
     text::Draw(fonts, Face::Mono, injection, {x, row.baseline}, g.emPx, kInjected);
     x += text::Measure(fonts, Face::Mono, injection, g.emPx);
-    DrawSpans(fonts, source, spans, split, source.size(), {x, row.baseline}, g.emPx);
+    DrawSpans(fonts, source, spans, resume, source.size(), {x, row.baseline}, g.emPx);
   }
 
   // Caret. While this box is being edited, and solid while typing so it never
@@ -2505,7 +2549,7 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
 void CodeBlock::DrawChrome(const Viewport& viewport, FontStore& fonts) const {
   if (absorbed_) return;
   const Geometry& g = Measure(viewport, fonts);
-  const Vector2   pointer = GetMousePosition();
+  const Vector2   pointer = hover::Pointer();
   const bool      asWords = IsText() && !showSource_;
   (void)asWords;
 
@@ -2782,12 +2826,12 @@ void MathBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
   const tex::Layout layout = tex::BuildLayout(parsed_, fonts, emPx, display_);
 
   const Vector2 topLeft = viewport.ToScreen(origin_);
-  const Rectangle rect = {topLeft.x, topLeft.y, layout.width + 2.0f * kPadX * zoom,
-                          layout.height + layout.depth + 2.0f * kPadY * zoom};
+  const Rectangle rect = {topLeft.x, topLeft.y, layout.width + 2.0f * CardPad() * zoom,
+                          layout.height + layout.depth + 2.0f * CardPad() * zoom};
 
   DrawCard(rect, zoom, kMathBg, Fade(kMathFg, 0.15f), 1.0f);
 
-  const Vector2 origin = {rect.x + kPadX * zoom, rect.y + kPadY * zoom + layout.height};
+  const Vector2 origin = {rect.x + CardPad() * zoom, rect.y + CardPad() * zoom + layout.height};
   tex::DrawLayout(layout, fonts, origin, kMathFg);
 }
 

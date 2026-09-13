@@ -43,7 +43,7 @@ std::size_t FindTable(const Reader& r, std::uint32_t tag) {
   return 0;
 }
 
-void ParseCmapSubtable(const Reader& r, std::size_t sub, std::unordered_set<int>* out) {
+void ParseCmapSubtable(const Reader& r, std::size_t sub, std::unordered_map<int, int>* out) {
   const std::uint16_t format = r.u16(sub);
   if (format == 4) {
     const std::uint16_t segX2 = r.u16(sub + 6);
@@ -67,7 +67,7 @@ void ParseCmapSubtable(const Reader& r, std::size_t sub, std::unordered_set<int>
           g = r.u16(gi);
           if (g != 0) g = static_cast<std::uint16_t>(g + delta);
         }
-        if (g != 0) out->insert(static_cast<int>(c));
+        if (g != 0) out->emplace(static_cast<int>(c), g);
         if (c == 0xFFFF) break;
       }
     }
@@ -77,17 +77,46 @@ void ParseCmapSubtable(const Reader& r, std::size_t sub, std::unordered_set<int>
       const std::size_t o = sub + 16 + 12u * i;
       const std::uint32_t start = r.u32(o);
       const std::uint32_t end = r.u32(o + 4);
+      const std::uint32_t glyph = r.u32(o + 8);
       // Guard against a corrupt table claiming an absurd range.
       const std::uint32_t stop = std::min(end, start + 0x4000u);
-      for (std::uint32_t c = start; c <= stop; ++c) out->insert(static_cast<int>(c));
+      for (std::uint32_t c = start; c <= stop; ++c) {
+        out->emplace(static_cast<int>(c), static_cast<int>(glyph + (c - start)));
+      }
     }
   }
 }
 
-// Reads the cmap plus head/hhea metrics. Returns false only if the file is not
-// a TrueType container we understand.
+// A glyph's advance and outline box, in font units. False if the font has no
+// glyf table to say (a CFF font), in which case the bitmaps are measured instead.
+bool ReadOutline(const Reader& r, std::size_t head, std::size_t hhea, int glyph,
+                 GlyphOutline* out) {
+  const std::size_t hmtx = FindTable(r, Tag('h', 'm', 't', 'x'));
+  const std::size_t loca = FindTable(r, Tag('l', 'o', 'c', 'a'));
+  const std::size_t glyf = FindTable(r, Tag('g', 'l', 'y', 'f'));
+  if (hmtx == 0 || loca == 0 || glyf == 0) return false;
+
+  const int metrics = r.u16(hhea + 34);
+  if (metrics <= 0) return false;
+  out->advance = r.u16(hmtx + 4u * static_cast<std::size_t>(std::min(glyph, metrics - 1)));
+
+  const bool longOffsets = r.i16(head + 50) != 0;
+  const std::size_t g = static_cast<std::size_t>(glyph);
+  const std::size_t from = longOffsets ? r.u32(loca + 4 * g) : 2u * r.u16(loca + 2 * g);
+  const std::size_t to = longOffsets ? r.u32(loca + 4 * (g + 1)) : 2u * r.u16(loca + 2 * (g + 1));
+  if (to > from) {   // an empty glyph -- a space -- has no outline and no box
+    out->xMin = r.i16(glyf + from + 2);
+    out->yMin = r.i16(glyf + from + 4);
+    out->xMax = r.i16(glyf + from + 6);
+    out->yMax = r.i16(glyf + from + 8);
+  }
+  return true;
+}
+
+// Reads the cmap plus head/hhea metrics, and every glyph's outline box. Returns
+// false only if the file is not a TrueType container we understand.
 bool ParseFontTables(const std::vector<unsigned char>& file, std::unordered_set<int>* coverage,
-                     FaceMetrics* fm) {
+                     FaceMetrics* fm, std::unordered_map<int, GlyphOutline>* outlines) {
   if (file.size() < 12) return false;
   Reader r{file.data(), file.size()};
 
@@ -121,7 +150,19 @@ bool ParseFontTables(const std::vector<unsigned char>& file, std::unordered_set<
     if (score > bestScore) { bestScore = score; best = sub; }
   }
   if (bestScore < 0) return false;
-  ParseCmapSubtable(r, best, coverage);
+  std::unordered_map<int, int> glyphs;
+  ParseCmapSubtable(r, best, &glyphs);
+  bool haveOutlines = true;
+  for (const auto& [codepoint, glyph] : glyphs) {
+    coverage->insert(codepoint);
+    GlyphOutline outline;
+    if (haveOutlines && ReadOutline(r, head, hhea, glyph, &outline)) {
+      outlines->emplace(codepoint, outline);
+    } else {
+      haveOutlines = false;
+    }
+  }
+  if (!haveOutlines) outlines->clear();
   return !coverage->empty();
 }
 
@@ -167,7 +208,8 @@ bool FontStore::Load(const std::string& fontDir, std::string* error) {
     faces_[i].file.assign(bytes, bytes + size);
     UnloadFileData(bytes);
 
-    if (!ParseFontTables(faces_[i].file, &faces_[i].coverage, &metrics_[i])) {
+    if (!ParseFontTables(faces_[i].file, &faces_[i].coverage, &metrics_[i],
+                         &faces_[i].outlines)) {
       if (error) *error = "unrecognised font container: " + path;
       return false;
     }
@@ -319,7 +361,10 @@ FontStore::Sized* FontStore::Acquire(Face face, float emPx) {
   if (request < 1) request = 1;
 
   Sized sized;
-  sized.emPx = em;
+  // The em the atlas was actually rasterised at. `request` is a whole number of
+  // pixels, so it is not quite `em`, and scaling the bitmaps by the rung's
+  // nominal size would draw every glyph a percent or two off its outline.
+  sized.emPx = static_cast<float>(request) * static_cast<float>(fm.unitsPerEm) / span;
   sized.font = BuildFont(fd.file, fd.codepoints, request);
   if (sized.font.glyphCount <= 0 || sized.font.texture.id == 0) {
     UnloadFont(sized.font);
@@ -370,17 +415,45 @@ Glyph FontStore::GetGlyph(Face face, int codepoint, float emPx) {
 
   const float s = emPx / sized->emPx;
   g.present = true;
-  g.advance = static_cast<float>(gi.advanceX) * s;
-  g.bearingX = static_cast<float>(gi.offsetX) * s;
-  g.top = (sized->baseline - static_cast<float>(gi.offsetY)) * s;
-  g.width = rec.width * s;
-  g.height = rec.height * s;
+  g.drawLeft = static_cast<float>(gi.offsetX) * s;
+  g.drawTop = (sized->baseline - static_cast<float>(gi.offsetY)) * s;
+  g.drawWidth = rec.width * s;
+  g.drawHeight = rec.height * s;
   g.src = rec;
   g.atlas = &sized->font.texture;
+
+  const FaceData& fd = faces_[static_cast<int>(face)];
+  const auto outline = fd.outlines.find(codepoint);
+  if (outline == fd.outlines.end()) {
+    // No outline to go by: measure the bitmap, as everything used to.
+    g.advance = static_cast<float>(gi.advanceX) * s;
+    g.bearingX = g.drawLeft;
+    g.top = g.drawTop;
+    g.width = g.drawWidth;
+    g.height = g.drawHeight;
+    return g;
+  }
+  const float unit = emPx / static_cast<float>(metrics_[static_cast<int>(face)].unitsPerEm);
+  const GlyphOutline& o = outline->second;
+  g.advance = static_cast<float>(o.advance) * unit;
+  g.bearingX = static_cast<float>(o.xMin) * unit;
+  g.top = static_cast<float>(o.yMax) * unit;
+  g.width = static_cast<float>(o.xMax - o.xMin) * unit;
+  g.height = static_cast<float>(o.yMax - o.yMin) * unit;
   return g;
 }
 
 float FontStore::Advance(Face face, int codepoint, float emPx) {
+  // Straight from the font's tables where it can be, which is exact at every
+  // size and needs no atlas.
+  const FaceData& fd = faces_[static_cast<int>(face)];
+  if (HasGlyph(face, codepoint)) {
+    const auto outline = fd.outlines.find(codepoint);
+    if (outline != fd.outlines.end()) {
+      return static_cast<float>(outline->second.advance) * emPx /
+             static_cast<float>(metrics_[static_cast<int>(face)].unitsPerEm);
+    }
+  }
   const Glyph g = GetGlyph(face, codepoint, emPx);
   return g.present ? g.advance : 0.0f;
 }

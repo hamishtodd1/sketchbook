@@ -51,6 +51,7 @@ enum class Kind {
   Viz,          // `Viz(Real);` -- this box draws that type, rather than using it
   Samples,      // `Samples(float, 24);` -- this box spreads that type out
   Signature,    // `vec3 swirl(vec2 p) {` -- an arrow between two spaces
+  Prototype,    // `vec3 swirl(vec2 p);` -- the same arrow, with no body given
   Return,       // `return <expr>;` -- what the function it is in comes to
   Closing,      // the `}` that ends one: punctuation, and reads as nothing
 };
@@ -154,12 +155,18 @@ struct FunctionHead {
   std::string name;
   std::string paramType;
   std::string paramName;
+  // Whether a body follows. `float f(vec3 q) {` opens one; `float f(vec3 q);`
+  // is a **prototype** -- the user saying what a function *is* without saying
+  // what it does, which is most of what one wants to do with a general
+  // function. The app writes the body for it, and hovering shows what it wrote.
+  bool        body = true;
 };
 
-// True if this line *opens* a function definition. The body may run on for as
-// many lines as it likes; where it ends is a matter of counting braces, which
-// is done by FindFunctions just below -- this function reads one line, which is
-// what everything else in this file does too.
+// True if this line declares a function: either opening a definition, or a
+// prototype ending in a semicolon. `out->body` says which. A definition's body
+// may run on for as many lines as it likes; where it ends is a matter of
+// counting braces, which is done by FindFunctions just below -- this function
+// reads one line, which is what everything else in this file does too.
 bool ParseFunctionHead(std::string_view source, FunctionHead* out,
                        const clifford::Signature& sig = clifford::kDefaultSignature);
 
@@ -189,10 +196,8 @@ int SpanAt(const std::vector<FunctionSpan>& spans, int line);
 std::string GlslTypeName(std::string_view type);
 
 // The name a declaration of this type gives its variable, or empty if the type
-// is not one we know. `float` and `double` are reals; `RToR` is a
-// function from reals to reals.
+// is not one we know. `float` and `double` are reals.
 bool IsRealType(std::string_view type);
-bool IsFunctionType(std::string_view type);
 // The plane and the space of ordinary GLSL, and the plane with a multiplication
 // on it. They are types a function can take and give, which is the only reason
 // this file has to know them: a function is recognised by its shape.

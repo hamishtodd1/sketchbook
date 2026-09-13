@@ -39,15 +39,34 @@ enum class Face : int {
 inline constexpr int kFaceCount = static_cast<int>(Face::Count);
 
 // A glyph resolved and scaled to a requested em size, ready to blit.
+//
+// Two sets of numbers, because they answer two different questions. The first
+// is where the glyph *is*: its advance and the box round its outline, read from
+// the font's own tables and so exactly proportional to the size asked for. All
+// measuring and layout uses these. The second is where the atlas bitmap goes,
+// which is rounded out to whole pixels of whichever rung it was rasterised at --
+// fine for drawing, and wrong for measuring, since it gave a line of text a
+// different width at every rung and so a box a different size at every zoom.
 struct Glyph {
   bool             present = false;  // false => this face has no such codepoint
   float            advance = 0.0f;   // pen advance, px
-  float            bearingX = 0.0f;  // left side bearing, px
-  float            top = 0.0f;       // baseline -> top of bitmap, px (up = +)
-  float            width = 0.0f;
+  float            bearingX = 0.0f;  // pen -> left of the outline, px
+  float            top = 0.0f;       // baseline -> top of the outline, px (up = +)
+  float            width = 0.0f;     // of the outline
   float            height = 0.0f;
+  // Where the bitmap is drawn, relative to the pen, in px.
+  float            drawLeft = 0.0f;
+  float            drawTop = 0.0f;   // baseline -> top of bitmap (up = +)
+  float            drawWidth = 0.0f;
+  float            drawHeight = 0.0f;
   Rectangle        src{};            // rect within the atlas texture
   const Texture2D* atlas = nullptr;
+};
+
+// A glyph's metrics in font units, from hmtx and glyf.
+struct GlyphOutline {
+  int advance = 0;
+  int xMin = 0, yMin = 0, xMax = 0, yMax = 0;
 };
 
 // Font-wide metrics, in em units, read from the TTF itself.
@@ -102,6 +121,9 @@ class FontStore {
     std::vector<unsigned char>    file;      // kept for re-rasterising
     std::unordered_set<int>       coverage;  // codepoints present in the cmap
     std::vector<int>              codepoints;  // sorted, what we rasterise
+    // Exact metrics per codepoint. Empty for a face with no glyf table, which
+    // then falls back to measuring its bitmaps.
+    std::unordered_map<int, GlyphOutline> outlines;
     bool                          loaded = false;
   };
 

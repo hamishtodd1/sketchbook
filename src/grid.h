@@ -18,11 +18,12 @@ void DrawDotGrid(const Viewport& viewport, float strength);
 
 // The finest spacing there is, in world units, before the doubling below.
 //
-// **One dot per line of type.** It is set once at startup from the height of a
-// line at the default size, so the grid is not an arbitrary lattice laid over
-// the canvas: it is ruled paper, and a box put down on it has its lines sitting
-// in the gaps between rows of dots rather than straddling them. Measured rather
-// than written down, since the font decides it.
+// **A whole number of dots per line of type** (kDotsPerLine). It is set once at
+// startup from the height of a line at the default size, so the grid is not an
+// arbitrary lattice laid over the canvas: it is ruled paper. A box's padding is
+// one step, so a card put down with its corner on a dot has its text on a dot
+// too, and every line boundary on a row of them. Measured rather than written
+// down, since the font decides it.
 void  SetGridBaseStep(float world);
 float GridBaseStep();
 
@@ -31,8 +32,13 @@ float GridBaseStep();
 // gets finer along with the grid.
 float GridStep(float zoom);
 
-// The lattice point nearest a world position. Every window on the canvas is
-// placed through this -- boxes, number lines and plots alike.
+// The spacing windows snap to: the finest dots, once they are drawn strongly
+// enough to see, and the coarser lattice until then. What you snap to is what
+// you can see.
+float SnapStep(float zoom);
+// The lattice point nearest a world position, for a window's top-left corner.
+// Every window on the canvas is placed through this -- boxes, number lines and
+// plots alike.
 Vector2 SnapToGrid(Vector2 world, float zoom);
 
 }  // namespace sb

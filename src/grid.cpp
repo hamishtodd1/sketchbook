@@ -30,8 +30,19 @@ float GridStep(float zoom) {
   return step;
 }
 
-Vector2 SnapToGrid(Vector2 world, float zoom) {
+float SnapStep(float zoom) {
   const float step = GridStep(zoom);
+  if (!(zoom > 0.0f)) return step;
+  // The in-between dots fade in as they separate, exactly as DrawDotGrid draws
+  // them. Until they are at least half there, the lattice you can actually see
+  // is the one twice as coarse -- and a corner put on a dot you cannot see does
+  // not look like it is on the grid at all.
+  const float t = std::clamp((step * zoom - kGridMinPx) / (kGridMaxPx - kGridMinPx), 0.0f, 1.0f);
+  return (t >= 0.5f) ? step : step * 2.0f;
+}
+
+Vector2 SnapToGrid(Vector2 world, float zoom) {
+  const float step = SnapStep(zoom);
   return {std::round(world.x / step) * step, std::round(world.y / step) * step};
 }
 

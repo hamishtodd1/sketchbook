@@ -322,16 +322,25 @@ std::string SurfaceDispatch(const std::vector<Function>& fns) {
   return "float sbHeight(vec2 q) {\n" + branches +
          "  return 0.0;\n"
          "}\n"
-         "vec4 sbSurface() {\n"
+         // One ray, from a point on the film. `nearest` comes back as how close,
+         // in pixels, it passed to the surface *before* the approach it landed
+         // on -- the two steps leading into a crossing are always close, and
+         // are not an edge.
+         "vec4 sbSurfaceRay(vec2 uv, float pixel, out float nearest) {\n"
          "  vec3 fwd, rt, up;\n"
          "  sbFrame(fwd, rt, up);\n"
          "  vec2  mid = sbMid();\n"
          "  float sbHalf = abs(sbRange.y - sbRange.x) * 0.5;\n"
-         "  vec2  uv = sbFilm();\n"
          "  vec3 o = vec3(mid.x, 0.0, mid.y) + (uv.x * rt + uv.y * up) * sbHalf +\n"
          "           sbEye() * (sbLift * 3.0 + sbHalf * 3.0);\n"
          "  float sbFar = sbLift * 6.0 + sbHalf * 6.0;\n"
          "  float sbStep = sbFar / 160.0;\n"
+         // A vertical gap, seen by an orthographic eye, is that gap times how far
+         // the view is from looking straight down it.
+         "  float sbToPixels = sqrt(max(1.0 - fwd.y * fwd.y, 0.0)) / max(pixel, 1e-9);\n"
+         "  float lag1 = 1e9;\n"
+         "  float lag2 = 1e9;\n"
+         "  nearest = 1e9;\n"
          "  float t = 0.0;\n"
          "  float was = 1.0;\n"
          "  for (int i = 0; i < 160; ++i) {\n"
@@ -353,11 +362,59 @@ std::string SurfaceDispatch(const std::vector<Function>& fns) {
          "        if (m.y - sbHeight(vec2(m.x, m.z)) > 0.0) lo = mid; else hi = mid;\n"
          "      }\n"
          "      vec3 h = o + fwd * hi;\n"
-         "      return sbPaint(sbHeight(vec2(h.x, h.z)));\n"
+         "      vec4 sbHit = sbPaint(sbHeight(vec2(h.x, h.z)));\n"
+         // An edge has two sides. The rays that just miss a crest are found by
+         // how close they passed; the rays that just *clip* it are found by
+         // going on a little and seeing them come back out before they got a
+         // pixel and a half deep. A hit that is really a hit is that deep in a
+         // step, so this costs nothing where there is no edge.
+         "      float sbDeepest = 0.0;\n"
+         "      for (int j = 0; j < 24 && sbDeepest < 1.5; ++j) {\n"
+         "        t += sbStep;\n"
+         "        vec3  q = o + fwd * t;\n"
+         "        float e = q.y - sbHeight(vec2(q.x, q.z));\n"
+         "        if (e > 0.0) { nearest = min(nearest, sbDeepest); break; }\n"
+         "        sbDeepest = max(sbDeepest, -e * sbToPixels);\n"
+         "      }\n"
+         "      return sbHit;\n"
          "    }\n"
+         "    nearest = min(nearest, lag2);\n"
+         "    lag2 = lag1;\n"
+         "    lag1 = d * sbToPixels;\n"
          "    was = d;\n"
          "  }\n"
+         "  nearest = min(nearest, min(lag1, lag2));\n"
          "  return vec4(0.0);\n"
+         "}\n"
+         // Whether a ray hits is yes or no, so a silhouette is a staircase, and
+         // multisampling cannot see it: it is not the edge of any geometry. Four
+         // rays for every pixel would be four times a 160-step march on every
+         // pixel every frame. So one is marched, and only a ray that passed
+         // within a pixel and a half of the surface -- the march samples its
+         // approach a dozen pixels apart, so what it sees can be a pixel further
+         // off than what happened -- or that clipped a crest and came back out.
+         // That is what being next to an edge
+         // is, a silhouette or a near hill in front of a far one -- is marched
+         // again, four times across the pixel, and the four are averaged by how
+         // much each covered. That is a line of pixels, not the window.
+         "vec4 sbSurface() {\n"
+         "  vec2  uv = sbFilm();\n"
+         // Taken before any ray is marched: a derivative is only worth anything
+         // outside the loops.
+         "  vec2  sbPx = vec2(fwidth(uv.x), fwidth(uv.y));\n"
+         "  float pixel = sbPx.x * abs(sbRange.y - sbRange.x) * 0.5;\n"
+         "  float nearest;\n"
+         "  vec4  c = sbSurfaceRay(uv, pixel, nearest);\n"
+         "  if (nearest >= 1.5) return c;\n"
+         "  vec4  sum = vec4(0.0);\n"
+         "  float ignored;\n"
+         "  const vec2 sbGrid[4] = vec2[4](vec2(0.375, 0.125), vec2(-0.125, 0.375),\n"
+         "                                 vec2(-0.375, -0.125), vec2(0.125, -0.375));\n"
+         "  for (int k = 0; k < 4; ++k) {\n"
+         "    vec4 s = sbSurfaceRay(uv + sbGrid[k] * sbPx, pixel, ignored);\n"
+         "    sum += vec4(s.rgb * s.a, s.a);\n"
+         "  }\n"
+         "  return sum.a > 0.0 ? vec4(sum.rgb / sum.a, sum.a * 0.25) : vec4(0.0);\n"
          "}\n";
 }
 
@@ -586,6 +643,14 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
       "  return 0.0;\n"
       "}\n"
       "void main() {\n";
+  // What a drawing is made from: the value every variable was *given*, before
+  // the body has had a chance to assign over it. Every way of drawing a function
+  // returns before the body, so this is what they all have to go on -- and it
+  // is the right thing to go on, since what a knob moves is exactly one of
+  // these literals. It comes first, before any of them: it used to sit below
+  // the picture, the surface and the volume, which had been added above it, so
+  // those three drew with every variable at nought and their knobs did nothing.
+  out += seed;
   // A picture is drawn from the definitions alone, like every other way of
   // drawing a function, so it comes before the body and returns.
   out += PictureDispatch(defined);
@@ -609,11 +674,6 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
         "    return;\n"
         "  }\n";
   }
-  // What a drawing is made from: the value every variable was *given*, before
-  // the body has had a chance to assign over it. A field or a curve returns
-  // before the body, so this is what it has to go on -- and it is the right
-  // thing to go on, since what a knob moves is exactly one of these literals.
-  out += seed;
   out +=
       // A function is drawn from the definitions alone, so this never runs the
       // body -- which is what keeps merging the three free rather than making
@@ -632,8 +692,15 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
       "    float here = mix(sbRange.x, sbRange.y, sbVarying.x);\n"
       "    float step = (sbVertical.y - sbVertical.x) * 0.0025;\n"
       "    float slope = (sbEval(sbIn + step) - sbEval(sbIn - step)) / (2.0 * step);\n"
-      "    if (abs(here - sbOut) / sqrt(1.0 + slope * slope) > sbThick) discard;\n"
-      "    finalColor = fragColor;\n"
+      // By how much of the pixel the band covers, rather than in or out. In or
+      // out is a staircase, and multisampling cannot help: the edge is decided
+      // in here, not by the edge of any geometry. `fwidth` is how far the value
+      // moves across one pixel, which turns a distance in value units into one
+      // in pixels -- both axes are at one scale, so either direction will do.
+      "    float sbGap = abs(here - sbOut) / sqrt(1.0 + slope * slope);\n"
+      "    float sbCover = clamp((sbThick - sbGap) / max(fwidth(here), 1e-6) + 0.5, 0.0, 1.0);\n"
+      "    if (sbCover <= 0.0) discard;\n"
+      "    finalColor = vec4(fragColor.rgb, fragColor.a * sbCover);\n"
       "    return;\n"
       "  }\n"
       // Reporting asks about one point rather than the one being drawn, and so
@@ -729,7 +796,18 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
   // Every function the box defines, and where each one begins and ends. Found
   // before anything is assembled, because a function's lines are hoisted out of
   // the body wholesale and the loop below has to know which those are.
-  const std::vector<Span> spans = FindFunctions(lines, signature);
+  std::vector<Span> spans = FindFunctions(lines, signature);
+  // A prototype whose function the box goes on to give a body is not a function
+  // of its own: it is a forward declaration, and the body is the function. So
+  // its span goes, and its line is left to be the declaration GLSL already
+  // understands it as. Only a prototype nobody defined gets a body written.
+  std::erase_if(spans, [&](const Span& prototype) {
+    if (prototype.head.body) return false;
+    for (const Span& other : spans) {
+      if (other.head.body && other.head.name == prototype.head.name) return true;
+    }
+    return false;
+  });
   functions_.clear();
   for (const Span& span : spans) {
     Function fn;
@@ -818,13 +896,34 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
       shaderFunctions += "\n";
       continue;
     }
+    // A prototype that is not a span of its own is one the box defines below,
+    // and it is hoisted as written -- a forward declaration is exactly what
+    // lets a function above that body call it.
+    if (line.kind == mathline::Kind::Prototype && SpanAt(spans, thisLine) < 0) {
+      shaderFunctions += raw + "\n";
+      shaderBody += "\n";
+      continue;
+    }
 
     // Inside a function definition. GLSL has nowhere to put a nested function,
     // so the whole span is hoisted above main -- one line for one line, so both
     // halves keep the box's shape and a line number is still a line number.
     if (const int span = SpanAt(spans, thisLine); span >= 0) {
       const Span& found = spans[static_cast<std::size_t>(span)];
-      shaderFunctions += (thisLine == found.first ? GlslSignature(raw, found.head) : raw) + "\n";
+      if (!found.head.body) {
+        // Nobody said what this function does, so the app does -- the same move
+        // as injecting `= 0.2385` into `float a;`, made for a function.
+        shaderFunctions +=
+            mathline::GlslTypeName(found.head.returnType) + " " + found.head.name + "(" +
+            mathline::GlslTypeName(found.head.paramType) + " " + found.head.paramName +
+            ") { return " +
+            types::realfunction::ExampleFunctionBody(found.head.returnType, found.head.paramType,
+                                                     found.head.paramName, found.head.name,
+                                                     signature) +
+            "; }\n";
+      } else {
+        shaderFunctions += (thisLine == found.first ? GlslSignature(raw, found.head) : raw) + "\n";
+      }
       shaderBody += "\n";
 
       // A function of reals to reals is a value as far as the windows are
@@ -854,10 +953,8 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
       variable.name = line.name;
       variable.type = line.type;
       variable.latexName = mathline::NameToLatex(line.name);
-      variable.kind = mathline::IsFunctionType(line.type)
-                          ? Kind::Function
-                          : (mathline::IsMultivectorType(line.type, signature) ? Kind::Multivector
-                                                                              : Kind::Real);
+      variable.kind =
+          mathline::IsMultivectorType(line.type, signature) ? Kind::Multivector : Kind::Real;
       variable.free = true;
 
       if (variable.kind == Kind::Multivector) {
@@ -876,16 +973,6 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
         shaderBody += "  " + (ordinary ? "" : line.type + " ") + line.name + " = " + chosen +
                       ";\n";
         shaderFunctions += "\n";
-        continue;
-      }
-
-      if (variable.kind == Kind::Function) {
-        // A function's chosen shape is written into the source rather than sent
-        // in, which is why it has no knob yet.
-        variables.push_back(variable);
-        // The chosen function is a definition, hoisted above main.
-        shaderFunctions += types::realfunction::ExampleGlsl(line.name) + "\n";
-        shaderBody += "\n";
         continue;
       }
 
@@ -927,10 +1014,8 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
       variable.name = line.name;
       variable.type = line.type;
       variable.latexName = mathline::NameToLatex(line.name);
-      variable.kind = mathline::IsFunctionType(line.type)
-                          ? Kind::Function
-                          : (mathline::IsMultivectorType(line.type, signature) ? Kind::Multivector
-                                                                              : Kind::Real);
+      variable.kind =
+          mathline::IsMultivectorType(line.type, signature) ? Kind::Multivector : Kind::Real;
       variable.free = false;
       variables.push_back(variable);
       addSlots(variable, thisLine);

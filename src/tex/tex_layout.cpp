@@ -802,9 +802,9 @@ void DrawLayout(const Layout& layout, FontStore& fonts, Vector2 origin, Color ti
     switch (it.kind) {
       case Item::Kind::Glyph: {
         const Glyph g = fonts.GetGlyph(it.face, it.codepoint, it.emPx);
-        if (!g.present || g.atlas == nullptr || g.width <= 0.0f) break;
-        const Rectangle dst = {origin.x + it.pen.x + g.bearingX,
-                               origin.y + it.pen.y - g.top, g.width, g.height};
+        if (!g.present || g.atlas == nullptr || g.drawWidth <= 0.0f) break;
+        const Rectangle dst = {origin.x + it.pen.x + g.drawLeft,
+                               origin.y + it.pen.y - g.drawTop, g.drawWidth, g.drawHeight};
         DrawTexturePro(*g.atlas, g.src, dst, {0.0f, 0.0f}, 0.0f, tint);
         break;
       }

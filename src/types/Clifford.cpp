@@ -819,30 +819,42 @@ std::string Prologue(const Signature& sig, const std::vector<std::string>& wante
   return generator.Emit();
 }
 
-std::string AlgebraLatex(const Signature& sig) {
+namespace {
+
+// The algebra, written as what it is called: Cl with its signature *under* it.
+// Under rather than over, because over is where its even and odd halves wear
+// their + and -, and a superscript already holding the signature would leave
+// them nowhere to go.
+std::string AlgebraName(const Signature& sig) {
   char signature[64];
   std::snprintf(signature, sizeof(signature), "%d,%d,%d", sig.p, sig.q, sig.r);
-  // The algebra gets a name, and everything written afterwards is written in
-  // terms of it. A script A, so an ordinary variable called A is a different
-  // letter and there is nothing to collide with -- and it is named as the
-  // Clifford algebra it is, not as the space underneath it.
-  return std::string("\\mathscr{A} = \\mathcal{C}\\ell^{") + signature + "}";
+  return std::string("\\mathcal{C}\\ell_{") + signature + "}";
+}
+
+}  // namespace
+
+std::string AlgebraLatex(const Signature& sig) {
+  // Not a definition -- there is no letter being bound -- but the sentence a
+  // text opens a section with. Everything written afterwards names the algebra
+  // outright, so there is nothing to look back up.
+  return "\\text{Consider } " + AlgebraName(sig);
 }
 
 std::string TypeLatex(std::string_view name, const Signature& sig) {
   const Grades grades = GradesOfName(name, sig);
 
-  // Once the algebra has a name, every type is said in terms of it: the whole
-  // of it, its two halves under the even/odd grading, or an exterior power.
+  // Every type is said in terms of the algebra, named outright: the whole of
+  // it, its two halves under the even/odd grading, or an exterior power.
   //
   // The exterior power is of the *space* the algebra is built on rather than of
   // the algebra itself, which is a mild abuse -- but a standard one, and the
   // usual justification holds: a Clifford algebra is isomorphic to the exterior
   // algebra of that space as a graded vector space, differing only in its
   // product, so the grade-k part of one is the grade-k part of the other.
-  if (grades == AllGrades(sig)) return "\\mathscr{A}";
-  if (grades == EvenGrades(sig)) return "\\mathscr{A}^{+}";
-  if (grades == OddGrades(sig)) return "\\mathscr{A}^{-}";
+  const std::string algebra = AlgebraName(sig);
+  if (grades == AllGrades(sig)) return algebra;
+  if (grades == EvenGrades(sig)) return algebra + "^{+}";
+  if (grades == OddGrades(sig)) return algebra + "^{-}";
 
   // A single grade is that exterior power; a compound is their sum.
   std::string latex;
@@ -852,7 +864,7 @@ std::string TypeLatex(std::string_view name, const Signature& sig) {
     // Grade zero is the reals; every other grade is that exterior power of the
     // algebra. A compound is the direct sum of its parts, which is what it is.
     latex += (k == 0) ? std::string("\\mathbb{R}")
-                      : ("\\bigwedge^{" + std::to_string(k) + "}\\mathscr{A}");
+                      : ("\\bigwedge^{" + std::to_string(k) + "}" + algebra);
   }
   return latex.empty() ? std::string("\\mathbb{R}") : latex;
 }

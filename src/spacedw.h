@@ -23,6 +23,7 @@
 #include "blocks.h"
 #include "dock.h"
 #include "fontstore.h"
+#include "glext.h"
 #include "raylib.h"
 #include "touch.h"
 #include "viewport.h"
@@ -49,6 +50,10 @@ struct SpaceWindow {
   Vector2               worldPos{};
   std::vector<PointRef> refs;
   CodeBlock*            dock = nullptr;
+  // The box's own window: where a point nobody has moved lives, and where the
+  // spread a function of the box is being fed is shown. A window a point was
+  // pulled out into is not one, and neither gets new points nor shows a spread.
+  bool                  home = true;
 
   // Where the camera is, as an orbit about the origin. Saved with the canvas,
   // since where you were looking from is part of what you set up.
@@ -101,6 +106,15 @@ class SpacePanel : public Flanking {
   // somewhere else, and pointing at it is one way of asking which question.
   bool SampleUnder(Vector2 point, const Viewport& viewport, FontStore& fonts,
                    const CodeBlock** block, int* sample) const;
+
+  // The point under a screen point, and the window it is in. Not the rim.
+  bool VizUnder(Vector2 point, const Viewport& viewport, FontStore& fonts, PointRef* out,
+                Rectangle* window) const;
+  // Takes a point out of whatever window it is in and starts carrying it as a
+  // window of its own, from the pointer -- looking at it from where the window
+  // it left was looking, so it does not jump. The drop is any carried window's.
+  bool BeginPullOut(CodeBlock* block, const std::string& name, Vector2 pointer,
+                    const Viewport& viewport);
   // Where one end of a lit sample is on screen, so a wire can be drawn to it.
   bool SampleMarker(const CodeBlock* block, int sample, bool output, const Viewport& viewport,
                     FontStore& fonts, Vector2* out) const;
@@ -160,8 +174,12 @@ class SpacePanel : public Flanking {
   // moment the first is done with it. That is what keeps a canvas full of them
   // from being a canvas full of framebuffers.
   bool            haveGpu_ = false;
+  glext::MultisampleTarget msaa_;
   RenderTexture2D target_{};
-  int             targetSide_ = 0;
+  // The shared target, 16:9 like the windows drawn into it, so the projection
+  // it gives the camera is already the right shape.
+  int             targetWidth_ = 0;
+  int             targetHeight_ = 0;
   Shader          sky_[2]{};
   Shader          solid_{};
   Model           skyBall_{};

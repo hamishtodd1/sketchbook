@@ -6,6 +6,7 @@
 #include "dock.h"
 #include "grid.h"
 #include "selection.h"
+#include "hover.h"
 #include "theme.h"
 
 namespace sb {
@@ -192,7 +193,7 @@ void SurfacePanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     const Rectangle rect = RectFor(i, viewport, fonts);
     view.block->DrawSurfaceInto(rect, view.centre, view.span, view.orbit);
     DrawRectangleLinesEx(rect, std::max(1.0f, 1.0f * zoom), Fade(kCodeFg, 0.25f));
-    if (carried || PointOnRim(rect, pointer)) DrawRim(rect, zoom, carried);
+    if (carried || PointOnRim(rect, hover::Pointer())) DrawRim(rect, zoom, carried);
   }
 }
 
