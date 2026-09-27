@@ -15,6 +15,7 @@ struct Reader {
   const unsigned char* d = nullptr;
   std::size_t          n = 0;
 
+  std::uint8_t u8(std::size_t o) const { return (o < n) ? d[o] : 0; }
   std::uint16_t u16(std::size_t o) const {
     return (o + 2 <= n) ? static_cast<std::uint16_t>((d[o] << 8) | d[o + 1]) : 0;
   }
@@ -157,6 +158,7 @@ bool ParseFontTables(const std::vector<unsigned char>& file, std::unordered_set<
     coverage->insert(codepoint);
     GlyphOutline outline;
     if (haveOutlines && ReadOutline(r, head, hhea, glyph, &outline)) {
+      outline.glyph = glyph;
       outlines->emplace(codepoint, outline);
     } else {
       haveOutlines = false;
@@ -238,6 +240,7 @@ bool FontStore::Load(const std::string& fontDir, std::string* error) {
 void FontStore::Unload() {
   for (auto& entry : cache_) UnloadFont(entry.second.font);
   cache_.clear();
+  strokes_.clear();
   texelsInUse_ = 0;
   for (int i = 0; i < kFaceCount; ++i) faces_[i] = FaceData{};
 }
@@ -441,6 +444,181 @@ Glyph FontStore::GetGlyph(Face face, int codepoint, float emPx) {
   g.width = static_cast<float>(o.xMax - o.xMin) * unit;
   g.height = static_cast<float>(o.yMax - o.yMin) * unit;
   return g;
+}
+
+namespace {
+
+struct Point {
+  float x = 0.0f;
+  float y = 0.0f;
+};
+
+// A simple glyph's contours, with its quadratic curves flattened into short
+// straight pieces. Empty for a composite glyph, which a one-stroke accent never
+// is.
+std::vector<std::vector<Point>> Contours(const std::vector<unsigned char>& file, int glyph) {
+  std::vector<std::vector<Point>> out;
+  Reader r{file.data(), file.size()};
+  const std::size_t head = FindTable(r, Tag('h', 'e', 'a', 'd'));
+  const std::size_t loca = FindTable(r, Tag('l', 'o', 'c', 'a'));
+  const std::size_t glyf = FindTable(r, Tag('g', 'l', 'y', 'f'));
+  if (head == 0 || loca == 0 || glyf == 0) return out;
+
+  const bool        longOffsets = r.i16(head + 50) != 0;
+  const std::size_t g = static_cast<std::size_t>(glyph);
+  const std::size_t from = longOffsets ? r.u32(loca + 4 * g) : 2u * r.u16(loca + 2 * g);
+  const std::size_t to = longOffsets ? r.u32(loca + 4 * (g + 1)) : 2u * r.u16(loca + 2 * (g + 1));
+  if (to <= from) return out;
+  std::size_t p = glyf + from;
+  const int contours = r.i16(p);
+  if (contours <= 0) return out;
+  p += 10;
+
+  std::vector<int> ends(static_cast<std::size_t>(contours));
+  for (int& end : ends) { end = r.u16(p); p += 2; }
+  const int count = ends.back() + 1;
+  if (count <= 0 || count > 4096) return out;
+  p += 2 + r.u16(p);   // the hinting instructions, which are not wanted
+
+  std::vector<std::uint8_t> flags(static_cast<std::size_t>(count));
+  for (int i = 0; i < count;) {
+    const std::uint8_t f = r.u8(p++);
+    flags[static_cast<std::size_t>(i++)] = f;
+    if ((f & 0x08) != 0) {
+      for (int repeat = r.u8(p++); repeat > 0 && i < count; --repeat) {
+        flags[static_cast<std::size_t>(i++)] = f;
+      }
+    }
+  }
+  std::vector<Point> points(static_cast<std::size_t>(count));
+  int x = 0;
+  for (int i = 0; i < count; ++i) {
+    const std::uint8_t f = flags[static_cast<std::size_t>(i)];
+    if ((f & 0x02) != 0) {
+      const int dx = r.u8(p++);
+      x += ((f & 0x10) != 0) ? dx : -dx;
+    } else if ((f & 0x10) == 0) {
+      x += r.i16(p);
+      p += 2;
+    }
+    points[static_cast<std::size_t>(i)].x = static_cast<float>(x);
+  }
+  int y = 0;
+  for (int i = 0; i < count; ++i) {
+    const std::uint8_t f = flags[static_cast<std::size_t>(i)];
+    if ((f & 0x04) != 0) {
+      const int dy = r.u8(p++);
+      y += ((f & 0x20) != 0) ? dy : -dy;
+    } else if ((f & 0x20) == 0) {
+      y += r.i16(p);
+      p += 2;
+    }
+    points[static_cast<std::size_t>(i)].y = static_cast<float>(y);
+  }
+
+  // Flattening. Two off-curve points in a row have an on-curve one implied
+  // halfway between them, which is how TrueType spells a run of curves.
+  int start = 0;
+  for (int end : ends) {
+    const int m = end - start + 1;
+    if (m < 3) { start = end + 1; continue; }
+    const auto at = [&](int k) -> const Point& {
+      return points[static_cast<std::size_t>(start + ((k % m) + m) % m)];
+    };
+    const auto on = [&](int k) {
+      return (flags[static_cast<std::size_t>(start + ((k % m) + m) % m)] & 0x01) != 0;
+    };
+    int first = 0;
+    while (first < m && !on(first)) ++first;
+    Point cur = (first < m) ? at(first)
+                            : Point{(at(0).x + at(1).x) * 0.5f, (at(0).y + at(1).y) * 0.5f};
+    if (first >= m) first = 0;
+
+    std::vector<Point> poly{cur};
+    bool  pending = false;
+    Point control{};
+    const auto curve = [&poly](Point a, Point b, Point c) {
+      constexpr int kSteps = 8;
+      for (int s = 1; s <= kSteps; ++s) {
+        const float t = static_cast<float>(s) / kSteps;
+        const float u = 1.0f - t;
+        poly.push_back({u * u * a.x + 2.0f * u * t * b.x + t * t * c.x,
+                        u * u * a.y + 2.0f * u * t * b.y + t * t * c.y});
+      }
+    };
+    for (int k = 1; k <= m; ++k) {
+      const Point next = at(first + k);
+      if (on(first + k)) {
+        if (pending) curve(cur, control, next); else poly.push_back(next);
+        cur = next;
+        pending = false;
+      } else if (pending) {
+        const Point mid{(control.x + next.x) * 0.5f, (control.y + next.y) * 0.5f};
+        curve(cur, control, mid);
+        cur = mid;
+        control = next;
+      } else {
+        control = next;
+        pending = true;
+      }
+    }
+    if (pending) curve(cur, control, at(first));
+    out.push_back(std::move(poly));
+    start = end + 1;
+  }
+  return out;
+}
+
+}  // namespace
+
+const StrokeProfile* FontStore::Stroke(Face face, int codepoint) {
+  const std::uint64_t key =
+      (static_cast<std::uint64_t>(static_cast<int>(face)) << 32) | static_cast<std::uint32_t>(codepoint);
+  if (auto found = strokes_.find(key); found != strokes_.end()) {
+    return found->second.centre.empty() ? nullptr : &found->second;
+  }
+  StrokeProfile& profile = strokes_[key];   // an empty one records "no stroke here"
+
+  const FaceData& fd = faces_[static_cast<int>(face)];
+  const auto outline = fd.outlines.find(codepoint);
+  if (!fd.loaded || outline == fd.outlines.end()) return nullptr;
+  const GlyphOutline& o = outline->second;
+  if (o.xMax <= o.xMin) return nullptr;
+  const std::vector<std::vector<Point>> contours = Contours(fd.file, o.glyph);
+  if (contours.empty()) return nullptr;
+
+  // A line straight up through the stroke crosses it twice: the highest and the
+  // lowest crossing are its two edges there. Sampled just inside the ends, where
+  // there is still a stroke to cross.
+  constexpr int kSamples = 97;
+  const float unit = 1.0f / static_cast<float>(metrics_[static_cast<int>(face)].unitsPerEm);
+  const float left = static_cast<float>(o.xMin);
+  const float span = static_cast<float>(o.xMax - o.xMin);
+  float lastCentre = 0.0f;
+  float lastThickness = 0.0f;
+  for (int i = 0; i < kSamples; ++i) {
+    const float x = left + span * (0.001f + 0.998f * static_cast<float>(i) / (kSamples - 1));
+    float top = -1e9f;
+    float bottom = 1e9f;
+    for (const std::vector<Point>& poly : contours) {
+      for (std::size_t k = 0; k < poly.size(); ++k) {
+        const Point& a = poly[k];
+        const Point& b = poly[(k + 1) % poly.size()];
+        if ((a.x - x) * (b.x - x) > 0.0f || a.x == b.x) continue;
+        const float y = a.y + (x - a.x) / (b.x - a.x) * (b.y - a.y);
+        top = std::max(top, y);
+        bottom = std::min(bottom, y);
+      }
+    }
+    if (top > bottom) {
+      lastCentre = (top + bottom) * 0.5f * unit;
+      lastThickness = (top - bottom) * unit;
+    }
+    profile.centre.push_back(lastCentre);
+    profile.thickness.push_back(lastThickness);
+  }
+  profile.width = span * unit;
+  return &profile;
 }
 
 float FontStore::Advance(Face face, int codepoint, float emPx) {

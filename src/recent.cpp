@@ -1,9 +1,10 @@
 #include "recent.h"
 
 #include <algorithm>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+
+#include "settings.h"
 
 namespace sb::recent {
 namespace {
@@ -12,17 +13,8 @@ namespace {
 // you opened lately is a fact about you, not about any one canvas, and a
 // canvas has to stay movable.
 std::filesystem::path StorePath() {
-  std::error_code ec;
-#ifdef _WIN32
-  const char* base = std::getenv("APPDATA");
-#else
-  const char* base = std::getenv("HOME");
-#endif
-  if (base == nullptr || *base == '\0') return "recent.txt";
-  const std::filesystem::path folder = std::filesystem::path(base) / "sketchbook";
-  std::filesystem::create_directories(folder, ec);
-  if (ec) return "recent.txt";
-  return folder / "recent.txt";
+  const std::filesystem::path folder = settings::Folder();
+  return folder.empty() ? std::filesystem::path("recent.txt") : folder / "recent.txt";
 }
 
 // Two spellings of one file are one entry. Windows does not care about case or

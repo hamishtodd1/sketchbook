@@ -33,7 +33,7 @@ inline constexpr float kAspects[kAspectCount] = {kDefaultSlideAspect, 16.0f / 9.
 inline constexpr const char* kAspectNames[kAspectCount] = {"3:2", "16:9", "4:3", "1:1"};
 
 // What the menu is asking the app to do this frame.
-enum class MenuAction { None, Save, Load, Insert, NewSlide, OpenRecent, Fullscreen };
+enum class MenuAction { None, NewCanvas, Save, Load, Insert, NewSlide, OpenRecent, Fullscreen };
 
 // The Escape menu. Drawn in screen space at a fixed pixel size, so it does not
 // take part in the canvas zoom.

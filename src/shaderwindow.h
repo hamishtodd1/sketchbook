@@ -67,9 +67,9 @@ class ShaderPanel : public Flanking {
   Rectangle DockedBounds(const CodeBlock* block, const Viewport& viewport,
                          FontStore& fonts) const;
 
-  // Hovering the picture *is* setting the shader's input, so the pointer being
-  // over one of these means `fragTexCoord` is the thing under the cursor. It is
-  // reported like any other variable, and lights up where it is written.
+  // A picture is a function of the plane, and the pointer over it *is* that
+  // function's argument -- `p` in `vec3 ripple(vec2 p)`. It is reported like
+  // any other variable, and lights up where it is written inside the function.
   void ActiveVariables(const Viewport& viewport, FontStore& fonts,
                        std::vector<ActiveValue>* out) const;
 
@@ -84,6 +84,8 @@ class ShaderPanel : public Flanking {
   // are the shared ones in selection.h; what differs is what closing one means.
   void SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                     FontStore& fonts);
+  // Where each of its windows is on screen.
+  void Rects(const Viewport& viewport, FontStore& fonts, std::vector<Rectangle>* out) const;
   void ClearSelection();
   bool AnySelected() const;
   bool SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const;

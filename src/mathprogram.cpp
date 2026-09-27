@@ -117,6 +117,105 @@ std::string WithoutType(const std::string& raw, const std::string& type) {
   return raw.substr(0, at) + raw.substr(after);
 }
 
+// **A narrower value fits where a wider one is asked for.** `Even p = 1.0 + b;`
+// makes a `ScalarBi` -- a scalar and a bivector -- and every grade of that is a
+// grade an `Even` has, so there is nothing to decide and nothing to lose. GLSL
+// will not do it by itself: it has no implicit conversion between structs and no
+// constructor to overload, so the algebra writes a widening function per type
+// and the declaration is what calls it.
+//
+// Only the right-hand side is touched, and only as far as the semicolon, so a
+// comment at the end of the line stays a comment and nothing else moves.
+std::string Widened(const std::string& assignment, const std::string& type) {
+  const std::size_t at = assignment.find('=');
+  if (at == std::string::npos) return assignment;
+  std::string rest = assignment.substr(at + 1);
+
+  std::string trailing;
+  if (const std::size_t comment = rest.find("//"); comment != std::string::npos) {
+    trailing = " " + rest.substr(comment);
+    rest = rest.substr(0, comment);
+  }
+  std::size_t end = rest.find_last_not_of(" \t");
+  if (end == std::string::npos) return assignment;
+  if (rest[end] == ';') {
+    if (end == 0) return assignment;
+    end = rest.find_last_not_of(" \t", end - 1);
+    if (end == std::string::npos) return assignment;
+  }
+  const std::size_t begin = rest.find_first_not_of(" \t");
+  return assignment.substr(0, at + 1) + " to" + type + "(" + rest.substr(begin, end + 1 - begin) +
+         ");" + trailing;
+}
+
+// The number a variable is given, when it is given nothing but a number:
+// `float a = 0.1;`, `a = -2.;`, `float a = 3.5f;`. False for anything that
+// mentions something, which is a rule rather than a value.
+bool WrittenNumber(const std::string& raw, float* out) {
+  const std::size_t at = raw.find('=');
+  if (at == std::string::npos) return false;
+  std::string rest = raw.substr(at + 1);
+  if (const std::size_t comment = rest.find("//"); comment != std::string::npos) {
+    rest = rest.substr(0, comment);
+  }
+  if (const std::size_t semi = rest.find(';'); semi != std::string::npos) {
+    rest = rest.substr(0, semi);
+  }
+  const std::size_t begin = rest.find_first_not_of(" \t");
+  if (begin == std::string::npos) return false;
+  const std::size_t end = rest.find_last_not_of(" \t");
+  std::string number = rest.substr(begin, end + 1 - begin);
+  if (!number.empty() && (number.back() == 'f' || number.back() == 'F')) number.pop_back();
+  if (number.empty()) return false;
+  char*       stop = nullptr;
+  const float value = std::strtof(number.c_str(), &stop);
+  if (stop == nullptr || *stop != '\0') return false;
+  *out = value;
+  return true;
+}
+
+// **A `const` is a promise that the number never changes**, and GLSL holds it
+// to that: a const must be initialised by a constant expression, and only a
+// constant can size an array. So a const's number stays a number in the
+// shader, and has no knob -- changing it is editing the program.
+bool IsConstDeclaration(const std::string& raw) {
+  const std::size_t begin = raw.find_first_not_of(" \t");
+  return begin != std::string::npos && raw.compare(begin, 6, "const ") == 0;
+}
+
+// The same widening for what a function returns: `return 1.0 + b;` out of a
+// function that returns an `Even` makes a `ScalarBi`, and it fits. Every
+// `return` on the line, since `if (c) return a; else return b;` is one line.
+std::string WidenedReturns(std::string raw, const std::string& type) {
+  std::string trailing;
+  if (const std::size_t comment = raw.find("//"); comment != std::string::npos) {
+    trailing = raw.substr(comment);
+    raw = raw.substr(0, comment);
+  }
+  const auto wordChar = [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+  };
+  std::size_t from = 0;
+  for (std::size_t at = raw.find("return", from); at != std::string::npos;
+       at = raw.find("return", from)) {
+    const std::size_t after = at + 6;
+    from = after;
+    if ((at > 0 && wordChar(raw[at - 1])) || (after < raw.size() && wordChar(raw[after]))) {
+      continue;
+    }
+    const std::size_t semi = raw.find(';', after);
+    if (semi == std::string::npos) break;
+    const std::size_t begin = raw.find_first_not_of(" \t", after);
+    if (begin == std::string::npos || begin >= semi) continue;   // `return;`
+    const std::size_t end = raw.find_last_not_of(" \t", semi - 1);
+    const std::string widened =
+        "return to" + type + "(" + raw.substr(begin, end + 1 - begin) + ")";
+    raw = raw.substr(0, at) + widened + raw.substr(semi);
+    from = at + widened.size();
+  }
+  return raw + trailing;
+}
+
 // Which space a type is. See the note beside `Space`: this one function is what
 // decides which window a function is drawn in and how it is coloured.
 Space SpaceOf(const std::string& type, const clifford::Signature& sig) {
@@ -461,7 +560,7 @@ std::string SampleDispatch(const std::vector<Function>& fns, const clifford::Sig
     out += "    " + std::string(i == 0 ? "if" : "else if") + " (sbFnIndex == " +
            std::to_string(i) + ") {\n";
     if (fn.inStride > 1) {
-      // Every component at once, which is the one spelling both languages take.
+      // Every component at once, the constructor GLSL gives a struct for free.
       out += "      " + in + " sbArg = " + in + "(";
       for (int k = 0; k < fn.inStride; ++k) {
         out += (k == 0 ? "" : ", ");
@@ -563,7 +662,6 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
       "uniform sampler2D texture0;\n"
       "uniform vec4 colDiffuse;\n"
       "uniform int sbMode;\n"       // 0 draw the picture, 1 report, 2 draw a function
-      "uniform vec2 sbProbe;\n"     // the one point a report is about
       "uniform vec2 sbRange;\n"     // value at the left and right edges
       "uniform vec2 sbVertical;\n"  // value at the top and bottom edges
       "uniform int sbIndex;\n"      // which function
@@ -571,7 +669,34 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
       "uniform float sbThick;\n"    // half a curve's width, in value units
       "uniform vec3 sbOrbit;\n"     // where the eye is: yaw, pitch, how far off
       "uniform float sbLift;\n"     // how far a surface is allowed to rise
-      "layout(std430, binding = 0) buffer SbTrace { float sbTrace[]; };\n";
+      "layout(std430, binding = 0) buffer SbTrace { float sbTrace[]; };\n"
+      // Seconds since this box was last compiled, for anything that moves by
+      // itself. And the frame, which is what `randChanging` changes with.
+      "uniform float time;\n"
+      "uniform int sbFrameCount;\n"
+      // Random numbers. A shader has no state that lasts between one call and the
+      // next except a global, so that is what these keep: each call moves its
+      // own state on, which is what lets `rand() + rand()` be two numbers rather
+      // than one number twice. `rand` is seeded by the pixel and nothing else, so
+      // it holds still; `randChanging` is seeded by the frame as well, so it is
+      // new every frame. Two states, so asking for one never moves the other.
+      "uint sbRandState;\n"
+      "uint sbRandChangingState;\n"
+      "uint sbHash(uint h) {\n"
+      "  h = h * 747796405u + 2891336453u;\n"
+      "  h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;\n"
+      "  return (h >> 22u) ^ h;\n"
+      "}\n"
+      // The top 24 bits, so the answer is in [0, 1) -- all 32 would round up to
+      // exactly 1 as a float often enough to matter.
+      "float rand() {\n"
+      "  sbRandState = sbHash(sbRandState);\n"
+      "  return float(sbRandState >> 8u) / 16777216.0;\n"
+      "}\n"
+      "float randChanging() {\n"
+      "  sbRandChangingState = sbHash(sbRandChangingState);\n"
+      "  return float(sbRandChangingState >> 8u) / 16777216.0;\n"
+      "}\n";
   // Feeding a function: the spread of inputs goes in, the answers come out. Two
   // buffers rather than a pixel each, because an answer is a whole multivector
   // as readily as it is one number.
@@ -582,9 +707,8 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
         "layout(std430, binding = 3) readonly buffer SbFnIn { float sbFnIn[]; };\n"
         "layout(std430, binding = 4) buffer SbFnOut { float sbFnOut[]; };\n";
   }
-  // A free real reaches a program through argv and a shader through a uniform.
-  // Either way the knob on its number line is what moves it.
-  // Not one uniform per variable -- one per *literal assigned to* a variable.
+  // A free real reaches the shader through a uniform, which is what the knob on
+  // its number line moves. Not one uniform per variable -- one per *literal assigned to* a variable.
   // The variable itself is an ordinary mutable local, so it can be assigned
   // over; what a knob moves is whichever literal governs the line being read.
   for (const Variable& variable : variables) {
@@ -597,9 +721,8 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
   // so that rewriting `a * b` into `gp(a, b)` is safe on ordinary scalar and
   // vector code and nothing has to know what type anything is.
   out += glslops::BuiltinOverloads();
-  // The same algebra the C++ gets, written for the other language. The named
-  // forms are what exist there; the operators the user wrote are turned into
-  // them before the body gets here.
+  // The algebra, as named functions. The operators the user wrote are turned
+  // into them before the body gets here.
   if (!algebraTypes.empty()) out += clifford::GlslPrologue(sig, algebraTypes);
   // The plane with a multiplication on it, written out only for a box that says
   // so. Its products answer to the names the operator rewrite produces, so
@@ -613,6 +736,7 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
   // this is for: a function whose shape a knob reshapes, which is the whole
   // reason a function is GLSL at all.
   for (const Variable& variable : variables) {
+    if (variable.local) continue;   // it lives in its function, not up here
     if (variable.kind == Kind::Real) {
       out += "float " + variable.name + ";\n";
     } else if (variable.kind == Kind::Multivector) {
@@ -642,7 +766,13 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
   out +=
       "  return 0.0;\n"
       "}\n"
-      "void main() {\n";
+      "void main() {\n"
+      // Seeded by the pixel, so neighbouring pixels differ. Not when reporting:
+      // there every pixel of the target runs the same body for a different value,
+      // and they have to agree on what that body's random numbers were.
+      "  uint sbSeed = (sbMode == 1) ? 1u : sbHash(uint(gl_FragCoord.x) + 7919u * uint(gl_FragCoord.y));\n"
+      "  sbRandState = sbHash(sbSeed ^ 0x9e3779b9u);\n"
+      "  sbRandChangingState = sbHash(sbSeed ^ sbHash(uint(sbFrameCount) + 1u));\n";
   // What a drawing is made from: the value every variable was *given*, before
   // the body has had a chance to assign over it. Every way of drawing a function
   // returns before the body, so this is what they all have to go on -- and it
@@ -702,13 +832,7 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
       "    if (sbCover <= 0.0) discard;\n"
       "    finalColor = vec4(fragColor.rgb, fragColor.a * sbCover);\n"
       "    return;\n"
-      "  }\n"
-      // Reporting asks about one point rather than the one being drawn, and so
-      // does feeding a function: inside a fragment shader a variable is a field
-      // rather than a number, so both have to say *where*.
-      "  vec2 ";
-  out += kShaderInput;
-  out += " = (sbMode == 1 || sbMode == 3) ? sbProbe : sbVarying;\n";
+      "  }\n";
   *lines = static_cast<int>(std::count(out.begin(), out.end(), '\n'));
   return out;
 }
@@ -756,6 +880,11 @@ std::string ProbeEpilogue(const std::vector<std::string>& probed,
 }  // namespace
 
 void Program::Rebuild(const std::vector<std::string>& lines) {
+  // What was running, so that a rebuild which comes out the same can say so
+  // rather than being compiled again.
+  const std::string runningGlsl = glsl_;
+  const bool        running = (state_ == State::ShaderReady);
+
   // Remember what the knobs were set to, so an edit does not reset them.
   std::unordered_map<std::string, float> previous;
   for (const Variable& variable : variables_) {
@@ -814,6 +943,7 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
     fn.name = span.head.name;
     fn.inputType = span.head.paramType;
     fn.outputType = span.head.returnType;
+    fn.parameter = span.head.paramName;
     fn.firstLine = span.first;
     fn.lastLine = span.last;
     fn.inStride = ComponentCount(fn.inputType, signature);
@@ -922,7 +1052,70 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
                                                      signature) +
             "; }\n";
       } else {
-        shaderFunctions += (thisLine == found.first ? GlslSignature(raw, found.head) : raw) + "\n";
+        // A declaration inside a function is widened like one at the top level:
+        // where a value is written makes no difference to whether it fits. So is
+        // what the function returns, into the type it says it returns.
+        const bool widens = line.kind == mathline::Kind::Declaration && line.hasInitialiser &&
+                            mathline::IsMultivectorType(line.type, signature);
+        std::string written = widens ? Widened(raw, line.type) : raw;
+        if (thisLine != found.first &&
+            mathline::IsMultivectorType(found.head.returnType, signature)) {
+          written = WidenedReturns(written, found.head.returnType);
+        }
+
+        // **A free real inside a function gets a knob, as one outside does.**
+        // `float k;` with no value is the same abstract statement wherever it is
+        // written, and the same injected literal answers it: a uniform, which a
+        // hoisted function can see as readily as `main` can. It stays a local
+        // of its function -- it is not one of the box's globals -- and nothing
+        // traces it, since the one number it can be is the number its knob chose.
+        //
+        // A *derived* one is different, and deliberately left without a window:
+        // `float m = sqrt(ip);` inside a function has a different value for
+        // every input the function is called with, so there is no one number for
+        // a marker to show.
+        float typedHere = 0.0f;
+        const bool typedNumber = line.hasInitialiser && !IsConstDeclaration(raw) &&
+                                 WrittenNumber(raw, &typedHere);
+        if (line.kind == mathline::Kind::Declaration && (!line.hasInitialiser || typedNumber) &&
+            thisLine != found.first && mathline::GlslTypeName(line.type) == "float" &&
+            !mathline::IsMultivectorType(line.type, signature)) {
+          Variable variable;
+          variable.declaredLine = thisLine;
+          variable.name = line.name;
+          variable.type = line.type;
+          variable.latexName = mathline::NameToLatex(line.name);
+          variable.kind = Kind::Real;
+          variable.free = true;
+          variable.local = true;
+          variable.known = true;
+          variable.written = typedNumber;
+          if (typedNumber) {
+            // Typed, so the text is the value.
+            variable.example = typedHere;
+            variable.value = typedHere;
+          } else {
+            variable.example = types::ExampleReal(line.name);
+            variable.value = variable.example;
+            if (auto was = previous.find(line.name); was != previous.end()) {
+              variable.value = was->second;
+            } else {
+              for (const auto& [name, value] : restore_) {
+                if (name == line.name) { variable.value = value; break; }
+              }
+            }
+          }
+          Literal injected;
+          injected.line = thisLine;
+          injected.uniform = variable.name + "_" + std::to_string(thisLine);
+          injected.value = variable.value;
+          injected.written = typedNumber;
+          variable.literals.push_back(injected);
+          variables.push_back(variable);
+          written = "float " + line.name + " = " + injected.uniform + ";";
+        }
+        shaderFunctions +=
+            (thisLine == found.first ? GlslSignature(raw, found.head) : written) + "\n";
       }
       shaderBody += "\n";
 
@@ -958,15 +1151,13 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
       variable.free = true;
 
       if (variable.kind == Kind::Multivector) {
-        // A multivector cannot travel down argv as one number, so its chosen
-        // value is written into the source the way a function's is. That makes
-        // choosing one a rebuild rather than a re-run, which is why it has no
-        // knob yet.
+        // A multivector is not one number, so its chosen value is written into
+        // the source the way a function's is. That makes choosing one a
+        // rebuild, which is why it has no knob yet.
         variables.push_back(variable);
         addSlots(variable, thisLine);
-        // The chosen value is written into the source, in the one spelling both
-        // languages accept -- so the shader gets the declaration too, rather
-        // than a blank where its value should be.
+        // The chosen value is written into the source -- so the shader gets
+        // the declaration too, rather than a blank where its value should be.
         const std::string chosen = clifford::ExampleValue(line.type, line.name, signature);
         // The variable itself is a global, declared in the prologue so that the
         // box's functions can see it. This line only gives it its value.
@@ -1008,6 +1199,40 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
       continue;
     }
 
+    // **A number typed into a declaration is a knob**, behind a uniform like
+    // every other literal a variable is given. Its value is read from the text
+    // on every build, because the text is the truth: moving the knob writes the
+    // number back into the line, so the two never disagree. And since the
+    // shader then does not depend on the number at all, typing a new one builds
+    // exactly the shader that is already running, which is not compiled again.
+    float typed = 0.0f;
+    if (ordinary && line.kind == mathline::Kind::Declaration && line.hasInitialiser &&
+        mathline::GlslTypeName(line.type) == "float" &&
+        !mathline::IsMultivectorType(line.type, signature) && !IsConstDeclaration(raw) &&
+        WrittenNumber(raw, &typed)) {
+      Variable variable;
+      variable.declaredLine = thisLine;
+      variable.name = line.name;
+      variable.type = line.type;
+      variable.latexName = mathline::NameToLatex(line.name);
+      variable.kind = Kind::Real;
+      variable.free = true;
+      variable.written = true;
+      variable.example = typed;
+      variable.value = typed;
+      Literal literal;
+      literal.line = thisLine;
+      literal.uniform = variable.name + "_" + std::to_string(thisLine);
+      literal.value = typed;
+      literal.written = true;
+      variable.literals.push_back(literal);
+      variables.push_back(variable);
+      addSlots(variable, thisLine);
+      shaderBody += "  " + line.name + " = " + literal.uniform + ";\n";
+      shaderFunctions += "\n";
+      continue;
+    }
+
     if (line.kind == mathline::Kind::Declaration && line.hasInitialiser) {
       Variable variable;
       variable.declaredLine = thisLine;
@@ -1022,7 +1247,11 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
 
       // Its value is computed here; the variable itself is a global.
       if (ordinary && (variable.kind == Kind::Real || variable.kind == Kind::Multivector)) {
-        shaderBody += "  " + WithoutType(raw, line.type) + "\n";
+        const std::string assignment = WithoutType(raw, line.type);
+        shaderBody += "  " +
+                      (variable.kind == Kind::Multivector ? Widened(assignment, line.type)
+                                                          : assignment) +
+                      "\n";
         shaderFunctions += "\n";
         continue;
       }
@@ -1042,6 +1271,7 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
         const std::size_t at = raw.find('=');
         literal.value =
             (at == std::string::npos) ? 0.0f : std::strtof(raw.c_str() + at + 1, nullptr);
+        literal.written = true;
         variable.literals.push_back(literal);
 
         shaderBody += "  " + variable.name + " = " + literal.uniform + ";\n";
@@ -1050,6 +1280,21 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
         break;
       }
       if (handled) continue;
+    }
+
+    // Assigning to a multivector further down widens the same way a declaration
+    // does: a value fits where it is put, whether that place is being made or
+    // was made earlier.
+    if (line.kind == mathline::Kind::Assignment) {
+      bool widened = false;
+      for (const Variable& variable : variables) {
+        if (variable.name != line.name || variable.kind != Kind::Multivector) continue;
+        shaderBody += "  " + Widened(raw, variable.type) + "\n";
+        shaderFunctions += "\n";
+        widened = true;
+        break;
+      }
+      if (widened) continue;
     }
 
     // Anything else is passed through verbatim: it is either GLSL already, or
@@ -1151,7 +1396,9 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
   // functions were written against.
   std::string seed;
   for (const Variable& variable : variables) {
-    if (variable.kind == Kind::Real && !variable.literals.empty()) {
+    // A local is set where its function declares it, and there is no global
+    // of that name out here to set.
+    if (variable.kind == Kind::Real && !variable.literals.empty() && !variable.local) {
       seed += "  " + variable.name + " = " + variable.literals.front().uniform + ";\n";
     }
   }
@@ -1199,6 +1446,16 @@ void Program::Rebuild(const std::vector<std::string>& lines) {
   glsl_ = head + traced + ProbeEpilogue(probed_, functions_, signature);
 
   variables_ = std::move(variables);
+  // **A number typed in is not a reason to compile.** Every number a variable is
+  // given is a uniform, so an edit that changed only those numbers assembles
+  // exactly the shader already running -- and the new numbers reach it as
+  // uniforms on the next frame, which is what a knob does too. Compiling it
+  // again would be a fifth of a second of nothing on a box with an algebra in it.
+  if (running && glsl_ == runningGlsl) {
+    state_ = State::ShaderReady;
+    error_ = {};
+    return;
+  }
   // There is one language. A box is GLSL, and the host compiles it on the
   // thread that owns the graphics context -- which is what Shading means.
   state_ = State::Shading;

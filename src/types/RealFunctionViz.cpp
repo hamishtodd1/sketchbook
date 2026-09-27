@@ -149,6 +149,11 @@ Rectangle PlotPanel::RectFor(std::size_t index, const Viewport& viewport,
 
 
 // ------------------------------------------------------------------ selection
+void PlotPanel::Rects(const Viewport& viewport, FontStore& fonts,
+                      std::vector<Rectangle>* out) const {
+  AppendRects(plots_, out, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
+}
+
 void PlotPanel::SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                              FontStore& fonts) {
   SelectCaught(plots_, lasso, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
@@ -386,8 +391,8 @@ bool PlotPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
 void PlotPanel::EnsureCurveSurface() const {
   if (haveCurveSurface_) return;
   // One white pixel stretched over the card: everything about how the curve
-  // looks is in the box's own shader, and this only exists so `fragTexCoord`
-  // runs 0..1 across the rectangle being painted.
+  // looks is in the box's own shader, and this only exists so the texture
+  // coordinate runs 0..1 across the rectangle being painted.
   Image white = GenImageColor(1, 1, WHITE);
   curveSurface_ = LoadTextureFromImage(white);
   UnloadImage(white);

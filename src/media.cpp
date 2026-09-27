@@ -698,6 +698,11 @@ void MediaPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
 
 // ---------------------------------------------------------------- selection
 
+void MediaPanel::Rects(const Viewport& viewport, std::vector<Rectangle>* out) const {
+  AppendRects(items_, out,
+              [&](std::size_t i) { return ScreenRect(*items_[i], viewport); });
+}
+
 void MediaPanel::SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport) {
   SelectCaught(items_, lasso,
                [&](std::size_t i) { return ScreenRect(*items_[i], viewport); });

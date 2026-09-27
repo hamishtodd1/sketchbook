@@ -42,6 +42,10 @@ struct Literal {
   int         line = 0;
   std::string uniform;
   float       value = 0.0f;
+  // The number is typed in the text on `line`, rather than injected by the app.
+  // Moving its knob then writes the number back, so the text and what runs
+  // never disagree.
+  bool        written = false;
 };
 
 // What a type is, *as a space*.
@@ -86,6 +90,7 @@ struct Function {
   std::string name;
   std::string inputType;    // as the user spelled it
   std::string outputType;
+  std::string parameter;       // the argument's name, `p` in `vec3 f(vec2 p)`
   int         firstLine = 0;   // the signature
   int         lastLine = 0;    // the brace that closes it
   // How many numbers one value takes: 1 for a real, one per component for a
@@ -131,6 +136,15 @@ struct Variable {
   std::string latexName;
   Kind        kind = Kind::Real;
   bool        free = false;    // declared with no initialiser: yours to choose
+  // Declared inside one of the box's functions rather than at the top. It is a
+  // local there, not one of the box's globals, and nothing traces it: the only
+  // thing it can be is the number its knob chose.
+  bool        local = false;
+  // Declared with a number typed into it -- `float a = 0.4;` -- rather than with
+  // no value for the app to inject. A knob like any free variable's; but its
+  // number lives in the text, so the text is what is saved and what a closed
+  // window leaves behind.
+  bool        written = false;
   // The line it is declared on. Before that line it does not exist, and a
   // window for it would be reporting a value it does not have yet.
   int         declaredLine = 0;
@@ -154,12 +168,6 @@ struct Variable {
   }
 };
 
-// The point a fragment shader is being evaluated at. Worth a name out here
-// because hovering a shader's picture *is* setting it: the pointer over the
-// picture is that value, which makes it a variable like any other as far as the
-// canvas is concerned.
-inline constexpr const char* kShaderInput = "fragTexCoord";
-
 // There is one language. A box is GLSL, and compiling GLSL means talking to the
 // graphics context -- which this half of the program knows nothing about and
 // must keep knowing nothing about. So it assembles the source, stops, and waits
@@ -181,10 +189,9 @@ class Program {
   // are carried over, so editing does not reset the knobs you have set.
   void Rebuild(const std::vector<std::string>& lines);
 
-  // Sets a free variable and schedules a re-run. Repeated calls while a run is
-  // in flight coalesce into a single follow-up, so dragging stays smooth.
-  // Moves the literal governing `atLine`, which is the one responsible for what
-  // the window showing this variable is displaying. -1 means the end.
+  // Sets a free variable: moves the literal governing `atLine`, which is the one
+  // responsible for what the window showing this variable is displaying. -1
+  // means the end. Nothing is rebuilt; the uniform carries it.
   void SetValue(std::size_t index, float value, int atLine = -1);
   // The literal a uniform of this name stands behind, or null.
   const Literal* FindLiteral(const std::string& uniform) const;
@@ -199,12 +206,11 @@ class Program {
   // value of that type is drawn inside a display window, rather than declaring
   // a value of its own. So it has no variables and grows no number lines.
   //
-  // Two halves, one per box, paired by the type they name. The C++ half lays
+  // Two halves, one per box, paired by the type they name. The mesh half lays
   // down a **mesh** -- calls to `vertex(x, y)`, three to a triangle, in the
-  // viz's own units -- and every vertex is printed back. The GLSL half is the
-  // **vertex shader** that places those vertices, given the value and the scale
-  // the window is drawn at. Which half a box is is decided the way it always
-  // is: C++ first, and GLSL if C++ will not have it.
+  // viz's own units. The place half is the **vertex shader** that places those
+  // vertices, given the value and the scale the window is drawn at. The half
+  // that calls `vertex` or `line` is the mesh half.
   const std::string& vizType() const { return vizType_; }
 
   const std::string& glslSource() const { return glsl_; }
@@ -216,11 +222,8 @@ class Program {
 
   // --- a viz's mesh ---------------------------------------------------------
   //
-  // The half of a viz box that lays geometry down is a *compute* shader now,
-  // writing its vertices into a buffer the drawing then reads. It used to be
-  // C++ injected into the program that owned the value, because a
-  // `std::function` could only be sampled in the process that made it -- and
-  // that reason went away when a function became GLSL.
+  // The half of a viz box that lays geometry down is a *compute* shader,
+  // writing its vertices into a buffer the drawing then reads.
   const std::string& glslMeshSource() const { return glslMesh_; }
 
   // --- functions, and feeding them -----------------------------------------

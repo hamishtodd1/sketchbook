@@ -19,7 +19,7 @@ constexpr std::size_t kQueueDepth = 8;
 constexpr int kMaxFrameRate = 30;
 
 std::string FindTool(const char* name) {
-  // An explicit path wins, exactly as the C++ toolchain is found.
+  // An explicit path wins.
   if (const char* env = std::getenv("SKETCHBOOK_FFMPEG"); env != nullptr && *env != '\0') {
     std::string base(env);
     const std::size_t slash = base.find_last_of("/\\");

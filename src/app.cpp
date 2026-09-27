@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <utility>
@@ -10,6 +13,7 @@
 #include "filedialog.h"
 #include "grid.h"
 #include "recent.h"
+#include "settings.h"
 #include "resize.h"
 #include "text.h"
 #include "carry.h"
@@ -58,6 +62,8 @@ bool App::Init(const std::string& assetDir, std::string* error) {
 }
 
 void App::Shutdown() {
+  // Before anything is released: writing the canvas down reads the boxes.
+  FlushAutosave();
   // The blocks go first, and by hand: a shader has to be released while the
   // graphics context still exists, and destructors run after it is gone.
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->ReleaseGpu();
@@ -575,6 +581,8 @@ bool App::HandleResize() {
 
 void App::HandleDroppedFiles() {
   if (!IsFileDropped()) return;
+  undoPending_ = true;
+  undoLastInput_ = GetTime();
   const FilePathList dropped = LoadDroppedFiles();
 
   const Vector2 at = viewport_.ToWorld(GetMousePosition());
@@ -702,6 +710,7 @@ void App::SetFullscreen(bool on) {
     SetWindowPosition(static_cast<int>(windowedAt_.x), static_cast<int>(windowedAt_.y));
   }
   options_.fullscreen = on;
+  settings::RememberFullscreen(on);
 }
 
 bool App::FindPullable(Vector2 at, Pull* out) {
@@ -1357,6 +1366,55 @@ void App::FurnishSlide(Vector2 centre, const std::string& title,
   }
 }
 
+void App::FrameOnScreen() {
+  std::vector<Rectangle> rects;
+  axes_.Rects(viewport_, fonts_, &rects);
+  plots_.Rects(viewport_, fonts_, &rects);
+  shaders_.Rects(viewport_, fonts_, &rects);
+  surfaces_.Rects(viewport_, fonts_, &rects);
+  volumes_.Rects(viewport_, fonts_, &rects);
+  spaces_.Rects(viewport_, fonts_, &rects);
+  media_.Rects(viewport_, &rects);
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    if (!block->Absorbed()) rects.push_back(block->Measure(viewport_, fonts_).rect);
+  }
+
+  // What is on screen is decided by the middle, as it is for the lasso: a
+  // window mostly off the edge is not one you are looking at, and one mostly on
+  // it is, however little of it sticks out.
+  const float width = static_cast<float>(GetScreenWidth());
+  const float height = static_cast<float>(GetScreenHeight());
+  bool  any = false;
+  float left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;
+  for (const Rectangle& rect : rects) {
+    const float cx = rect.x + rect.width * 0.5f;
+    const float cy = rect.y + rect.height * 0.5f;
+    if (cx < 0.0f || cx > width || cy < 0.0f || cy > height) continue;
+    if (!any) {
+      left = rect.x; top = rect.y; right = rect.x + rect.width; bottom = rect.y + rect.height;
+      any = true;
+    } else {
+      left = std::min(left, rect.x);
+      top = std::min(top, rect.y);
+      right = std::max(right, rect.x + rect.width);
+      bottom = std::max(bottom, rect.y + rect.height);
+    }
+  }
+  if (!any) return;
+
+  // In world units, which do not depend on the zoom, so the answer is the same
+  // whatever zoom it was asked from.
+  const Vector2 a = viewport_.ToWorld({left, top});
+  const Vector2 b = viewport_.ToWorld({right, bottom});
+  const float   spanX = std::max(b.x - a.x, 1.0f);
+  const float   spanY = std::max(b.y - a.y, 1.0f);
+  // A margin, so what is framed is framed rather than touching the edges.
+  constexpr float kMargin = 0.03f;
+  const float zoom = std::min(width * (1.0f - 2.0f * kMargin) / spanX,
+                              height * (1.0f - 2.0f * kMargin) / spanY);
+  viewport_.GlideTo({(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f}, zoom, 0.45f);
+}
+
 void App::SelectWithinWorld(Rectangle worldRect) {
   const Vector2 topLeft = viewport_.ToScreen({worldRect.x, worldRect.y});
   const Vector2 bottomRight =
@@ -1494,11 +1552,18 @@ void App::Update() {
   // asks when there is nowhere to go. Ctrl+O always asks.
   const bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
   if (ctrl && IsKeyPressed(KEY_S)) {
-    std::string path = currentPath_;
+    std::string path = untitled_ ? std::string() : currentPath_;
     if (path.empty()) path = filedialog::Save("canvas.sketch");
     if (!path.empty() && !SaveCanvas(path)) {
       TraceLog(LOG_WARNING, "CANVAS: could not save %s", path.c_str());
     }
+  }
+  // Undo and redo for the canvas. Inside a box the keys are the box's own, and
+  // mid-gesture there is nothing settled to go back to.
+  if (ctrl && focus_ == nullptr && !media_.Editing() && !hover::Held() && !menu_.Visible()) {
+    const bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    if (IsKeyPressed(KEY_Z)) StepUndo(/*redo=*/shift);
+    if (IsKeyPressed(KEY_Y)) StepUndo(/*redo=*/true);
   }
   if (ctrl && IsKeyPressed(KEY_O)) {
     const std::string path = filedialog::Open();
@@ -1522,6 +1587,10 @@ void App::Update() {
   const bool menuOwnsPress = menu_.Visible();
 
   switch (menu_.Update(&options_)) {
+    case MenuAction::NewCanvas:
+      NewCanvas();
+      menu_.Close();
+      break;
     case MenuAction::Fullscreen:
       // The menu goes, since asking for the whole screen is asking to look at
       // the canvas.
@@ -1704,6 +1773,13 @@ void App::Update() {
     if (IsKeyPressed(KEY_LEFT)) slides_.Step(-1, &viewport_, options_.slideAspect);
   }
 
+  // Home frames what you are looking at. Not a character, so it cannot start a
+  // box the way a letter typed onto the canvas does; and not while a caret is
+  // anywhere, where Home is the start of the line.
+  if (canvasActive && focus_ == nullptr && !media_.Editing() && IsKeyPressed(KEY_HOME)) {
+    FrameOnScreen();
+  }
+
   // A slide that has just appeared gets its title and its body, as two windows
   // of the canvas rather than as text the slide owns.
   if (const NewSlide fresh = slides_.TakeNewSlide(); fresh.made) {
@@ -1773,6 +1849,11 @@ void App::Update() {
   // under the scrim is the canvas answering a question nobody asked.
   held = held || menu_.Visible();
   hover::SetHeld(held);
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    block->SetPlayPaused(focus_ != nullptr);
+  }
+  TrackUndo(held);
+  TrackAutosave(held);
 
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->SetSampleHover(-1);
   if (canvasActive) {
@@ -2032,13 +2113,49 @@ std::string PathForLoading(const std::string& written, const std::string& canvas
 
 }  // namespace
 
-bool App::SaveCanvas(const std::string& path) {
-  std::ofstream file(path, std::ios::binary | std::ios::trunc);
-  if (!file) return false;
+bool App::WriteCanvasFile(const std::string& path) {
+  // Beside it first, then over it: a save interrupted halfway leaves the old
+  // file whole rather than a new one in pieces.
+  const std::string temporary = path + ".saving";
+  {
+    std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+    if (!file) return false;
+    WriteCanvas(file, path, /*withView=*/true);
+    if (!file.good()) return false;
+  }
+  std::error_code ec;
+  std::filesystem::rename(temporary, path, ec);
+  if (ec) {
+    std::filesystem::remove(temporary, ec);
+    return false;
+  }
+  savedSnapshot_ = Snapshot();
+  return true;
+}
 
+bool App::SaveCanvas(const std::string& path) {
+  const std::string previous = currentPath_;
+  const bool        wasUntitled = untitled_;
+  if (!WriteCanvasFile(path)) return false;
+  currentPath_ = path;
+  untitled_ = false;
+  autosaveDue_ = 0.0;
+  recent::Remember(path);
+  // It has a real name now, so the file it was being kept in until it had one
+  // is not a canvas any more, only a stale copy of this one.
+  if (wasUntitled && !previous.empty() && previous != path) {
+    std::error_code ec;
+    std::filesystem::remove(previous, ec);
+  }
+  return true;
+}
+
+void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView) {
   file << "sketchbook " << kFileVersion << "\n";
-  const Vector2 centre = viewport_.Centre();
-  file << "view " << centre.x << " " << centre.y << " " << viewport_.Zoom() << "\n";
+  if (withView) {
+    const Vector2 centre = viewport_.Centre();
+    file << "view " << centre.x << " " << centre.y << " " << viewport_.Zoom() << "\n";
+  }
   file << "aspect " << options_.slideAspect << "\n";
   // A slide is only its rim now: its title and its body are text boxes, and so
   // they are saved as boxes along with every other window.
@@ -2056,7 +2173,8 @@ bool App::SaveCanvas(const std::string& path) {
     for (const mathprogram::Variable& variable : block->Variables()) {
       // Only a real has a value worth keeping. A free function's choice lives in
       // its example generator, which is deterministic in the variable's name.
-      if (variable.free && variable.kind == mathprogram::Kind::Real) {
+      // A typed number is saved as the text it is typed in.
+      if (variable.free && variable.kind == mathprogram::Kind::Real && !variable.written) {
         file << "val " << variable.name << " " << variable.value << "\n";
       }
     }
@@ -2141,16 +2259,26 @@ bool App::SaveCanvas(const std::string& path) {
       file << "curve " << indexOf(ref.block) << " " << ref.name << "\n";
     }
   }
-  if (!file.good()) return false;
-  currentPath_ = path;
-  recent::Remember(path);
-  return true;
 }
 
 bool App::LoadCanvas(const std::string& path) {
   std::ifstream file(path, std::ios::binary);
   if (!file) return false;
+  // Whatever was done to the canvas being left is written down before it goes.
+  FlushAutosave();
+  if (!ReadCanvas(file, path, /*restoring=*/false)) return false;
+  currentPath_ = path;
+  untitled_ = false;
+  autosaveDue_ = 0.0;
+  recent::Remember(path);
+  // A different canvas: nothing done to the last one can be undone into this.
+  ResetUndo();
+  // And it is what is on disk, so opening it is not a change to save.
+  savedSnapshot_ = undoBase_;
+  return true;
+}
 
+bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring) {
   std::string header;
   if (!std::getline(file, header)) return false;
   // Editors on Windows love to prepend a UTF-8 BOM; it is not our business to
@@ -2436,12 +2564,51 @@ bool App::LoadCanvas(const std::string& path) {
   // Every picture's texture and every video's decoder, by hand and while the
   // graphics context is still here.
   media_.Clear();
-  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->ReleaseGpu();
+  // Restoring an undo step keeps every box whose text is exactly what the step
+  // says, so only the boxes that were actually edited are built again. Whatever
+  // is left over afterwards is thrown away, by hand.
+  std::vector<std::unique_ptr<CodeBlock>> previous = std::move(codeBlocks_);
   codeBlocks_.clear();
   mathBlocks_.clear();
+  if (!restoring) {
+    for (const std::unique_ptr<CodeBlock>& block : previous) block->ReleaseGpu();
+    previous.clear();
+  }
 
   for (LoadedBlock& loaded : blocks) {
-    auto block = std::make_unique<CodeBlock>(loaded.position, loaded.em, std::move(loaded.lines));
+    std::unique_ptr<CodeBlock> block;
+    for (std::unique_ptr<CodeBlock>& candidate : previous) {
+      if (candidate != nullptr && candidate->Lines() == loaded.lines) {
+        block = std::move(candidate);
+        break;
+      }
+    }
+    // Undoing a knob drag changes a number in the text, and a box is matched by
+    // its text -- so it would be built again from nothing. The same box in the
+    // same place with the same number of lines is taken to be that box, given
+    // its old lines back, and rebuilt; if only numbers differ, that rebuild is
+    // the shader it already has and nothing is compiled.
+    bool relined = false;
+    if (block == nullptr && restoring) {
+      for (std::unique_ptr<CodeBlock>& candidate : previous) {
+        if (candidate == nullptr || candidate->Lines().size() != loaded.lines.size()) continue;
+        const Vector2 at = candidate->WorldPosition();
+        if (std::abs(at.x - loaded.position.x) > 0.01f || std::abs(at.y - loaded.position.y) > 0.01f) {
+          continue;
+        }
+        block = std::move(candidate);
+        relined = true;
+        break;
+      }
+    }
+    const bool kept = (block != nullptr);
+    if (relined) block->RestoreLines(loaded.lines);
+    if (kept) {
+      block->SetWorldPosition(loaded.position);
+      block->SetEm(loaded.em);
+    } else {
+      block = std::make_unique<CodeBlock>(loaded.position, loaded.em, std::move(loaded.lines));
+    }
     block->SetReadingMode(loaded.showMath);
     block->SetBold(loaded.bold);
     block->SetItalic(loaded.italic);
@@ -2452,10 +2619,30 @@ bool App::LoadCanvas(const std::string& path) {
     block->SetDrawnHidden(CodeBlock::kPicture, loaded.shaderHidden);
     block->SetDrawnHidden(CodeBlock::kSurface, loaded.surfaceHidden);
     block->SetDrawnHidden(CodeBlock::kVolume, loaded.volumeHidden);
-    block->RestoreValues(std::move(loaded.values));
-    block->RequestCompile();
+    if (kept) {
+      // Already built, so its knobs are set where they are rather than on the
+      // next build -- there is not going to be one. And whatever was swinging
+      // stops: a swing carrying on would retype the very number just undone.
+      for (const CodeBlock::Play& play : std::vector<CodeBlock::Play>(block->Plays())) {
+        block->StopPlaying(play.name);
+      }
+      for (const auto& [name, value] : loaded.values) {
+        const mathprogram::Variable* variable = block->FindVariable(name);
+        if (variable != nullptr && variable->free && !variable->written &&
+            variable->value != value) {
+          block->SetVariableValue(name, value, /*intoText=*/false);
+        }
+      }
+    } else {
+      block->RestoreValues(std::move(loaded.values));
+      block->RequestCompile();
+    }
     codeBlocks_.push_back(std::move(block));
   }
+  for (const std::unique_ptr<CodeBlock>& gone : previous) {
+    if (gone != nullptr) gone->ReleaseGpu();
+  }
+  previous.clear();
 
   std::vector<NumberLine> lines;
   for (const LoadedAxis& loaded : axes) {
@@ -2575,7 +2762,7 @@ bool App::LoadCanvas(const std::string& path) {
 
   options_.slideAspect = (aspect > 0.05f) ? aspect : kDefaultSlideAspect;
   slides_.Adopt(std::move(slides));
-  viewport_.Reset(centre, zoom);
+  if (!restoring) viewport_.Reset(centre, zoom);
 
   // An older canvas kept its slide text on the slide. Give it the two windows
   // it would have if it were made today. After the viewport, because placement
@@ -2588,13 +2775,178 @@ bool App::LoadCanvas(const std::string& path) {
   // Hold a loaded canvas to the same two rules as a live one. A file saved
   // under them reloads exactly as it was; an older one is tidied on the way in.
   // The zoom has to be restored first, since the lattice depends on it.
-  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
-    PlaceBlock(block.get(), block->WorldPosition());
+  // Not for an undo step, which was written from a canvas already under both
+  // rules -- and snapping again at whatever the zoom is now could move a box
+  // that was put down finer than today's lattice.
+  if (!restoring) {
+    for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+      PlaceBlock(block.get(), block->WorldPosition());
+    }
+  }
+  return true;
+}
+
+void App::NewCanvas() {
+  FlushAutosave();
+  std::istringstream blank("sketchbook 3\n");
+  ReadCanvas(blank, std::string(), /*restoring=*/false);
+  viewport_.Reset({0.0f, 0.0f}, kDefaultZoom);
+  currentPath_.clear();
+  untitled_ = false;
+  autosaveDue_ = 0.0;
+  ResetUndo();
+  savedSnapshot_ = undoBase_;
+}
+
+// ------------------------------------------------------------------ undo
+
+std::string App::Snapshot() {
+  std::ostringstream out;
+  WriteCanvas(out, currentPath_, /*withView=*/false);
+  return out.str();
+}
+
+void App::ResetUndo() {
+  undo_.clear();
+  redo_.clear();
+  undoBase_ = Snapshot();
+  undoPending_ = false;
+}
+
+void App::CommitUndo() {
+  if (!undoPending_) return;
+  std::string now = Snapshot();
+  if (now != undoBase_) {
+    if (!undoBase_.empty()) {
+      ScheduleAutosave();
+      undo_.push_back(std::move(undoBase_));
+      // A bound, like every other thing here that grows with use.
+      constexpr std::size_t kUndoSteps = 200;
+      if (undo_.size() > kUndoSteps) undo_.erase(undo_.begin());
+      redo_.clear();
+    }
+    undoBase_ = std::move(now);
+  }
+  undoPending_ = false;
+}
+
+void App::TrackUndo(bool held) {
+  const double now = GetTime();
+  // Something being done. Movement alone is not: pointing changes nothing that
+  // is saved, and counting it would turn a compile finishing under a moving
+  // mouse into a step.
+  const bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+  const Vector2 wheel = GetMouseWheelMoveV();
+  // A knob playing retypes its number every frame, and that is not something
+  // being *done*: counting it would hold every undo step and every save back for
+  // as long as anything plays, including edits made elsewhere meanwhile. So the
+  // press of play is the step, like any press, and the swing after it is folded
+  // into where things are like any other change nobody made -- except that when
+  // it stops, where it stopped is written down.
+  bool playing = false;
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) playing = playing || block->AnyPlaying();
+  if (wasPlaying_ && !playing) {
+    // Folded at once rather than on the next check a quarter of a second later:
+    // otherwise the last stretch of the swing would become a step of its own,
+    // and undo would go back to somewhere in the middle of it rather than to
+    // where it started.
+    undoBase_ = Snapshot();
+    ScheduleAutosave();
+  }
+  wasPlaying_ = playing;
+  const bool doing =
+      IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsMouseButtonDown(MOUSE_BUTTON_RIGHT) ||
+      IsMouseButtonDown(MOUSE_BUTTON_MIDDLE) || IsMouseButtonReleased(MOUSE_BUTTON_LEFT) ||
+      IsMouseButtonReleased(MOUSE_BUTTON_RIGHT) || IsMouseButtonReleased(MOUSE_BUTTON_MIDDLE) ||
+      wheel.x != 0.0f || wheel.y != 0.0f || touch::Count() > 0 || focus_ != nullptr ||
+      IsKeyDown(KEY_DELETE) || (ctrl && (IsKeyDown(KEY_X) || IsKeyDown(KEY_V)));
+  if (doing) {
+    undoPending_ = true;
+    undoLastInput_ = now;
   }
 
-  currentPath_ = path;
-  recent::Remember(path);
-  return true;
+  // Wait until it has settled: nothing held, no box being written in, and a
+  // moment since the last thing done -- which is what makes a run of wheel
+  // clicks one step. Checked a few times a second rather than every frame.
+  if (held || focus_ != nullptr || now - undoLastInput_ < 0.3 || now < undoNextCheck_) return;
+  undoNextCheck_ = now + 0.25;
+
+  if (undoPending_) {
+    CommitUndo();
+    return;
+  }
+  // Nobody did anything, and yet the canvas is different: a build came back, an
+  // axis framed itself. That is where things are now, not a step.
+  std::string current = Snapshot();
+  if (current != undoBase_) undoBase_ = std::move(current);
+}
+
+void App::StepUndo(bool redo) {
+  CommitUndo();
+  std::vector<std::string>& from = redo ? redo_ : undo_;
+  std::vector<std::string>& to = redo ? undo_ : redo_;
+  if (from.empty()) return;
+  std::string target = std::move(from.back());
+  from.pop_back();
+  std::istringstream in(target);
+  if (!ReadCanvas(in, currentPath_, /*restoring=*/true)) return;
+  to.push_back(std::move(undoBase_));
+  undoBase_ = std::move(target);
+  undoPending_ = false;
+  ScheduleAutosave();
+}
+
+void App::TrackAutosave(bool held) {
+  if (!autosaveOn_) return;
+  const double now = GetTime();
+  // Writing in a box is one undo step, taken when the caret leaves -- which
+  // could be an hour of typing later. So while a box is being written in, the
+  // canvas is saved every few seconds as well, if its text has moved.
+  if (focus_ != nullptr && now - typingSavedAt_ > 3.0) {
+    typingSavedAt_ = now;
+    if (Snapshot() != savedSnapshot_) autosaveDue_ = now;
+  }
+  if (autosaveDue_ <= 0.0 || now < autosaveDue_ || held) return;
+  autosaveDue_ = 0.0;
+
+  if (currentPath_.empty()) {
+    // Never saved and never opened: it gets a file of its own, among the
+    // user's settings rather than wherever the app happens to be running.
+    std::error_code ec;
+#ifdef _WIN32
+    const char* base = std::getenv("APPDATA");
+#else
+    const char* base = std::getenv("HOME");
+#endif
+    std::filesystem::path folder =
+        (base != nullptr && *base != '\0') ? std::filesystem::path(base) / "sketchbook" / "untitled"
+                                           : std::filesystem::path("untitled");
+    std::filesystem::create_directories(folder, ec);
+    char stamp[32];
+    const std::time_t t = std::time(nullptr);
+    std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H%M%S", std::localtime(&t));
+    currentPath_ = (folder / (std::string("untitled ") + stamp + ".sketch")).string();
+    untitled_ = true;
+    recent::Remember(currentPath_);
+  }
+  if (!WriteCanvasFile(currentPath_)) {
+    TraceLog(LOG_WARNING, "CANVAS: could not save %s", currentPath_.c_str());
+  }
+}
+
+void App::FlushAutosave() {
+  if (!autosaveOn_) return;
+  // Leaving with a knob still swinging: its number is where it has got to, and
+  // that is what goes in the file -- the swing itself is not kept.
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    if (block->AnyPlaying()) autosaveDue_ = GetTime();
+  }
+  // Anything done but not settled yet becomes a step, which asks for a save.
+  CommitUndo();
+  if (focus_ != nullptr && Snapshot() != savedSnapshot_) autosaveDue_ = GetTime();
+  if (autosaveDue_ <= 0.0) return;
+  autosaveDue_ = GetTime();
+  TrackAutosave(/*held=*/false);
 }
 
 }  // namespace sb

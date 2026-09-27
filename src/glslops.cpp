@@ -82,7 +82,9 @@ std::vector<Token> Tokenise(const std::string& source, std::string* error) {
     }
     if (matched) continue;
 
-    out.push_back({std::string("+-*/^&|~!").find(c) != std::string::npos ? Token::Kind::Op
+    // `!` is not here: it is GLSL's own boolean not, and passes through as
+    // punctuation. It was the dual, and that was given up -- see CLAUDE.md.
+    out.push_back({std::string("+-*/^&|~").find(c) != std::string::npos ? Token::Kind::Op
                                                                         : Token::Kind::Punct,
                    std::string(1, c), line});
     ++i;
@@ -96,9 +98,12 @@ std::vector<Token> Tokenise(const std::string& source, std::string* error) {
 // The algebra is above `+` and `-` throughout, which is the whole departure
 // from C.
 int Precedence(const std::string& op) {
-  if (op == "*" || op == "/") return 4;
-  if (op == "^" || op == "&") return 3;
-  if (op == "|") return 2;
+  if (op == "*" || op == "/") return 5;
+  if (op == "^" || op == "&") return 4;
+  if (op == "|") return 3;
+  // The sandwich is looser than the products it is made of, so `R >> a * b` is
+  // the versor acting on the product, and tighter than a sum.
+  if (op == ">>") return 2;
   if (op == "+" || op == "-") return 1;
   return 0;
 }
@@ -111,13 +116,13 @@ const char* CallName(const std::string& op) {
   if (op == "|") return "ip";
   if (op == "+") return "add";
   if (op == "-") return "sub";
+  if (op == ">>") return "sw";
   return nullptr;
 }
 
 const char* UnaryName(const std::string& op) {
   if (op == "-") return "neg";
   if (op == "~") return "rev";
-  if (op == "!") return "dual";
   return nullptr;
 }
 
@@ -379,6 +384,10 @@ std::string BuiltinOverloads() {
     const char* op;
   };
   const Binary kBinaries[] = {{"add", "+"}, {"sub", "-"}, {"gp", "*"}, {"div", "/"}};
+
+  // The sandwich of plain numbers, so that `a >> b` on scalars says something
+  // rather than failing to resolve: a scalar is even, so it is a b ~a = a a b.
+  out << "float sw(float a, float b) { return a * a * b; }" << "\n";
 
   const char* const kScalars[] = {"float", "int"};
   const char* const kVectors[] = {"vec2", "vec3", "vec4"};

@@ -1,9 +1,8 @@
 // Diagnostics from the driver.
 //
 // There is one language now: a box is GLSL, compiled by the graphics driver on
-// the thread that owns the context. This file is what is left of the toolchain
-// once the C++ half went -- the shape of a diagnostic, and how to read one out
-// of a driver's log.
+// the thread that owns the context. This file is the shape of a diagnostic,
+// and how to read one out of a driver's log.
 #pragma once
 
 #include <string>

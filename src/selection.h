@@ -154,6 +154,14 @@ void SelectCaught(Items& items, const std::vector<Vector2>& lasso, RectOf rectOf
   }
 }
 
+// Where every window of a row is on screen -- the same question the lasso asks
+// of each one, asked of all of them. What the Home key frames is chosen from
+// these.
+template <class Items, class RectOf>
+void AppendRects(const Items& items, std::vector<Rectangle>* out, RectOf rectOf) {
+  for (std::size_t i = 0; i < items.size(); ++i) out->push_back(rectOf(i));
+}
+
 template <class Items>
 void ClearSelected(Items& items) {
   for (auto& item : items) Held(item).selected = false;

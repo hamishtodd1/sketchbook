@@ -22,10 +22,10 @@
 //   4. **drag**      -- what value the pointer is now asking for
 //
 // The first two are what this file carries. A box saying `Viz(Real);` supplies
-// one of them: its C++ half lays down a mesh with `vertex(x, y)` and prints it
-// back, and its GLSL half is the vertex shader that places those vertices. Two
-// boxes, paired by the type they name -- which needs no new language rule,
-// since a box is already C++ first and GLSL if C++ refuses it.
+// one of them: its mesh half is a compute shader that lays geometry down with
+// `vertex(x, y)` and `line(...)`, and its place half is the vertex shader that
+// places those vertices. Two boxes, paired by the type they name; the one that
+// lays geometry down is the mesh half.
 //
 // **A type may have more than one viz, in more than one window.** A function is
 // a curve on a plot and a field of colour on a number line, and those are two

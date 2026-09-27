@@ -1,4 +1,4 @@
-// Monokai syntax colouring for one line of C++.
+// Monokai syntax colouring for one line of GLSL.
 //
 // Line-at-a-time, because that is how the editor stores and draws text. The
 // consequence is that a block comment or a string running across a newline is
@@ -20,6 +20,6 @@ struct Span {
 };
 
 // Covers the whole line, in order, with no gaps.
-std::vector<Span> Cpp(std::string_view line);
+std::vector<Span> Glsl(std::string_view line);
 
 }  // namespace sb::highlight

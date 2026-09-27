@@ -2,14 +2,14 @@
 //
 // GLSL has *function* overloading -- `gp(Bi, Bi)` and `gp(Tri, Tri)` are two
 // functions of one name, resolved by argument type -- but it has no operator
-// overloading at all. So `a * b` cannot be a geometric product there, and that
-// was the whole reason a box's text had to be C++ before it could be a shader.
+// overloading at all. So `a * b` cannot be a geometric product there as
+// written.
 //
 // The way round it is a rewrite, and because GLSL resolves overloads itself the
 // rewrite needs no types: it is purely syntactic.
 //
 //     a * b   ->  gp(a, b)          ~a  ->  rev(a)
-//     a | b   ->  ip(a, b)          !a  ->  dual(a)
+//     a | b   ->  ip(a, b)
 //     a ^ b   ->  op(a, b)          -a  ->  neg(a)
 //     a & b   ->  rp(a, b)
 //     a + b   ->  add(a, b)
@@ -19,16 +19,16 @@
 // Two consequences worth stating, because both are deliberate and both are
 // visible to whoever writes a box:
 //
-// **The operators always mean the algebra.** `!` is the dual and never boolean
-// negation; `~ ^ & |` are never bitwise. Deciding otherwise would mean knowing
-// the type of every expression, which is a type checker; declaring it instead
-// costs one rule and no machinery. Boolean work uses `&&`, `||` and `not()`.
+// **The operators always mean the algebra.** `~ ^ & |` are never bitwise.
+// Deciding otherwise would mean knowing the type of every expression, which is
+// a type checker; declaring it instead costs one rule and no machinery. `!` is
+// left alone -- it is GLSL's boolean not -- and the dual is written `dual(a)`.
 //
 // **The precedence is the mathematician's, not C's.** Every algebra operator
 // binds tighter than `+` and `-`, so `a + b | c` is `a + (b | c)` -- which is
-// what it reads as. C++ binds `|` looser than `+` and the old rule here was
-// "write the brackets", but that rule only existed because a C++ compiler was
-// going to be the thing that ran it, and now none is.
+// what it reads as, and what `mathline` reads it as too. C binds `|` looser
+// than `+`; the rewrite is where the order is decided, so it is decided the way
+// the page reads.
 #pragma once
 
 #include <string>

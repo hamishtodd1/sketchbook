@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "app.h"
+#include "recent.h"
+#include "settings.h"
 #include "logging.h"
 #include "glext.h"
 #include "glslops.h"
@@ -24,6 +26,9 @@ struct Args {
   // means.
   int         width = 1200;
   int         height = 800;
+  // A size asked for on the command line is the window wanted, so it wins over
+  // coming back fullscreen.
+  bool        sized = false;
   std::string screenshot;   // when set, save a PNG and exit
   // Dev only: print a file with its operators rewritten and exit, so the
   // rewrite can be checked without a window or a GPU.
@@ -44,8 +49,8 @@ Args ParseArgs(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     const std::string flag = argv[i];
     const bool hasValue = (i + 1 < argc);
-    if (flag == "--width" && hasValue) args.width = std::atoi(argv[++i]);
-    else if (flag == "--height" && hasValue) args.height = std::atoi(argv[++i]);
+    if (flag == "--width" && hasValue) { args.width = std::atoi(argv[++i]); args.sized = true; }
+    else if (flag == "--height" && hasValue) { args.height = std::atoi(argv[++i]); args.sized = true; }
     else if (flag == "--screenshot" && hasValue) args.screenshot = argv[++i];
     else if (flag == "--frames" && hasValue) args.frames = std::atoi(argv[++i]);
     else if (flag == "--open" && hasValue) args.open = argv[++i];
@@ -198,8 +203,28 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  if (!args.open.empty() && !app.OpenCanvas(args.open)) {
-    std::fprintf(stderr, "sketchbook: could not open %s\n", args.open.c_str());
+  // A capture runs for a fixed number of frames and quits. Anything that happens
+  // to its window meanwhile -- a keystroke meant for another one -- is not work
+  // to be saved over the canvas it opened.
+  if (args.frames > 0) app.SetAutosave(false);
+
+  // **Fullscreen is remembered.** Left filling the screen, the app comes back
+  // filling it. Before the canvas opens, so the canvas is laid out for the
+  // window it will actually be seen in. Not for a capture, and not when a size
+  // was asked for: both want exactly the window they named.
+  if (args.frames == 0 && !args.sized && sb::settings::Fullscreen()) app.SetFullscreen(true);
+
+  if (!args.open.empty()) {
+    if (!app.OpenCanvas(args.open)) {
+      std::fprintf(stderr, "sketchbook: could not open %s\n", args.open.c_str());
+    }
+  } else {
+    // **The app opens on what you were last working on.** Going back to it is
+    // the commonest thing anybody does with this program; a blank canvas is one
+    // button away in the menu. The recent list already leaves out a file that
+    // is no longer there, so a moved or deleted one just means an empty canvas.
+    const std::vector<std::string> recent = sb::recent::List();
+    if (!recent.empty()) app.OpenCanvas(recent.front());
   }
 
   int frame = 0;

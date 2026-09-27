@@ -19,6 +19,7 @@
 #include "highlight.h"
 #include "rlgl.h"
 #include "text.h"
+#include "busy.h"
 #include "hover.h"
 #include "theme.h"
 #include "grid.h"
@@ -96,6 +97,19 @@ bool IsWordChar(char c) {
   return std::isalnum(u) != 0 || c == '_' || u >= 0x80;
 }
 
+// Whether a line says a word as a whole name, not as part of a longer one.
+bool MentionsWord(std::string_view line, std::string_view word) {
+  for (std::size_t at = line.find(word); at != std::string_view::npos;
+       at = line.find(word, at + 1)) {
+    const std::size_t after = at + word.size();
+    if ((at == 0 || !IsWordChar(line[at - 1])) &&
+        (after >= line.size() || !IsWordChar(line[after]))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::string EncodeUtf8(int codepoint) {
   std::string out;
   if (codepoint < 0x80) {
@@ -121,6 +135,7 @@ bool CtrlDown() { return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONT
 // Holding shift while the caret moves leaves the anchor where it was, which is
 // what turns a movement into a highlight. One rule for every way of moving.
 bool ShiftDown() { return IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT); }
+bool AltDown() { return IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT); }
 
 // Key repeat, so holding backspace behaves like every other editor.
 bool Triggered(int key) { return IsKeyPressed(key) || IsKeyPressedRepeat(key); }
@@ -130,6 +145,37 @@ std::string FormatInjected(float value) {
   std::snprintf(buffer, sizeof(buffer), "%.4g", static_cast<double>(value));
   return buffer;
 }
+
+// Where the number after a line's `=` is, if it has one: the `=` of the
+// declaration or assignment, not of a comparison.
+bool LiteralSpan(const std::string& text, std::size_t* begin, std::size_t* end) {
+  std::size_t equals = std::string::npos;
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    if (text[i] != '=') continue;
+    const bool doubled = (i + 1 < text.size() && text[i + 1] == '=');
+    const bool compound = (i > 0 && std::string("=<>!+-*/").find(text[i - 1]) != std::string::npos);
+    if (doubled || compound) {
+      ++i;
+      continue;
+    }
+    equals = i;
+    break;
+  }
+  if (equals == std::string::npos) return false;
+  const std::size_t from = text.find_first_not_of(" \t", equals + 1);
+  if (from == std::string::npos) return false;
+  std::size_t stop = text.find(';', from);
+  if (stop == std::string::npos) stop = text.size();
+  if (const std::size_t comment = text.find("//", from); comment != std::string::npos) {
+    stop = std::min(stop, comment);
+  }
+  while (stop > from && (text[stop - 1] == ' ' || text[stop - 1] == '\t')) --stop;
+  if (stop <= from) return false;
+  *begin = from;
+  *end = stop;
+  return true;
+}
+
 
 // raylib reports a shader's compile errors through TraceLog and nowhere else,
 // so the log is caught here for the length of the call. Not re-entrant, and
@@ -534,9 +580,10 @@ Color CodeBlock::VariableColor(const std::string& name) const {
   for (std::size_t i = 0; i < variables.size(); ++i) {
     if (variables[i].name == name) return sb::VariableColor(static_cast<int>(i));
   }
-  // Something the box mentions but does not declare -- a shader's input, which
-  // the pointer stands for. It takes the next colour along, so it is as
-  // distinct from the box's own variables as they are from each other.
+  // Something the box mentions but does not declare -- the argument of the
+  // function a picture draws, which the pointer stands for. It takes the next
+  // colour along, so it is as distinct from the box's own variables as they are
+  // from each other.
   return sb::VariableColor(static_cast<int>(variables.size()));
 }
 
@@ -770,12 +817,7 @@ void CodeBlock::DrawFunctionInto(Rectangle rect, int which, int shape, Vector2 c
                                  float span, Vector3 orbit) const {
   if (!haveShader_ || !havePreviewSurface_ || which < 0) return;
 
-  for (const auto& [uniform, location] : uniforms_) {
-    if (location < 0) continue;
-    const mathprogram::Literal* literal = program_.FindLiteral(uniform);
-    if (literal == nullptr) continue;
-    SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
-  }
+  SetLiveUniforms();
 
   const int   drawMode = 2;
   const float half = std::max(span, 1e-4f) * 0.5f;
@@ -799,6 +841,18 @@ void CodeBlock::DrawFunctionInto(Rectangle rect, int which, int shape, Vector2 c
   // One white pixel stretched over the square, so the varying runs 0..1 across.
   DrawTexturePro(previewSurface_, {0.0f, 0.0f, 1.0f, 1.0f}, rect, {0.0f, 0.0f}, 0.0f, WHITE);
   EndShaderMode();
+}
+
+void CodeBlock::SetLiveUniforms() const {
+  for (const auto& [uniform, location] : uniforms_) {
+    if (location < 0) continue;
+    const mathprogram::Literal* literal = program_.FindLiteral(uniform);
+    if (literal == nullptr) continue;
+    SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
+  }
+  const float seconds = static_cast<float>(GetTime() - compiledAt_);
+  if (timeLoc_ >= 0) SetShaderValue(shader_, timeLoc_, &seconds, SHADER_UNIFORM_FLOAT);
+  if (frameLoc_ >= 0) SetShaderValue(shader_, frameLoc_, &frame_, SHADER_UNIFORM_INT);
 }
 
 void CodeBlock::DrawPictureInto(Rectangle rect, Vector2 centre, float span) const {
@@ -986,6 +1040,23 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
   } else {
     for (std::size_t i = 0; i < lines_.size(); ++i) {
       float codeWidth = text::Measure(fonts, Face::Mono, lines_[i], g.emPx);
+      // A number a knob writes into the line gets a fixed slot, as an injected
+      // one does, so the box does not breathe as the number is dragged -- the
+      // number line under it is as wide as the box, and would slide under the
+      // pointer doing the dragging.
+      for (const mathprogram::Variable& variable : program_.variables()) {
+        bool here = false;
+        for (const mathprogram::Literal& literal : variable.literals) {
+          here = here || (literal.written && literal.line == static_cast<int>(i));
+        }
+        std::size_t begin = 0;
+        std::size_t end = 0;
+        if (!here || !LiteralSpan(lines_[i], &begin, &end)) continue;
+        const float number = text::Measure(
+            fonts, Face::Mono, std::string_view(lines_[i]).substr(begin, end - begin), g.emPx);
+        codeWidth += std::max(0.0f, g.advance * kInjectionColumns - number);
+        break;
+      }
       const std::string injection = Injection(static_cast<int>(i));
       if (!injection.empty()) {
         // A real's injection is a number that changes width as its knob moves,
@@ -1499,7 +1570,7 @@ void CodeBlock::PasteText() {
       SelectNone();
     }
     if (*c == '\0') break;
-    InsertNewline();
+    InsertNewline(/*indentToo=*/false);
   }
   ClampCaret();
   TouchEdit();
@@ -1521,7 +1592,7 @@ const mathprogram::Variable* CodeBlock::FindVariable(const std::string& name) co
   return nullptr;
 }
 
-void CodeBlock::SetVariableValue(const std::string& name, float value) {
+void CodeBlock::SetVariableValue(const std::string& name, float value, bool intoText) {
   const std::vector<mathprogram::Variable>& variables = program_.variables();
   for (std::size_t i = 0; i < variables.size(); ++i) {
     if (variables[i].name == name) {
@@ -1529,10 +1600,42 @@ void CodeBlock::SetVariableValue(const std::string& name, float value) {
       // one responsible for the number on screen. Read above a reassignment and
       // the knob moves the declaration's literal; read below it, the
       // reassignment's.
+      const int governing = variables[i].GoverningLiteral(ExecutedUpTo());
       program_.SetValue(i, value, ExecutedUpTo());
+      // A number typed in the text is the value, so moving the knob moves the
+      // number. Nothing is rebuilt: the shader reads it as a uniform, and the
+      // uniform has just been set.
+      if (intoText && governing >= 0) {
+        const mathprogram::Literal& literal =
+            variables[i].literals[static_cast<std::size_t>(governing)];
+        if (literal.written) WriteLiteral(literal.line, value);
+      }
       return;
     }
   }
+}
+
+void CodeBlock::BeginValueEdit(const std::string& name) {
+  const mathprogram::Variable* variable = FindVariable(name);
+  if (variable == nullptr) return;
+  const int governing = variable->GoverningLiteral(ExecutedUpTo());
+  if (governing < 0 || !variable->literals[static_cast<std::size_t>(governing)].written) return;
+  PushUndo(EditKind::Structural);
+}
+
+void CodeBlock::CommitValue(const std::string& name) {
+  const mathprogram::Variable* variable = FindVariable(name);
+  if (variable == nullptr) return;
+  BeginValueEdit(name);
+  SetVariableValue(name, variable->value, /*intoText=*/true);
+}
+
+void CodeBlock::RestoreLines(std::vector<std::string> lines) {
+  lines_ = std::move(lines);
+  if (lines_.empty()) lines_.emplace_back();
+  ClampCaret();
+  SelectNone();
+  RequestCompile();
 }
 
 void CodeBlock::RestoreValues(std::vector<std::pair<std::string, float>> values) {
@@ -1602,13 +1705,16 @@ void CodeBlock::InsertCodepoint(int codepoint) {
   TouchEdit();
 }
 
-void CodeBlock::InsertNewline() {
+void CodeBlock::InsertNewline(bool indentToo) {
   EraseSelection();
   PushUndo(EditKind::Structural);
   std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
   std::string tail = line.substr(static_cast<std::size_t>(caretCol_));
 
-  // Carry the current line's indentation onto the new one.
+  // Carry the current line's indentation onto the new one -- but not when text
+  // is arriving from somewhere else. Pasted text brings its own indentation,
+  // and adding this line's to every line of it stacks up: one line deeper on
+  // every line, so a paste of ten lines ends up a page across.
   std::string indent;
   for (char c : line) {
     if (c == ' ' || c == '\t') indent += c;
@@ -1617,12 +1723,189 @@ void CodeBlock::InsertNewline() {
   if (static_cast<std::size_t>(caretCol_) < indent.size()) {
     indent.resize(static_cast<std::size_t>(caretCol_));
   }
+  if (!indentToo) indent.clear();
 
   line.erase(static_cast<std::size_t>(caretCol_));
   lines_.insert(lines_.begin() + caretLine_ + 1, indent + tail);
   ++caretLine_;
   caretCol_ = static_cast<int>(indent.size());
   TouchEdit();
+}
+
+// How far one Tab moves a line. Spaces rather than a tab character: a typeset
+// row's indentation is measured off its own code in monospaced cells, and one
+// space is one cell where a tab is a guess.
+constexpr int kIndentWidth = 4;
+
+// How much whitespace a line has at `from`.
+int LeadingSpaces(const std::string& line, int from) {
+  int at = from;
+  while (at < static_cast<int>(line.size()) && (line[at] == ' ' || line[at] == '\t')) ++at;
+  return at - from;
+}
+
+void CodeBlock::SelectAll() {
+  if (lines_.empty()) return;
+  anchorLine_ = 0;
+  anchorCol_ = FloorCol(0);
+  caretLine_ = static_cast<int>(lines_.size()) - 1;
+  caretCol_ = static_cast<int>(lines_[lines_.size() - 1].size());
+  caretUsed_ = true;
+  blinkAnchor_ = GetTime();
+}
+
+// Which lines a gesture about *lines* is about: the ones the highlight touches,
+// or the caret's own when nothing is highlighted. A highlight stopping at the
+// very start of a line has not reached into it, so that line is left alone --
+// otherwise sweeping down through three lines would indent a fourth.
+void CodeBlock::LineRange(int* first, int* last) const {
+  int fromLine = caretLine_;
+  int fromCol = caretCol_;
+  int toLine = caretLine_;
+  int toCol = caretCol_;
+  if (HasSelection()) SelectionRange(&fromLine, &fromCol, &toLine, &toCol);
+  if (toLine > fromLine && toCol == 0) --toLine;
+  *first = fromLine;
+  *last = toLine;
+}
+
+// The caret and the anchor, on a line whose start has just moved. A column
+// before the change stays where it is; the rest travel with the text, so a
+// highlight still covers the same words after the lines under it have shifted.
+void CodeBlock::ColumnMoved(int line, int at, int by) {
+  const auto shift = [&](int whichLine, int* col) {
+    if (whichLine != line || *col < at) return;
+    *col = std::max(at, *col + by);
+  };
+  shift(caretLine_, &caretCol_);
+  shift(anchorLine_, &anchorCol_);
+}
+
+// Indenting and commenting are edits *about* a highlight, so the highlight
+// outlives them: press Tab twice and the same lines move twice. Every other
+// edit puts it down, which is why `TouchEdit` does that and these put it back.
+void CodeBlock::EditKeepingSelection(int anchorLine, int anchorCol) {
+  ClampCaret();
+  TouchEdit();
+  if (anchorLine < 0 || anchorLine >= static_cast<int>(lines_.size())) return;
+  anchorLine_ = anchorLine;
+  anchorCol_ = std::clamp(anchorCol, 0,
+                          static_cast<int>(lines_[static_cast<std::size_t>(anchorLine)].size()));
+}
+
+void CodeBlock::ShiftIndent(bool out) {
+  const int keptLine = anchorLine_;
+  const int keptCol = anchorCol_;
+  int first = 0;
+  int last = 0;
+  LineRange(&first, &last);
+  PushUndo(EditKind::Structural);
+  const std::string step(kIndentWidth, ' ');
+  for (int i = first; i <= last && i < static_cast<int>(lines_.size()); ++i) {
+    std::string& line = lines_[static_cast<std::size_t>(i)];
+    const int    floor = FloorCol(i);
+    if (floor > static_cast<int>(line.size())) continue;
+    if (!out) {
+      // An empty line is left empty: indentation says a line is inside
+      // something, and a line with nothing on it is not inside anything.
+      if (static_cast<int>(line.size()) == floor) continue;
+      line.insert(static_cast<std::size_t>(floor), step);
+      ColumnMoved(i, floor, kIndentWidth);
+      continue;
+    }
+    const int taken = std::min(LeadingSpaces(line, floor), kIndentWidth);
+    if (taken == 0) continue;
+    line.erase(static_cast<std::size_t>(floor), static_cast<std::size_t>(taken));
+    ColumnMoved(i, floor, -taken);
+  }
+  EditKeepingSelection(keptLine, keptCol);
+}
+
+void CodeBlock::DeleteLines() {
+  int first = 0;
+  int last = 0;
+  LineRange(&first, &last);
+  PushUndo(EditKind::Structural);
+
+  // A text box is one because its first line starts with the sigil, so taking
+  // that line keeps the sigil: deleting a line of words is not asking for the
+  // box to stop being words.
+  const std::string sigil =
+      (first == 0 && IsText()) ? lines_[0].substr(0, static_cast<std::size_t>(FloorCol(0)))
+                               : std::string();
+  lines_.erase(lines_.begin() + first,
+               lines_.begin() + std::min<int>(last + 1, static_cast<int>(lines_.size())));
+  if (!sigil.empty()) lines_.insert(lines_.begin(), sigil);
+  // A box always has a line to put the caret on.
+  if (lines_.empty()) lines_.emplace_back();
+
+  // The caret stays on the same row, which now holds whatever came after, and
+  // at the same column where that line is long enough.
+  caretLine_ = std::min(first, static_cast<int>(lines_.size()) - 1);
+  ClampCaret();
+  TouchEdit();
+}
+
+void CodeBlock::WriteLiteral(int line, float value) {
+  if (line < 0 || line >= static_cast<int>(lines_.size())) return;
+  std::string& text = lines_[static_cast<std::size_t>(line)];
+  std::size_t  begin = 0;
+  std::size_t  end = 0;
+  if (!LiteralSpan(text, &begin, &end)) return;
+  text.replace(begin, end - begin, FormatInjected(value));
+  // Not an edit in the usual sense: nothing is rebuilt, because the shader is
+  // already reading this number as a uniform. The caret only has to stay on
+  // the line.
+  ClampCaret();
+  if (anchorLine_ == line) {
+    anchorCol_ = std::min(anchorCol_, static_cast<int>(text.size()));
+  }
+}
+
+void CodeBlock::ToggleComment() {
+  const int keptLine = anchorLine_;
+  const int keptCol = anchorCol_;
+  int first = 0;
+  int last = 0;
+  LineRange(&first, &last);
+
+  // Off if every line with anything on it is already commented, and on
+  // otherwise -- so a half-commented stretch becomes wholly commented, which is
+  // a state the next press can undo. The comments all go in at the shallowest
+  // indentation of the lot, so a block keeps its shape.
+  bool allCommented = true;
+  bool any = false;
+  int  column = -1;
+  for (int i = first; i <= last && i < static_cast<int>(lines_.size()); ++i) {
+    const std::string& line = lines_[static_cast<std::size_t>(i)];
+    const int          floor = FloorCol(i);
+    const int          at = floor + LeadingSpaces(line, floor);
+    if (at >= static_cast<int>(line.size())) continue;   // nothing on this one
+    any = true;
+    if (line.compare(static_cast<std::size_t>(at), 2, "//") != 0) allCommented = false;
+    if (column < 0 || at < column) column = at;
+  }
+  if (!any) return;
+
+  PushUndo(EditKind::Structural);
+  for (int i = first; i <= last && i < static_cast<int>(lines_.size()); ++i) {
+    std::string& line = lines_[static_cast<std::size_t>(i)];
+    const int    floor = FloorCol(i);
+    const int    at = floor + LeadingSpaces(line, floor);
+    if (at >= static_cast<int>(line.size())) continue;
+    if (allCommented) {
+      // The space that went in with the slashes comes back out with them, so a
+      // line uncommented is the line that was commented.
+      const bool spaced = line.compare(static_cast<std::size_t>(at), 3, "// ") == 0;
+      const int  width = spaced ? 3 : 2;
+      line.erase(static_cast<std::size_t>(at), static_cast<std::size_t>(width));
+      ColumnMoved(i, at, -width);
+      continue;
+    }
+    line.insert(static_cast<std::size_t>(column), "// ");
+    ColumnMoved(i, column, 3);
+  }
+  EditKeepingSelection(keptLine, keptCol);
 }
 
 void CodeBlock::DeleteBefore() {
@@ -1802,6 +2085,17 @@ void CodeBlock::HandleInput() {
     PasteText();
     return;
   }
+  // The caret decides what these are about, the way it already decides which
+  // clipboard Ctrl+C means: with one in a box, the box is what is selected and
+  // what is commented.
+  if (ctrl && Triggered(KEY_A)) {
+    SelectAll();
+    return;
+  }
+  if (ctrl && Triggered(KEY_SLASH)) {
+    ToggleComment();
+    return;
+  }
 
   for (int codepoint = GetCharPressed(); codepoint > 0; codepoint = GetCharPressed()) {
     if (codepoint >= 32 && !ctrl) InsertCodepoint(codepoint);
@@ -1814,13 +2108,25 @@ void CodeBlock::HandleInput() {
   if (Triggered(KEY_ENTER) && !ctrl) InsertNewline();
   if (Triggered(KEY_KP_ENTER) && !ctrl) InsertNewline();
   if (Triggered(KEY_BACKSPACE)) ctrl ? DeleteWordBefore() : DeleteBefore();
-  if (Triggered(KEY_DELETE)) ctrl ? DeleteWordAfter() : DeleteAt();
+  // Alt+Delete is the whole line, the way Ctrl+Delete is the whole word.
+  if (AltDown() && Triggered(KEY_DELETE)) {
+    DeleteLines();
+  } else if (Triggered(KEY_DELETE)) {
+    ctrl ? DeleteWordAfter() : DeleteAt();
+  }
   if (Triggered(KEY_LEFT)) MoveCaret(0, -1);
   if (Triggered(KEY_RIGHT)) MoveCaret(0, +1);
   if (Triggered(KEY_UP)) MoveCaret(-1, 0);
   if (Triggered(KEY_DOWN)) MoveCaret(+1, 0);
+  // Tab over a highlight is about *lines*: it moves every line the highlight
+  // touches, in or out, and Shift is which. With nothing highlighted there is
+  // no block to move, so it is the ordinary step of indentation at the caret.
   if (Triggered(KEY_TAB)) {
-    for (int i = 0; i < 4; ++i) InsertCodepoint(' ');
+    if (HasSelection() || ShiftDown()) {
+      ShiftIndent(/*out=*/ShiftDown());
+    } else {
+      for (int i = 0; i < kIndentWidth; ++i) InsertCodepoint(' ');
+    }
   }
   if (IsKeyPressed(KEY_HOME)) {
     caretCol_ = 0;
@@ -2071,6 +2377,7 @@ void CodeBlock::FeedFunction() {
     const mathprogram::Literal* literal = program_.FindLiteral(uniform);
     signature.push_back(literal == nullptr ? 0.0f : literal->value);
   }
+  if (animated_) signature.push_back(static_cast<float>(frame_));
   if (signature == fnSignature_ && sampling_.ready) return;
   fnSignature_ = signature;
 
@@ -2078,12 +2385,7 @@ void CodeBlock::FeedFunction() {
       fnInBuffer_, sampling_.inputs.data(),
       static_cast<unsigned int>(sampling_.inputs.size() * sizeof(float)), 0);
 
-  for (const auto& [uniform, location] : uniforms_) {
-    if (location < 0) continue;
-    const mathprogram::Literal* literal = program_.FindLiteral(uniform);
-    if (literal == nullptr) continue;
-    SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
-  }
+  SetLiveUniforms();
   const int feedMode = 3;
   if (modeLoc_ >= 0) SetShaderValue(shader_, modeLoc_, &feedMode, SHADER_UNIFORM_INT);
   if (fnIndexLoc_ >= 0) SetShaderValue(shader_, fnIndexLoc_, &which, SHADER_UNIFORM_INT);
@@ -2127,26 +2429,18 @@ void CodeBlock::ProbeIfNeeded() {
 
   // Nothing has moved, so the answer is the one already on screen.
   std::vector<float> signature;
-  signature.reserve(uniforms_.size() + 2);
-  signature.push_back(probePoint_.x);
-  signature.push_back(probePoint_.y);
+  signature.reserve(uniforms_.size() + 1);
   for (const auto& [uniform, location] : uniforms_) {
     const mathprogram::Literal* literal = program_.FindLiteral(uniform);
     signature.push_back(literal == nullptr ? 0.0f : literal->value);
   }
+  // A box that says `time` or `randChanging` has moved whether or not anything
+  // else has, so it is asked again every frame.
+  if (animated_) signature.push_back(static_cast<float>(frame_));
   if (signature == probeSignature_) return;
   probeSignature_ = signature;
 
-  for (const auto& [uniform, location] : uniforms_) {
-    if (location < 0) continue;
-    const mathprogram::Literal* literal = program_.FindLiteral(uniform);
-    if (literal == nullptr) continue;
-    SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
-  }
-  if (probePointLoc_ >= 0) {
-    const float point[2] = {probePoint_.x, probePoint_.y};
-    SetShaderValue(shader_, probePointLoc_, point, SHADER_UNIFORM_VEC2);
-  }
+  SetLiveUniforms();
   const int reportMode = 1;
   if (modeLoc_ >= 0) SetShaderValue(shader_, modeLoc_, &reportMode, SHADER_UNIFORM_INT);
 
@@ -2204,7 +2498,7 @@ void CodeBlock::CompileShader() {
   // A viz box's GLSL is the *vertex* shader -- the one that decides where the
   // mesh ends up. Nothing else about it is different: it is assembled from the
   // same lines, compiled on the same thread, and its errors come back the same
-  // way, because it is still just the box's text tried as the other language.
+  // way.
   if (!program_.vizType().empty()) {
     if (haveVizShader_) {
       UnloadShader(vizShader_);
@@ -2275,7 +2569,7 @@ void CodeBlock::CompileShader() {
     }
     if (!havePreviewSurface_) {
       // Something for the shader to cover. One white pixel stretched over the
-      // preview is what makes fragTexCoord run 0..1 across it.
+      // preview is what makes the texture coordinate run 0..1 across it.
       Image white = GenImageColor(1, 1, WHITE);
       previewSurface_ = LoadTextureFromImage(white);
       UnloadImage(white);
@@ -2285,7 +2579,14 @@ void CodeBlock::CompileShader() {
     // The same shader answers the other two questions, so there is nothing
     // else to compile -- only the rest of its slots to look up.
     modeLoc_ = GetShaderLocation(shader_, "sbMode");
-    probePointLoc_ = GetShaderLocation(shader_, "sbProbe");
+    timeLoc_ = GetShaderLocation(shader_, "time");
+    frameLoc_ = GetShaderLocation(shader_, "sbFrameCount");
+    // `time` counts from here.
+    compiledAt_ = GetTime();
+    animated_ = false;
+    for (const std::string& line : lines_) {
+      if (MentionsWord(line, "time") || MentionsWord(line, "randChanging")) animated_ = true;
+    }
     rangeLoc_ = GetShaderLocation(shader_, "sbRange");
     verticalLoc_ = GetShaderLocation(shader_, "sbVertical");
     indexLoc_ = GetShaderLocation(shader_, "sbIndex");
@@ -2356,12 +2657,7 @@ bool CodeBlock::BeginField(const std::string& name, int mode, Vector2 range, Vec
 
   // Whatever its knobs are at. A function's shape can depend on them, which is
   // the whole reason it is drawn by being called.
-  for (const auto& [uniform, location] : uniforms_) {
-    if (location < 0) continue;
-    const mathprogram::Literal* literal = program_.FindLiteral(uniform);
-    if (literal == nullptr) continue;
-    SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
-  }
+  SetLiveUniforms();
   const float rangePair[2] = {range.x, range.y};
   const float verticalPair[2] = {vertical.x, vertical.y};
   const int functionMode = 2;
@@ -2378,14 +2674,60 @@ bool CodeBlock::BeginField(const std::string& name, int mode, Vector2 range, Vec
 
 void CodeBlock::EndField() const { EndShaderMode(); }
 
+void CodeBlock::StartPlaying(const std::string& name, float amplitude) {
+  const mathprogram::Variable* variable = FindVariable(name);
+  if (variable == nullptr || !variable->free) return;
+  StopPlaying(name);
+  playing_.push_back({name, variable->value, amplitude, 0.0f});
+}
+
+void CodeBlock::StopPlaying(const std::string& name) {
+  std::erase_if(playing_, [&name](const Play& play) { return play.name == name; });
+}
+
+bool CodeBlock::Playing(const std::string& name) const {
+  for (const Play& play : playing_) {
+    if (play.name == name) return true;
+  }
+  return false;
+}
+
+float CodeBlock::KnobValue(const mathprogram::Variable& variable) const {
+  for (const Play& play : playing_) {
+    if (play.name == variable.name) return play.centre;
+  }
+  return variable.value;
+}
+
 void CodeBlock::Poll() {
+  ++frame_;
+
+  // A playing knob swings about where it was when play was pressed. One that
+  // has stopped existing -- renamed, or edited away -- stops playing.
+  std::erase_if(playing_, [this](const Play& play) {
+    const mathprogram::Variable* variable = FindVariable(play.name);
+    return variable == nullptr || !variable->free;
+  });
+  // The number is written into the text as it goes -- a uniform set and a line
+  // retyped, and nothing compiled -- so the line says what is running.
+  if (!playPaused_) {
+    for (Play& play : playing_) {
+      play.phase += GetFrameTime();
+      SetVariableValue(play.name, play.centre + play.amplitude * std::sin(play.phase));
+    }
+  }
+
   // What the windows show is what the values were where the box is being read.
   program_.ApplyTrace(ExecutedUpTo());
 
-  // The C++ compile runs on a worker thread, but a shader has to be compiled on
-  // the thread holding the graphics context. So this half happens here.
+  // A shader has to be compiled on the thread holding the graphics context, so
+  // the program assembles it and stops, and this is where it is compiled.
   const mathprogram::State state = program_.state();
-  if (state == mathprogram::State::Shading) CompileShader();
+  if (state == mathprogram::State::Shading) {
+    // Nothing is drawn while this runs, so the pointer is what says so.
+    const busy::Scope busy;
+    CompileShader();
+  }
 
   // A box edited into something that no longer compiles should stop drawing the
   // picture it used to be. While a rebuild is in flight the old one stays up,
@@ -2444,6 +2786,7 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
     // A window being used elsewhere lights up every place its variable is
     // written, in whichever reading this row happens to be showing.
     for (const ActiveValue& active : highlights_) {
+      if (!active.Covers(row.line)) continue;
       const Color tint = VariableColor(active.name);
       for (const Rectangle& box : MentionRects(r, active.name, g, fonts)) {
         DrawRectangleRounded(box, 0.30f, 6, Fade(tint, kMentionFillAlpha));
@@ -2478,7 +2821,7 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
     }
 
     const std::string& source = lines_[i];
-    const std::vector<highlight::Span> spans = highlight::Cpp(source);
+    const std::vector<highlight::Span> spans = highlight::Glsl(source);
 
     // The injected initialiser, shown while previewing but never while editing:
     // it is generated, not yours to change. It slots in *before* the semicolon,
@@ -2669,6 +3012,7 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
         // five separate cables leaving the same window.
         std::vector<Rectangle> mentions;
         for (std::size_t i = 0; i < g.rows.size(); ++i) {
+          if (!active.Covers(g.rows[i].line)) continue;
           for (const Rectangle& box : MentionRects(i, active.name, g, fonts)) {
             mentions.push_back(box);
           }

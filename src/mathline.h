@@ -1,7 +1,7 @@
-// One line of the mathematical subset of C++.
+// One line of the mathematical subset of GLSL.
 //
 // This is the bridge between the two halves of the program. It reads a single
-// line of real C++ and, if that line has a mathematical reading, reports what
+// line of real GLSL and, if that line has a mathematical reading, reports what
 // it declares and what it looks like as LaTeX. Lines it does not understand are
 // reported as such and stay code on screen -- that is the designed fallback,
 // not a failure.
@@ -29,9 +29,8 @@
 // FindFunctions reports. Everything else in this file still reads one line and
 // asks nothing about its neighbours.
 //
-// Expressions are numbers, identifiers, calls, member access, + - * / and
-// parentheses. A lambda is read only as a whole initialiser, which is where one
-// can appear.
+// Expressions are numbers, identifiers, calls, member access, + - * /, the
+// algebra's operators, and parentheses.
 #pragma once
 
 #include <string>
@@ -44,7 +43,7 @@ namespace sb::mathline {
 
 enum class Kind {
   Blank,
-  Unparsed,     // valid C++ perhaps, but no mathematical reading
+  Unparsed,     // valid GLSL perhaps, but no mathematical reading
   Declaration,  // `float a;` or `float c = <expr>;`
   Assignment,   // `c = <expr>;`
   Algebra,      // `Cl(3,0,1);` -- which algebra the box works in

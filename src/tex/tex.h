@@ -70,6 +70,9 @@ struct Node {
 
   // BigOp: true when limits belong above and below rather than as scripts.
   bool limits = false;
+  // Accent: \widetilde, which spans what it sits over rather than being one
+  // small mark in the middle of it.
+  bool wide = false;
   // Fraction: false for \binom, which stacks without a rule.
   bool hasRule = true;
 
@@ -110,7 +113,9 @@ Parsed Parse(std::string_view source);
 // the left edge of the formula and its baseline (y grows downwards).
 
 struct Item {
-  enum class Kind : unsigned char { Glyph, Rect, Line };
+  // Stroke: a wide accent, drawn as a filled shape across `rect` from the stroke
+  // of `codepoint` in `face` (`thickness` carries how much taller it has grown).
+  enum class Kind : unsigned char { Glyph, Rect, Line, Stroke };
   Kind kind = Kind::Glyph;
 
   // Glyph

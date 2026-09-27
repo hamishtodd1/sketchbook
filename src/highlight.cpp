@@ -18,30 +18,29 @@ bool IsIdentPart(char c) {
 
 const std::unordered_set<std::string>& Keywords() {
   static const std::unordered_set<std::string> set = {
-      "alignas", "alignof", "and", "break", "case", "catch", "class", "const", "constexpr",
-      "continue", "decltype", "default", "delete", "do", "else", "enum", "explicit", "export",
-      "extern", "for", "friend", "goto", "if", "inline", "namespace", "new", "noexcept",
-      "not", "operator", "or", "private", "protected", "public", "register", "return",
-      "sizeof", "static", "struct", "switch", "template", "this", "throw", "try", "typedef",
-      "typename", "union", "using", "virtual", "volatile", "while"};
+      "break",  "buffer", "case",  "const",   "continue", "default", "discard", "do",
+      "else",   "flat",   "for",   "highp",   "if",       "in",      "inout",   "layout",
+      "lowp",   "mediump", "out",  "precision", "return", "shared",  "smooth",  "struct",
+      "switch", "uniform", "while"};
   return set;
 }
 
 const std::unordered_set<std::string>& Types() {
   static const std::unordered_set<std::string> set = {
-      "auto", "bool", "char", "double", "float", "int", "long", "short", "signed",
-      "unsigned", "void", "size_t", "vec2", "vec3", "vec4", "mat2", "mat3", "mat4"};
+      "bool",  "bvec2", "bvec3", "bvec4", "double", "float", "int",   "ivec2", "ivec3",
+      "ivec4", "mat2",  "mat3",  "mat4",  "uint",   "uvec2", "uvec3", "uvec4", "vec2",
+      "vec3",  "vec4",  "void",  "sampler2D"};
   return set;
 }
 
 const std::unordered_set<std::string>& Constants() {
-  static const std::unordered_set<std::string> set = {"true", "false", "nullptr"};
+  static const std::unordered_set<std::string> set = {"true", "false"};
   return set;
 }
 
 }  // namespace
 
-std::vector<Span> Cpp(std::string_view line) {
+std::vector<Span> Glsl(std::string_view line) {
   std::vector<Span> spans;
   std::size_t i = 0;
 

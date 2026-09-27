@@ -198,6 +198,11 @@ void SurfacePanel::Draw(const Viewport& viewport, FontStore& fonts) const {
 }
 
 // ------------------------------------------------------------------ selection
+void SurfacePanel::Rects(const Viewport& viewport, FontStore& fonts,
+                         std::vector<Rectangle>* out) const {
+  AppendRects(views_, out, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
+}
+
 void SurfacePanel::SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                                 FontStore& fonts) {
   SelectCaught(views_, lasso, [&](std::size_t i) { return RectFor(i, viewport, fonts); });

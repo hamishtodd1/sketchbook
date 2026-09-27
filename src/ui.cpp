@@ -28,6 +28,7 @@ struct MenuLayout {
   float     recentLabelTop = 0.0f;
   Rectangle recent[recent::kMaxRecent];
   int       recentRows = 0;
+  Rectangle fresh;
   Rectangle save;
   Rectangle load;
   Rectangle insert;
@@ -74,6 +75,10 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
     y += 20.0f;
   }
 
+  // A blank canvas. The app opens on the last one, so this is the way to a new
+  // one -- and the one being left is already saved.
+  m.fresh = {inset, y, inner, kButtonHeight};
+  y += kButtonHeight + 8.0f;
   const float buttonWidth = (inner - 8.0f) * 0.5f;
   m.save = {inset, y, buttonWidth, kButtonHeight};
   m.load = {inset + buttonWidth + 8.0f, y, buttonWidth, kButtonHeight};
@@ -82,8 +87,7 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   // with on a tablet.
   m.insert = {inset, y, inner, kButtonHeight};
   y += kButtonHeight + 8.0f;
-  // A deck's first slide. After that the button on the canvas is where slides
-  // come from, since it stands at the end of the deck and there is one.
+  // Slides come from here, and only from here.
   m.slide = {inset, y, inner, kButtonHeight};
   y += kButtonHeight + 8.0f;
   // The whole screen, title bar and all. It is a thing done to the window
@@ -106,6 +110,7 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   place(&m.aspectHeader);
   for (int i = 0; i < kAspectCount; ++i) place(&m.aspect[i]);
   for (int i = 0; i < m.recentRows; ++i) place(&m.recent[i]);
+  place(&m.fresh);
   place(&m.save);
   place(&m.load);
   place(&m.insert);
@@ -200,6 +205,7 @@ MenuAction OptionsMenu::Update(Options* options) {
       return MenuAction::OpenRecent;
     }
   }
+  if (CheckCollisionPointRec(mouse, m.fresh)) return MenuAction::NewCanvas;
   if (CheckCollisionPointRec(mouse, m.save)) return MenuAction::Save;
   if (CheckCollisionPointRec(mouse, m.load)) return MenuAction::Load;
   if (CheckCollisionPointRec(mouse, m.insert)) return MenuAction::Insert;
@@ -284,6 +290,7 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
                kPanelMuted);
   }
 
+  DrawButton(fonts, m.fresh, "New canvas", CheckCollisionPointRec(mouse, m.fresh));
   DrawButton(fonts, m.save, "Save canvas", CheckCollisionPointRec(mouse, m.save));
   DrawButton(fonts, m.load, "Load canvas", CheckCollisionPointRec(mouse, m.load));
   DrawButton(fonts, m.insert, "Insert picture or video",

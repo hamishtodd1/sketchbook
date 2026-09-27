@@ -119,11 +119,19 @@ std::vector<int> BladesOf(Grades grades, const Signature& sig) {
 
 // What a blade is called as a member: the scalar is `s`, everything else is
 // `e` and its generators, ascending.
-std::string BladeName(int blade) {
+// **`e0` is the null generator, and only an algebra with one has an e0.** The
+// generators are counted from one, the way everybody counts the axes of a
+// space: Cl(2,2) is e1 e2 e3 e4. A degenerate algebra puts its null generator
+// first and calls it e0, the way every PGA text does -- Cl(3,0,1) is e0 null
+// and e1 e2 e3 positive -- so the numbering of the rest is the same with or
+// without it. (With two or more null generators they are e0, e1, ..., and the
+// rest follow on; nothing here uses one, and it has not been thought about.)
+std::string BladeName(const Signature& sig, int blade) {
   if (blade == 0) return "s";
+  const int   first = (sig.r == 0) ? 1 : 0;
   std::string name = "e";
   for (int i = 0; i < 32; ++i) {
-    if ((blade >> i) & 1) name += static_cast<char>('0' + i);
+    if ((blade >> i) & 1) name += static_cast<char>('0' + i + first);
   }
   return name;
 }
@@ -142,25 +150,8 @@ int DualOf(const Signature& sig, int blade, int* sign) {
   return complement;
 }
 
-// Which language the algebra is being written in. The difference that matters
-// is that GLSL has no operator overloading, so `a * b` cannot be a geometric
-// product there. Both targets therefore get the products as *functions* --
-// GAmphetamine's own alternative spelling -- and C++ gets the operators as
-// well. A box written in the function form runs in either language, which is
-// what lets one box's text be tried as C++ and then as GLSL.
-enum class Target { Cpp, Glsl };
-
 // Which products are generated, and what each keeps.
 enum class Product { Geometric, Inner, Outer, Regressive };
-
-const char* OperatorOf(Product product) {
-  switch (product) {
-    case Product::Geometric: return "*";
-    case Product::Inner: return "|";
-    case Product::Outer: return "^";
-    default: return "&";
-  }
-}
 
 const char* FunctionOf(Product product) {
   switch (product) {
@@ -226,7 +217,7 @@ struct Type {
 
 class Generator {
  public:
-  Generator(const Signature& sig, Target target) : sig_(sig), target_(target) {}
+  explicit Generator(const Signature& sig) : sig_(sig) {}
 
   // Adds a type and everything the products between it and what is already
   // here turn out to need. Grade-sets are a small finite lattice, so this
@@ -306,7 +297,21 @@ class Generator {
     return best == nullptr ? std::string() : best->name;
   }
 
+  // Is every grade in here an odd one? That is what decides the sign of a
+  // sandwich: superconjugation flips it when a versor and what it acts on are
+  // both odd, which is what keeps the answer the thing you meant rather than
+  // its negative.
+  bool AllOdd(Grades grades) const {
+    if (grades == 0) return false;
+    for (int k = 0; k <= sig_.n(); ++k) {
+      if ((grades & (1u << k)) != 0 && (k % 2) == 0) return false;
+    }
+    return true;
+  }
+
   void EmitStruct(std::ostringstream& out, const Type& type) const;
+  void EmitSandwich(std::ostringstream& out, const Type& left, const Type& right) const;
+  void EmitWidening(std::ostringstream& out, const Type& type) const;
   void EmitProduct(std::ostringstream& out, const Type& left, const Type& right,
                    Product product) const;
   void EmitSum(std::ostringstream& out, const Type& left, const Type& right, bool add) const;
@@ -314,18 +319,11 @@ class Generator {
   void EmitGrades(std::ostringstream& out, const Type& type) const;
   void EmitScalar(std::ostringstream& out, const Type& type) const;
 
-  // Writes one function. The name is the same in both languages; C++ takes its
-  // arguments by reference, GLSL by value, which is the only other difference.
+  // Writes one function.
   void Define(std::ostringstream& out, const std::string& ret, const std::string& name,
               const std::string& left, const std::string& right, const std::string& body) const {
-    out << Inline() << ret << " " << name << "(";
-    if (cpp()) {
-      out << "const " << left << "& a";
-      if (!right.empty()) out << ", const " << right << "& b";
-    } else {
-      out << left << " a";
-      if (!right.empty()) out << ", " << right << " b";
-    }
+    out << ret << " " << name << "(" << left << " a";
+    if (!right.empty()) out << ", " << right << " b";
     out << ") {\n" << body << "}\n\n";
   }
 
@@ -339,59 +337,116 @@ class Generator {
     return out;
   }
 
-  bool        cpp() const { return target_ == Target::Cpp; }
-  std::string Zero() const { return cpp() ? "0.0f" : "0.0"; }
-  std::string One() const { return cpp() ? "1.0f" : "1.0"; }
-  const char* Inline() const { return cpp() ? "inline " : ""; }
+  static std::string Zero() { return "0.0"; }
+  static std::string One() { return "1.0"; }
 
   Signature                 sig_;
-  Target                    target_ = Target::Cpp;
   std::map<Grades, Type>    types_;
 };
+
+
+// **`a >> b` is the sandwich**: the versor, the thing, and the versor reversed.
+// It is written in terms of the products already here rather than unrolled
+// again, because that is all it is. Two things it adds:
+//
+// **The sign.** Superconjugation is `a b ~a` where either side is even, and
+// `-a b ~a` where both are odd. Without it an odd versor acting on an odd thing
+// hands back the negative of what was meant, which is a bug nobody sees coming.
+//
+// **The type: a sandwich gives back what it was given.** A versor acting on a
+// thing preserves its grade -- that is what a versor *is* -- so `a >> b` is a
+// `b`. The triple product's own type is wider, because the type system works
+// from which grades a product *can* make and cancellation is not something it
+// can see: `Even >> Bi` could be a scalar, a bivector and a quadvector as far as
+// the grades go, and is a bivector for every versor anybody writes. So the
+// other grades are dropped. The price is that a *non*-versor on the left has
+// those parts taken off it quietly; the products are there to write out by hand
+// where that matters.
+void Generator::EmitSandwich(std::ostringstream& out, const Type& left,
+                             const Type& right) const {
+  const Grades middle = ResultOf(left.grades, right.grades, Product::Geometric);
+  if (middle == 0) return;   // every term of it vanishes: a degenerate metric can do that
+  const Grades full = ResultOf(middle, left.grades, Product::Geometric);
+  if (full == 0) return;
+  // Both halves have to be types that were written out, or there is nothing to
+  // call. Products are closed, so ordinarily they are.
+  if (middle != 1u && types_.count(middle) == 0) return;
+  if (full != 1u && types_.count(full) == 0) return;
+
+  const bool        flip = AllOdd(left.grades) && AllOdd(right.grades);
+  const std::string sign = flip ? "-" : "";
+  std::ostringstream body;
+  if (full == right.grades) {
+    // A struct has no unary minus in GLSL, so the negation is the algebra's own.
+    const bool number = (right.grades == 1u);
+    body << "  return " << (flip ? (number ? "-(" : "neg(") : "") << "gp(gp(a, b), rev(a))"
+         << (flip ? ")" : "") << ";\n";
+  } else {
+    const std::string fullName = (full == 1u) ? "float" : types_.at(full).name;
+    body << "  " << fullName << " m = gp(gp(a, b), rev(a));\n";
+    body << "  " << right.name << " r;\n";
+    for (int blade : right.blades) {
+      const bool there = (full & (1u << Grade(blade))) != 0;
+      body << "  r." << BladeName(sig_, blade) << " = ";
+      if (!there) {
+        body << Zero();
+      } else if (full == 1u) {
+        body << sign << "m";
+      } else {
+        body << sign << "m." << BladeName(sig_, blade);
+      }
+      body << ";\n";
+    }
+    body << "  return r;\n";
+  }
+  Define(out, right.name, "sw", left.name, right.name, body.str());
+}
+
+// **A value of a narrower type fits where a wider one is asked for.** A sum of
+// a scalar and a bivector is a `ScalarBi`, and putting one in an `Even` is not
+// a conversion in any real sense -- the grades it has are grades an `Even` has,
+// and the rest are nought. GLSL has no implicit conversion between structs and
+// no constructor to overload, so the widening is a function per type, and the
+// declaration is what calls it.
+//
+// Only *up*: a wider value put in a narrower one would be throwing grades away
+// silently, and losing part of an answer is not a thing to do quietly.
+void Generator::EmitWidening(std::ostringstream& out, const Type& type) const {
+  for (const auto& [grades, from] : types_) {
+    if ((grades & ~type.grades) != 0) continue;   // not a narrower type
+    std::ostringstream body;
+    if (grades == type.grades) {
+      body << "  return a;\n";
+    } else {
+      body << "  " << type.name << " r;\n";
+      for (int blade : type.blades) {
+        const bool mine = (from.grades & (1u << Grade(blade))) != 0;
+        body << "  r." << BladeName(sig_, blade) << " = " << (mine ? ("a." + BladeName(sig_, blade)) : Zero())
+             << ";\n";
+      }
+      body << "  return r;\n";
+    }
+    Define(out, type.name, "to" + type.name, from.name, "", body.str());
+  }
+  // And from a plain number, where the type has a scalar part for it to be.
+  if ((type.grades & 1u) == 0) return;
+  std::ostringstream body;
+  body << "  " << type.name << " r;\n";
+  for (int blade : type.blades) {
+    body << "  r." << BladeName(sig_, blade) << " = " << (blade == 0 ? "k" : Zero()) << ";\n";
+  }
+  body << "  return r;\n";
+  out << type.name << " to" << type.name << "(float k) {\n" << body.str() << "}\n\n";
+}
 
 void Generator::EmitStruct(std::ostringstream& out, const Type& type) const {
   out << "struct " << type.name << " {\n  float";
   for (std::size_t i = 0; i < type.blades.size(); ++i) {
     // GLSL has no default member initialisers, so nothing is written there and
     // every generated function fills in all of its components instead.
-    out << (i == 0 ? " " : ", ") << BladeName(type.blades[i]) << (cpp() ? " = 0.0f" : "");
+    out << (i == 0 ? " " : ", ") << BladeName(sig_, type.blades[i]);
   }
-  out << ";\n";
-  if (!cpp()) {
-    out << "};\n\n";
-    return;
-  }
-  out << "  " << type.name << "() = default;\n";
-  // Every component at once, in the order they are declared -- which is the
-  // constructor GLSL gives a struct for free, so one spelling makes a value in
-  // either language.
-  out << "  " << type.name << "(";
-  for (std::size_t i = 0; i < type.blades.size(); ++i) {
-    out << (i == 0 ? "" : ", ") << "float a" << i;
-  }
-  out << ")";
-  for (std::size_t i = 0; i < type.blades.size(); ++i) {
-    out << (i == 0 ? " : " : ", ") << BladeName(type.blades[i]) << "(a" << i << ")";
-  }
-  out << " {}\n";
-
-  // A float goes in as the scalar part, if there is one.
-  if ((type.grades & 1u) != 0) {
-    out << "  " << type.name << "(float value) : s(value) {}\n";
-  }
-  // And anything narrower goes in as itself. Not explicit: writing
-  // `Even m = b;` for a bivector b is exactly what one means.
-  for (const auto& [grades, other] : types_) {
-    if (grades == type.grades) continue;
-    if ((grades & ~type.grades) != 0) continue;
-    out << "  " << type.name << "(const " << other.name << "& v)";
-    for (std::size_t i = 0; i < other.blades.size(); ++i) {
-      out << (i == 0 ? " : " : ", ") << BladeName(other.blades[i]) << "(v."
-          << BladeName(other.blades[i]) << ")";
-    }
-    out << " {}\n";
-  }
-  out << "};\n\n";
+  out << ";\n};\n\n";
 }
 
 void Generator::EmitProduct(std::ostringstream& out, const Type& left, const Type& right,
@@ -412,13 +467,9 @@ void Generator::EmitProduct(std::ostringstream& out, const Type& left, const Typ
 
   if (resultName != "float" && types_.count(resultGrades) == 0) return;
 
-  // The body, written once. Which name it goes under is the only thing the two
-  // languages disagree about.
   std::ostringstream body;
   if (byComponent.empty()) {
-    // Every term of it vanishes -- a degenerate metric can do that. C++ warns
-    // about the operands going unused; GLSL has no cast to void to say so with.
-    if (cpp()) body << "  (void)a; (void)b;\n";
+    // Every term of it vanishes -- a degenerate metric can do that.
     body << "  return "
          << (resultName == "float" ? Zero() : (resultName + "(" + Fill(resultGrades) + ")"))
          << ";\n";
@@ -426,8 +477,8 @@ void Generator::EmitProduct(std::ostringstream& out, const Type& left, const Typ
     body << "  return";
     const auto& only = byComponent.begin()->second;
     for (std::size_t i = 0; i < only.size(); ++i) {
-      body << (only[i].sign < 0 ? " - " : (i == 0 ? " " : " + ")) << "a." << BladeName(only[i].left)
-           << " * b." << BladeName(only[i].right);
+      body << (only[i].sign < 0 ? " - " : (i == 0 ? " " : " + ")) << "a." << BladeName(sig_, only[i].left)
+           << " * b." << BladeName(sig_, only[i].right);
     }
     body << ";\n";
   } else {
@@ -437,14 +488,14 @@ void Generator::EmitProduct(std::ostringstream& out, const Type& left, const Typ
       if (found == byComponent.end()) {
         // GLSL has no default member initialisers, so every component of the
         // answer is written whether it has terms or not.
-        if (!cpp()) body << "  r." << BladeName(blade) << " = " << Zero() << ";\n";
+        body << "  r." << BladeName(sig_, blade) << " = " << Zero() << ";\n";
         continue;
       }
-      body << "  r." << BladeName(blade) << " =";
+      body << "  r." << BladeName(sig_, blade) << " =";
       const auto& list = found->second;
       for (std::size_t i = 0; i < list.size(); ++i) {
         body << (list[i].sign < 0 ? " - " : (i == 0 ? " " : " + ")) << "a."
-             << BladeName(list[i].left) << " * b." << BladeName(list[i].right);
+             << BladeName(sig_, list[i].left) << " * b." << BladeName(sig_, list[i].right);
       }
       body << ";\n";
     }
@@ -452,11 +503,6 @@ void Generator::EmitProduct(std::ostringstream& out, const Type& left, const Typ
   }
 
   Define(out, resultName, std::string(FunctionOf(product)), left.name, right.name, body.str());
-  if (cpp()) {
-    out << "inline " << resultName << " operator" << OperatorOf(product) << "(const "
-        << left.name << "& a, const " << right.name << "& b) { return " << FunctionOf(product)
-        << "(a, b); }\n\n";
-  }
 }
 
 void Generator::EmitSum(std::ostringstream& out, const Type& left, const Type& right,
@@ -469,13 +515,13 @@ void Generator::EmitSum(std::ostringstream& out, const Type& left, const Type& r
   for (int blade : BladesOf(GradesOfName(resultName, sig_), sig_)) {
     const bool inLeft = (left.grades & (1u << Grade(blade))) != 0;
     const bool inRight = (right.grades & (1u << Grade(blade))) != 0;
-    body << "  r." << BladeName(blade) << " = ";
+    body << "  r." << BladeName(sig_, blade) << " = ";
     if (inLeft && inRight) {
-      body << "a." << BladeName(blade) << (add ? " + b." : " - b.") << BladeName(blade);
+      body << "a." << BladeName(sig_, blade) << (add ? " + b." : " - b.") << BladeName(sig_, blade);
     } else if (inLeft) {
-      body << "a." << BladeName(blade);
+      body << "a." << BladeName(sig_, blade);
     } else if (inRight) {
-      body << (add ? "b." : "-b.") << BladeName(blade);
+      body << (add ? "b." : "-b.") << BladeName(sig_, blade);
     } else {
       body << Zero();   // only reached when the sum had to widen
     }
@@ -484,11 +530,6 @@ void Generator::EmitSum(std::ostringstream& out, const Type& left, const Type& r
   body << "  return r;\n";
 
   Define(out, resultName, add ? "add" : "sub", left.name, right.name, body.str());
-  if (cpp()) {
-    out << "inline " << resultName << " operator" << (add ? "+" : "-") << "(const " << left.name
-        << "& a, const " << right.name << "& b) { return " << (add ? "add" : "sub")
-        << "(a, b); }\n\n";
-  }
 }
 
 void Generator::EmitUnary(std::ostringstream& out, const Type& type) const {
@@ -497,14 +538,10 @@ void Generator::EmitUnary(std::ostringstream& out, const Type& type) const {
     std::ostringstream body;
     body << "  " << type.name << " r;\n";
     for (int blade : type.blades) {
-      body << "  r." << BladeName(blade) << " = -a." << BladeName(blade) << ";\n";
+      body << "  r." << BladeName(sig_, blade) << " = -a." << BladeName(sig_, blade) << ";\n";
     }
     body << "  return r;\n";
     Define(out, type.name, "neg", type.name, "", body.str());
-    if (cpp()) {
-      out << "inline " << type.name << " operator-(const " << type.name
-          << "& a) { return neg(a); }\n\n";
-    }
   }
 
   // Reverse.
@@ -512,15 +549,11 @@ void Generator::EmitUnary(std::ostringstream& out, const Type& type) const {
     std::ostringstream body;
     body << "  " << type.name << " r;\n";
     for (int blade : type.blades) {
-      body << "  r." << BladeName(blade) << " = " << (ReverseSign(Grade(blade)) < 0 ? "-" : "")
-           << "a." << BladeName(blade) << ";\n";
+      body << "  r." << BladeName(sig_, blade) << " = " << (ReverseSign(Grade(blade)) < 0 ? "-" : "")
+           << "a." << BladeName(sig_, blade) << ";\n";
     }
     body << "  return r;\n";
     Define(out, type.name, "rev", type.name, "", body.str());
-    if (cpp()) {
-      out << "inline " << type.name << " operator~(const " << type.name
-          << "& a) { return rev(a); }\n\n";
-    }
   }
 
   // Dual. The complement, so it survives a pseudoscalar that squares to zero.
@@ -536,22 +569,18 @@ void Generator::EmitUnary(std::ostringstream& out, const Type& type) const {
       int sign = 0;
       const int from = type.blades.empty() ? 0 : type.blades.front();
       DualOf(sig_, from, &sign);
-      body << "  return " << (sign < 0 ? "-" : "") << "a." << BladeName(from) << ";\n";
+      body << "  return " << (sign < 0 ? "-" : "") << "a." << BladeName(sig_, from) << ";\n";
     } else {
       body << "  " << dualName << " r;\n";
       for (int blade : type.blades) {
         int       sign = 0;
         const int target = DualOf(sig_, blade, &sign);
-        body << "  r." << BladeName(target) << " = " << (sign < 0 ? "-" : "") << "a."
-             << BladeName(blade) << ";\n";
+        body << "  r." << BladeName(sig_, target) << " = " << (sign < 0 ? "-" : "") << "a."
+             << BladeName(sig_, blade) << ";\n";
       }
       body << "  return r;\n";
     }
     Define(out, dualName, "dual", type.name, "", body.str());
-    if (cpp()) {
-      out << "inline " << dualName << " operator!(const " << type.name
-          << "& a) { return dual(a); }\n\n";
-    }
   }
 }
 
@@ -576,7 +605,7 @@ void Generator::EmitGrades(std::ostringstream& out, const Type& type) const {
     } else {
       body << "  " << resultName << " r;\n";
       for (int blade : BladesOf(one, sig_)) {
-        body << "  r." << BladeName(blade) << " = a." << BladeName(blade) << ";\n";
+        body << "  r." << BladeName(sig_, blade) << " = a." << BladeName(sig_, blade) << ";\n";
       }
       body << "  return r;\n";
     }
@@ -585,21 +614,13 @@ void Generator::EmitGrades(std::ostringstream& out, const Type& type) const {
 }
 
 void Generator::EmitScalar(std::ostringstream& out, const Type& type) const {
-  // A number on one side. In C++ these are operators; in both languages they
-  // are the same named functions, so a box written in the function form runs
-  // either way.
-  const std::string self = cpp() ? ("const " + type.name + "& a") : (type.name + " a");
+  // A number on one side.
+  const std::string self = type.name + " a";
   const auto define = [&](const std::string& ret, const std::string& name, bool numberFirst,
                           const std::string& body) {
-    out << Inline() << ret << " " << name << "("
+    out << ret << " " << name << "("
         << (numberFirst ? ("float k, " + self) : (self + ", float k")) << ") {\n"
         << body << "}\n\n";
-  };
-  const auto op = [&](const char* symbol, const char* name, bool numberFirst) {
-    if (!cpp()) return;
-    out << "inline " << type.name << " operator" << symbol << "("
-        << (numberFirst ? ("float k, " + self) : (self + ", float k")) << ") { return " << name
-        << "(" << (numberFirst ? "k, a" : "a, k") << "); }\n\n";
   };
 
   // Scaling. The geometric, inner and outer products with a number are all the
@@ -607,28 +628,21 @@ void Generator::EmitScalar(std::ostringstream& out, const Type& type) const {
   std::ostringstream scale;
   scale << "  " << type.name << " r;\n";
   for (int blade : type.blades) {
-    scale << "  r." << BladeName(blade) << " = a." << BladeName(blade) << " * k;\n";
+    scale << "  r." << BladeName(sig_, blade) << " = a." << BladeName(sig_, blade) << " * k;\n";
   }
   scale << "  return r;\n";
   for (const char* name : {"gp", "ip", "op"}) {
     define(type.name, name, false, scale.str());
     define(type.name, name, true, scale.str());
   }
-  op("*", "gp", false);
-  op("*", "gp", true);
-  op("|", "ip", false);
-  op("|", "ip", true);
-  op("^", "op", false);
-  op("^", "op", true);
 
   std::ostringstream divide;
   divide << "  " << type.name << " r;\n";
   for (int blade : type.blades) {
-    divide << "  r." << BladeName(blade) << " = a." << BladeName(blade) << " / k;\n";
+    divide << "  r." << BladeName(sig_, blade) << " = a." << BladeName(sig_, blade) << " / k;\n";
   }
   divide << "  return r;\n";
   define(type.name, "div", false, divide.str());
-  op("/", "div", false);
 
   // Adding a number reaches the scalar part, so the result has one. Written as
   // an exact match rather than left to conversions: two types that both accept
@@ -642,14 +656,14 @@ void Generator::EmitScalar(std::ostringstream& out, const Type& type) const {
       body << "  " << sumName << " r;\n";
       for (int blade : BladesOf(sumGrades, sig_)) {
         const bool mine = (type.grades & (1u << Grade(blade))) != 0;
-        body << "  r." << BladeName(blade) << " = ";
+        body << "  r." << BladeName(sig_, blade) << " = ";
         if (blade == 0 && mine) {
           body << (side == 0 ? "k " : "a.s ") << (minus ? "- " : "+ ")
                << (side == 0 ? "a.s" : "k");
         } else if (blade == 0) {
           body << (side == 0 ? "k" : (minus ? "-k" : "k"));
         } else if (mine) {
-          body << ((minus && side == 0) ? "-a." : "a.") << BladeName(blade);
+          body << ((minus && side == 0) ? "-a." : "a.") << BladeName(sig_, blade);
         } else {
           body << Zero();
         }
@@ -657,11 +671,6 @@ void Generator::EmitScalar(std::ostringstream& out, const Type& type) const {
       }
       body << "  return r;\n";
       define(sumName, minus ? "sub" : "add", side == 0, body.str());
-      if (cpp()) {
-        out << "inline " << sumName << " operator" << (minus ? "-" : "+") << "("
-            << (side == 0 ? ("float k, " + self) : (self + ", float k")) << ") { return "
-            << (minus ? "sub" : "add") << "(" << (side == 0 ? "k, a" : "a, k") << "); }\n\n";
-      }
     }
   }
 }
@@ -672,12 +681,8 @@ std::string Generator::Emit() const {
       << "), written out by the app. Every type here is a set of grades, and\n"
       << "// every product between them is exact.\n\n";
 
-  // C++ wants them named before the functions that mention them; GLSL has no
-  // forward declaration of a struct, and does not need one.
-  if (cpp()) {
-    for (const auto& [grades, type] : types_) out << "struct " << type.name << ";\n";
-    out << "\n";
-  }
+  // GLSL has no forward declaration of a struct, and needs none here: every
+  // member is a float, so no struct mentions another.
   for (const auto& [grades, type] : types_) EmitStruct(out, type);
 
   for (const auto& [grades, type] : types_) {
@@ -697,19 +702,21 @@ std::string Generator::Emit() const {
     }
   }
 
+  // The sandwich, and the widenings, last: both are written in terms of the
+  // products above.
+  for (const auto& [leftGrades, left] : types_) {
+    for (const auto& [rightGrades, right] : types_) EmitSandwich(out, left, right);
+  }
+  for (const auto& [grades, type] : types_) EmitWidening(out, type);
+
   // The basis, so that a value can be written rather than assembled.
   out << "// The basis, so a value can be written out rather than assembled.\n";
   for (int blade = 1; blade < sig_.blades(); ++blade) {
     const Grades      grades = 1u << Grade(blade);
     const std::string name = NameOfGrades(grades, sig_);
     if (types_.count(grades) == 0) continue;
-    if (cpp()) {
-      out << "inline const " << name << " " << BladeName(blade) << " = [] { " << name
-          << " v; v." << BladeName(blade) << " = 1.0f; return v; }();\n";
-      continue;
-    }
     // GLSL wants a constant expression, which a struct's own constructor is.
-    out << "const " << name << " " << BladeName(blade) << " = " << name << "(";
+    out << "const " << name << " " << BladeName(sig_, blade) << " = " << name << "(";
     const std::vector<int> blades = BladesOf(grades, sig_);
     for (std::size_t i = 0; i < blades.size(); ++i) {
       out << (i == 0 ? "" : ", ") << (blades[i] == blade ? One() : Zero());
@@ -768,9 +775,12 @@ bool ParseAlgebra(std::string_view line, Signature* out) {
   if (line.compare(at, 3, "Cl(") != 0) return false;
   at += 3;
 
+  // The number of null generators may be left off: Cl(2,2) is Cl(2,2,0), the
+  // way the algebra is written when it has none.
   int values[3] = {0, 0, 0};
   for (int i = 0; i < 3; ++i) {
     while (at < line.size() && (line[at] == ' ' || line[at] == ',')) ++at;
+    if (i == 2 && at < line.size() && line[at] == ')') break;
     if (at >= line.size() || std::isdigit(static_cast<unsigned char>(line[at])) == 0) return false;
     int value = 0;
     while (at < line.size() && std::isdigit(static_cast<unsigned char>(line[at])) != 0) {
@@ -806,14 +816,7 @@ std::vector<std::string> TypesMentioned(std::string_view source, const Signature
 }
 
 std::string GlslPrologue(const Signature& sig, const std::vector<std::string>& wanted) {
-  Generator generator(sig, Target::Glsl);
-  for (const std::string& name : DefaultTypes()) generator.Want(GradesOfName(name, sig));
-  for (const std::string& name : wanted) generator.Want(GradesOfName(name, sig));
-  return generator.Emit();
-}
-
-std::string Prologue(const Signature& sig, const std::vector<std::string>& wanted) {
-  Generator generator(sig, Target::Cpp);
+  Generator generator(sig);
   for (const std::string& name : DefaultTypes()) generator.Want(GradesOfName(name, sig));
   for (const std::string& name : wanted) generator.Want(GradesOfName(name, sig));
   return generator.Emit();
@@ -827,7 +830,13 @@ namespace {
 // them nowhere to go.
 std::string AlgebraName(const Signature& sig) {
   char signature[64];
-  std::snprintf(signature, sizeof(signature), "%d,%d,%d", sig.p, sig.q, sig.r);
+  // Written the way it is spoken: with no null generators there is no third
+  // number to say, so Cl(2,2) and Cl(2,2,0) are both Cl_{2,2}.
+  if (sig.r == 0) {
+    std::snprintf(signature, sizeof(signature), "%d,%d", sig.p, sig.q);
+  } else {
+    std::snprintf(signature, sizeof(signature), "%d,%d,%d", sig.p, sig.q, sig.r);
+  }
   return std::string("\\mathcal{C}\\ell_{") + signature + "}";
 }
 
@@ -873,7 +882,7 @@ std::vector<std::string> MemberNames(std::string_view type, const Signature& sig
   const Grades grades = GradesOfName(type, sig);
   if (grades == 0) return {};
   std::vector<std::string> out;
-  for (int blade : BladesOf(grades, sig)) out.push_back(BladeName(blade));
+  for (int blade : BladesOf(grades, sig)) out.push_back(BladeName(sig, blade));
   return out;
 }
 
@@ -890,9 +899,8 @@ std::string ExampleValue(std::string_view type, std::string_view name, const Sig
   std::vector<int> blades = BladesOf(grades, sig);
   if (blades.empty()) return "0.0";
 
-  // Written as the constructor every component at once, because that is the
-  // one spelling both languages accept: C++ is given such a constructor and
-  // GLSL gives a struct one for free.
+  // Written as the constructor that takes every component at once, which GLSL
+  // gives a struct for free.
   std::string out(type);
   out += "(";
   for (std::size_t i = 0; i < blades.size(); ++i) {

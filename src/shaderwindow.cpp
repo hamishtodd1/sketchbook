@@ -98,6 +98,11 @@ Rectangle ShaderPanel::DockedBounds(const CodeBlock* block, const Viewport& view
 
 
 // ------------------------------------------------------------------ selection
+void ShaderPanel::Rects(const Viewport& viewport, FontStore& fonts,
+                        std::vector<Rectangle>* out) const {
+  AppendRects(views_, out, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
+}
+
 void ShaderPanel::SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                                FontStore& fonts) {
   SelectCaught(views_, lasso, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
@@ -140,8 +145,16 @@ void ShaderPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
     // pointing at a value.
     if (!CheckCollisionPointRec(pointer, RectFor(i, viewport, fonts))) continue;
     // The one window whose wire really does leave the pointer, because here the
-    // pointer *is* the value: it is the point the shader is being read at.
-    out->push_back({views_[i].block, mathprogram::kShaderInput, pointer});
+    // pointer *is* the value: it is the point the function is being asked at.
+    const int which = views_[i].block->FlatPictureFunction();
+    const std::vector<mathprogram::Function>& functions = views_[i].block->Functions();
+    if (which < 0 || which >= static_cast<int>(functions.size())) return;
+    const mathprogram::Function& fn = functions[static_cast<std::size_t>(which)];
+    if (fn.parameter.empty()) return;
+    ActiveValue value{views_[i].block, fn.parameter, pointer};
+    value.firstLine = fn.firstLine;
+    value.lastLine = fn.lastLine;
+    out->push_back(value);
     return;
   }
 }
@@ -211,15 +224,6 @@ void ShaderPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     if (carried && OverDropTarget(pointer)) continue;
 
     const Rectangle rect = RectFor(i, viewport, fonts);
-
-    // Inside a fragment shader a variable is a field, not a number, so reading
-    // one back needs a point chosen first. Pointing at the picture chooses it;
-    // otherwise it is read at the middle.
-    Vector2 probe = {0.5f, 0.5f};
-    if (const Vector2 aim = hover::Pointer(); CheckCollisionPointRec(aim, rect)) {
-      probe = {(aim.x - rect.x) / rect.width, (aim.y - rect.y) / rect.height};
-    }
-    view.block->SetProbePoint(probe);
 
     view.block->DrawPictureInto(rect, view.centre, view.span);
     DrawRectangleLinesEx(rect, std::max(1.0f, 1.0f * zoom), Fade(kCodeFg, 0.25f));

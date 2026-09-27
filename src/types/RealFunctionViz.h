@@ -112,6 +112,8 @@ class PlotPanel {
   // are the shared ones in selection.h; what differs is what closing one means.
   void SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                     FontStore& fonts);
+  // Where each of its windows is on screen.
+  void Rects(const Viewport& viewport, FontStore& fonts, std::vector<Rectangle>* out) const;
   void ClearSelection();
   bool AnySelected() const;
   bool SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const;

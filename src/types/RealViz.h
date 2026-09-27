@@ -175,6 +175,8 @@ class AxisPanel {
   // are the shared ones in selection.h; what differs is what closing one means.
   void SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                     FontStore& fonts);
+  // Where each of its windows is on screen.
+  void Rects(const Viewport& viewport, FontStore& fonts, std::vector<Rectangle>* out) const;
   void ClearSelection();
   bool AnySelected() const;
   bool SelectedRimAt(Vector2 point, const Viewport& viewport, FontStore& fonts) const;
@@ -224,6 +226,16 @@ class AxisPanel {
   // is -- it just cannot be moved.
   const AxisRef* MarkerNear(std::size_t index, Vector2 pointer, const Viewport& viewport,
                             FontStore& fonts) const;
+  // **The play button** under a free marker. It shows while the pointer is on
+  // that marker -- and so on the button itself, which is straight below it --
+  // and, for a knob already playing, anywhere on its row, standing under the
+  // middle of the swing: a marker that is moving is not one you can be expected
+  // to chase. False if it is not showing.
+  bool PlayButton(std::size_t index, const AxisRef& ref, Vector2 pointer, const Viewport& viewport,
+                  FontStore& fonts, Vector2* centre, float* radius) const;
+  // The ref whose play button the pointer is on, if any.
+  const AxisRef* PlayButtonAt(std::size_t index, Vector2 pointer, const Viewport& viewport,
+                              FontStore& fonts) const;
   // Which row is offering to take a value, or kNoRow. The rim carries the row
   // and a marker is a value that already exists, so only the bare axis offers.
   static constexpr std::size_t kNoRow = static_cast<std::size_t>(-1);

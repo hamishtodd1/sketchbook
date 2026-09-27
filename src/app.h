@@ -29,6 +29,12 @@ class App {
 
   // Opens a canvas file at startup, e.g. from the command line.
   bool OpenCanvas(const std::string& path);
+  // Auto-save is off for a capture -- a run that takes a screenshot and quits --
+  // since whatever reaches its window by accident is not somebody's work to keep.
+  void SetAutosave(bool on) { autosaveOn_ = on; }
+  // Fills the monitor the window is on, without a title bar, or puts the window
+  // back as it was.
+  void SetFullscreen(bool on);
 
   void Update();
   void Draw();
@@ -86,9 +92,6 @@ class App {
   // holding the window while another drags the viz; once it leaves the window
   // it is a window of its own, being carried. Returns true while it owns input.
   bool HandlePull();
-  // Fills the monitor the window is on, without a title bar, or puts the window
-  // back as it was.
-  void SetFullscreen(bool on);
   // Feeding every function that is being read, from whatever the canvas says a
   // spread of its input type looks like.
   void FeedFunctions();
@@ -120,6 +123,9 @@ class App {
   // Selects every window whose middle is inside a world rectangle, by handing
   // the rectangle to the lasso's own machinery.
   void SelectWithinWorld(Rectangle worldRect);
+  // Glides the camera so that every window whose middle is on screen is framed,
+  // centred and filling the view. The Home key.
+  void FrameOnScreen();
 
   // --- selection ----------------------------------------------------------
   //
@@ -135,7 +141,57 @@ class App {
   void PasteClipboard();
 
   bool SaveCanvas(const std::string& path);
+  // A blank canvas, after the one being left has been written down. It has no
+  // file until something is put on it, and then it gets an untitled one.
+  void NewCanvas();
   bool LoadCanvas(const std::string& path);
+  // The canvas as text, and back. Saving and loading are these plus a file; an
+  // undo step is these plus a string. `withView` is false for a snapshot, since
+  // where you are looking is not something an undo should move; `restoring` keeps
+  // the camera, reuses every box whose text has not changed -- so undoing a move
+  // does not rebuild every shader on the canvas -- and leaves positions exactly
+  // as written rather than snapping them again at today's zoom.
+  void WriteCanvas(std::ostream& out, const std::string& path, bool withView);
+  bool ReadCanvas(std::istream& in, const std::string& path, bool restoring);
+
+  // --- canvas undo ----------------------------------------------------------
+  //
+  // **An undo step is the whole canvas, as the text it would be saved as.** Not
+  // a list of operations each with an inverse: there are dozens of things that
+  // change a canvas -- carrying, merging, closing, pulling out, resizing, typing
+  // a box, throwing a slide away -- and every one of them would need its inverse
+  // written and kept right. The canvas file already says everything that
+  // matters, so a step is a snapshot of it and undoing is loading it back.
+  //
+  // A snapshot is taken once things have settled after something you did, so a
+  // drag is one step and a run of wheel clicks is one step, and a box being
+  // written in is one step when the caret leaves it (inside a box, Ctrl+Z is
+  // still the box's own). A change nobody made -- a compile finishing, an axis
+  // framing itself -- is folded into the current state rather than becoming a
+  // step you would have to undo past.
+  // --- auto-save ------------------------------------------------------------
+  //
+  // **The canvas saves itself.** Whenever an undo step is taken -- which is to
+  // say, whenever something you did has settled -- and every few seconds while a
+  // box is being written in, the canvas is written back to the file it came
+  // from. A canvas that never came from a file is given one, among the user's
+  // settings, and it appears in the recent list: nothing made here is ever only
+  // in memory. Ctrl+S on one of those still asks for a name, and the untitled
+  // file goes once there is a real one.
+  //
+  // Opening a canvas is not a change, so merely looking at one never rewrites
+  // it. And a save is written beside the file and moved over it, so a crash in
+  // the middle of one cannot leave half a canvas behind.
+  void ScheduleAutosave() { autosaveDue_ = GetTime() + 0.5; }
+  void TrackAutosave(bool held);
+  void FlushAutosave();
+  bool WriteCanvasFile(const std::string& path);
+
+  void ResetUndo();
+  void TrackUndo(bool held);
+  void CommitUndo();
+  void StepUndo(bool redo);
+  std::string Snapshot();
 
   FontStore                               fonts_;
   Viewport                                viewport_;
@@ -168,6 +224,20 @@ class App {
 
   // Where this canvas came from, so Ctrl+S can save straight back to it.
   std::string currentPath_;
+
+  std::vector<std::string> undo_;
+  std::vector<std::string> redo_;
+  std::string              undoBase_;          // the canvas as of the last step
+  bool                     undoPending_ = false;   // something was done since
+  double                   undoLastInput_ = 0.0;
+  double                   undoNextCheck_ = 0.0;
+
+  std::string              savedSnapshot_;     // the canvas as it was last written
+  double                   autosaveDue_ = 0.0; // 0 when nothing is waiting
+  double                   typingSavedAt_ = 0.0;
+  bool                     untitled_ = false;  // currentPath_ is one we made up
+  bool                     autosaveOn_ = true;
+  bool                     wasPlaying_ = false;   // so a swing stopping can be saved
 
   CodeBlock* focus_ = nullptr;
   CodeBlock* dragBlock_ = nullptr;

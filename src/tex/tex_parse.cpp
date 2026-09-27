@@ -391,6 +391,9 @@ class Parser {
       node->kind = NodeKind::Accent;
       node->codepoint = acc->codepoint;
       node->face = acc->face;
+      // \widehat has the same ladder in the same fonts and would take the same
+      // path, but nothing writes one yet and it has not been looked at.
+      node->wide = (name == "widetilde");
       node->kids.push_back(ParseArgument());
       return node;
     }

@@ -67,6 +67,17 @@ struct Glyph {
 struct GlyphOutline {
   int advance = 0;
   int xMin = 0, yMin = 0, xMax = 0, yMax = 0;
+  int glyph = 0;   // its index in the font, for reading the outline itself
+};
+
+// The stroke a wide accent is drawn with, read off the glyph's outline: where the
+// middle of the stroke is and how thick it is, at evenly spaced points across it.
+// A stroke is what can be drawn *longer* than the glyph without being a
+// distortion of it -- the same pen, travelling further.
+struct StrokeProfile {
+  float              width = 0.0f;   // em, across the outline
+  std::vector<float> centre;         // em, up from the baseline
+  std::vector<float> thickness;      // em, measured straight up
 };
 
 // Font-wide metrics, in em units, read from the TTF itself.
@@ -106,6 +117,10 @@ class FontStore {
   // Advance width only -- skips the atlas blit bookkeeping when measuring.
   float Advance(Face face, int codepoint, float emPx);
 
+  // The stroke of a glyph that is one stroke -- a tilde, a hat -- or null if the
+  // face has no simple outline for it. Worked out once and kept.
+  const StrokeProfile* Stroke(Face face, int codepoint);
+
  private:
   // One rasterised atlas: a face pinned to a single em pixel size.
   struct Sized {
@@ -133,6 +148,7 @@ class FontStore {
   FaceData                                     faces_[kFaceCount];
   FaceMetrics                                  metrics_[kFaceCount];
   std::unordered_map<std::uint64_t, Sized>     cache_;  // key: face<<32 | rung
+  std::unordered_map<std::uint64_t, StrokeProfile> strokes_;  // key: face<<32 | codepoint
   std::uint64_t                                clock_ = 0;
   // The clock at the top of this frame. An atlas touched since then is in use
   // by something already drawn or about to be, so it cannot be thrown away.

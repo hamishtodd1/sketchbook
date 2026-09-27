@@ -799,6 +799,11 @@ void SpacePanel::Draw(const Viewport& viewport, FontStore& fonts) {
 }
 
 // ------------------------------------------------------------------ selection
+void SpacePanel::Rects(const Viewport& viewport, FontStore& fonts,
+                       std::vector<Rectangle>* out) const {
+  AppendRects(windows_, out, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
+}
+
 void SpacePanel::SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                               FontStore& fonts) {
   if (lasso.size() < 3) return;

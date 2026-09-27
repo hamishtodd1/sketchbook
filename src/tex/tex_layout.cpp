@@ -118,6 +118,60 @@ float AtomSpace(Atom left, Atom right, const Ctx& cx) {
   return static_cast<float>(amount + 2) * mu;  // 3mu, 4mu, 5mu
 }
 
+// ---------------------------------------------------------------- wide accents
+// A wide accent drawn `widthEm` across: the top and bottom edge of its stroke at
+// each sample, in em, measured up from the lowest point of the stroke.
+//
+// **The same pen, travelling further.** Stretching the glyph sideways -- what
+// every other typesetter does past its widest drawing -- thins the stroke on its
+// slopes and leaves the ends blunt and heavy. So the stroke is kept instead:
+// wherever it goes, it is as thick across as the glyph's was at that point,
+// however much longer the wave now is. And past the widest drawing the wave grows
+// taller as well, a little, so that a long one still reads as a wave rather than
+// as a line with a kink in it.
+struct StrokeEdges {
+  std::vector<float> x, top, bottom;
+  float              height = 0.0f;
+};
+
+StrokeEdges WideStroke(const StrokeProfile& profile, float widthEm, float growth) {
+  StrokeEdges out;
+  const std::size_t n = profile.centre.size();
+  if (n < 2 || profile.width <= 0.0f || widthEm <= 0.0f) return out;
+
+  float mean = 0.0f;
+  for (float c : profile.centre) mean += c;
+  mean /= static_cast<float>(n);
+
+  out.x.resize(n);
+  out.top.resize(n);
+  out.bottom.resize(n);
+  float lowest = 1e9f;
+  const float step = 1.0f / static_cast<float>(n - 1);
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::size_t j0 = (i == 0) ? 0 : i - 1;
+    const std::size_t j1 = (i + 1 == n) ? i : i + 1;
+    const float du = step * static_cast<float>(j1 - j0);
+    const float rise = profile.centre[j1] - profile.centre[j0];
+    const float before = rise / (du * profile.width);            // the glyph's slope here
+    const float after = rise * growth / (du * widthEm);          // and the new one
+    // Thickness across the stroke, kept; thickness straight up, recomputed.
+    const float across = profile.thickness[i] / std::sqrt(1.0f + before * before);
+    const float upright = across * std::sqrt(1.0f + after * after);
+    const float centre = mean + (profile.centre[i] - mean) * growth;
+    out.x[i] = static_cast<float>(i) * step * widthEm;
+    out.top[i] = centre + upright * 0.5f;
+    out.bottom[i] = centre - upright * 0.5f;
+    lowest = std::min(lowest, out.bottom[i]);
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    out.top[i] -= lowest;
+    out.bottom[i] -= lowest;
+    out.height = std::max(out.height, out.top[i]);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------- primitives
 Box LayoutNode(const Node& node, Ctx cx);
 Box LayoutNodeInner(const Node& node, Ctx cx);
@@ -681,6 +735,49 @@ Box LayoutNodeInner(const Node& node, Ctx cx) {
       out.height = base.height;
       out.depth = base.depth;
 
+      // **A wide accent spans what it is over.** The fonts carry TeX's ladder of
+      // drawings of it, each wider than the last -- the text accent, then Size1
+      // to Size4, then the AMS one -- and the drawing nearest the width wanted is
+      // the one whose stroke is used, redrawn to exactly that width.
+      if (node.wide && base.width > 0.0f) {
+        static const Face kLadder[] = {Face::MainRegular, Face::Size1, Face::Size2,
+                                       Face::Size3,       Face::Size4, Face::AMS};
+        const StrokeProfile* chosen = nullptr;
+        const StrokeProfile* widest = nullptr;
+        Face  chosenFace = Face::MainRegular;
+        float miss = 1e9f;
+        for (Face face : kLadder) {
+          const StrokeProfile* profile = cx.fonts->Stroke(face, node.codepoint);
+          if (profile == nullptr) continue;
+          widest = profile;
+          const float off = std::abs(std::log(base.width / (profile->width * em)));
+          if (off < miss) {
+            miss = off;
+            chosen = profile;
+            chosenFace = face;
+          }
+        }
+        if (chosen != nullptr) {
+          float growth = 1.0f;
+          if (chosen == widest && base.width > widest->width * em) {
+            growth = std::min(1.8f, std::pow(base.width / (widest->width * em), 0.35f));
+          }
+          const StrokeEdges edges = WideStroke(*chosen, base.width / em, growth);
+          const float inkBottom = std::max(base.height, cx.xheight()) + 0.04f * em;
+          const float tall = edges.height * em;
+          Item it;
+          it.kind = Item::Kind::Stroke;
+          it.face = chosenFace;
+          it.codepoint = node.codepoint;
+          it.emPx = em;
+          it.thickness = growth;
+          it.rect = {0.0f, -(inkBottom + tall), base.width, tall};
+          out.items.push_back(it);
+          out.height = std::max(out.height, inkBottom + tall);
+          return out;
+        }
+      }
+
       // Work from the raw glyph: an accent sits entirely above the baseline, so
       // its Box depth is 0 and the ink extent cannot be recovered from the box.
       const Glyph g = cx.fonts->GetGlyph(node.face, node.codepoint, em);
@@ -817,6 +914,33 @@ void DrawLayout(const Layout& layout, FontStore& fonts, Vector2 origin, Color ti
       case Item::Kind::Line: {
         DrawLineEx({origin.x + it.p0.x, origin.y + it.p0.y},
                    {origin.x + it.p1.x, origin.y + it.p1.y}, it.thickness, tint);
+        break;
+      }
+      case Item::Kind::Stroke: {
+        const StrokeProfile* profile = fonts.Stroke(it.face, it.codepoint);
+        if (profile == nullptr || it.emPx <= 0.0f) break;
+        const StrokeEdges edges = WideStroke(*profile, it.rect.width / it.emPx, it.thickness);
+        // Geometry rather than a bitmap, so it is as sharp stretched as not: the
+        // window's multisampling smooths its edges like any other shape.
+        const float left = origin.x + it.rect.x;
+        const float base = origin.y + it.rect.y + it.rect.height;
+        const auto corner = [&](std::size_t i, bool upper) {
+          return Vector2{left + edges.x[i] * it.emPx,
+                         base - (upper ? edges.top[i] : edges.bottom[i]) * it.emPx};
+        };
+        // raylib wants each triangle wound one way; which way these come out
+        // depends on the shape, so each is put right rather than assumed.
+        const auto triangle = [&tint](Vector2 a, Vector2 b, Vector2 c) {
+          const float cross = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+          if (cross > 0.0f) std::swap(b, c);
+          DrawTriangle(a, b, c, tint);
+        };
+        for (std::size_t i = 0; i + 1 < edges.x.size(); ++i) {
+          const Vector2 a = corner(i, true), b = corner(i, false);
+          const Vector2 c = corner(i + 1, true), d = corner(i + 1, false);
+          triangle(a, b, d);
+          triangle(a, d, c);
+        }
         break;
       }
     }

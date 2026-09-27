@@ -105,6 +105,8 @@ class MediaPanel {
 
   // --- selection -----------------------------------------------------------
   void SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport);
+  // Where each of its windows is on screen.
+  void Rects(const Viewport& viewport, std::vector<Rectangle>* out) const;
   void ClearSelection();
   bool AnySelected() const;
   bool SelectedRimAt(Vector2 point, const Viewport& viewport) const;

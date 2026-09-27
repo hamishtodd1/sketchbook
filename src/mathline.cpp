@@ -16,9 +16,11 @@ namespace {
 enum class Tok {
   End, Number, Ident, Plus, Minus, Star, Slash, LParen, RParen,
   LBracket, RBracket, LBrace, RBrace, Comma, Assign, Semi, Amp, Dot,
-  // The geometric algebra operators. They are ordinary C++ operators; a
-  // Clifford algebra is what gives them these meanings.
-  Bar, Caret, Tilde, Bang
+  // The geometric algebra operators. They are C's bitwise ones; a Clifford
+  // algebra is what gives them these meanings.
+  Bar, Caret, Tilde,
+  // `>>`, the sandwich: what a versor does to something.
+  Shift
 };
 
 struct Token {
@@ -58,7 +60,7 @@ std::vector<Token> Tokenize(std::string_view source, bool* ok) {
              (std::isdigit(static_cast<unsigned char>(source[i])) != 0 || source[i] == '.')) {
         ++i;
       }
-      // A trailing float suffix is C++ noise, not mathematics.
+      // A trailing float suffix is how code spells a float, not mathematics.
       if (i < source.size() && (source[i] == 'f' || source[i] == 'F')) ++i;
       std::string text(source.substr(start, i - start));
       if (!text.empty() && (text.back() == 'f' || text.back() == 'F')) text.pop_back();
@@ -73,6 +75,13 @@ std::vector<Token> Tokenize(std::string_view source, bool* ok) {
       continue;
     }
 
+    // `>>` is two characters, and the only one here that is.
+    if (c == '>' && i + 1 < source.size() && source[i + 1] == '>') {
+      tokens.push_back({Tok::Shift, ">>"});
+      i += 2;
+      continue;
+    }
+
     Tok kind = Tok::End;
     switch (c) {
       case '+': kind = Tok::Plus; break;
@@ -81,7 +90,6 @@ std::vector<Token> Tokenize(std::string_view source, bool* ok) {
       case '|': kind = Tok::Bar; break;
       case '^': kind = Tok::Caret; break;
       case '~': kind = Tok::Tilde; break;
-      case '!': kind = Tok::Bang; break;
       case '/': kind = Tok::Slash; break;
       case '(': kind = Tok::LParen; break;
       case ')': kind = Tok::RParen; break;
@@ -111,7 +119,9 @@ enum class NodeKind {
   // Inner, outer and regressive products, and the two unary ones. Written the
   // way a geometric algebra text writes them: a dot, a wedge, a vee, a tilde
   // over the thing and a star after it.
-  Inner, Outer, Regressive, Reverse, Dual
+  Inner, Outer, Regressive, Reverse,
+  // The sandwich, `a >> b`, which is written out as the sandwich it is.
+  Sandwich
 };
 
 struct Node;
@@ -130,16 +140,22 @@ int Precedence(NodeKind kind) {
     // Tighter than anything, including the unary operators: `-p.x` is the
     // negation of a component, never a component of a negation.
     case NodeKind::Member: return 7;
-    case NodeKind::Inner: return 1;
-    case NodeKind::Outer: return 2;
-    case NodeKind::Regressive: return 3;
+    // **The mathematician's precedence, not C's.** Every algebra operator binds
+    // tighter than + and -, so `a + b | c` is `a + (b | c)` -- which is what it
+    // reads as. This used to follow C, which puts the products *below* the
+    // sum, so the reading and the shader disagreed about what a line meant:
+    // `glslops`, which is what actually runs, had the mathematician's ordering
+    // first.
     case NodeKind::Add:
-    case NodeKind::Sub: return 4;
+    case NodeKind::Sub: return 1;
+    case NodeKind::Sandwich: return 2;
+    case NodeKind::Inner: return 3;
+    case NodeKind::Outer:
+    case NodeKind::Regressive: return 4;
     case NodeKind::Mul:
     case NodeKind::Div: return 5;
     case NodeKind::Neg:
-    case NodeKind::Reverse:
-    case NodeKind::Dual: return 6;
+    case NodeKind::Reverse: return 6;
     default: return 7;  // atoms
   }
 }
@@ -148,7 +164,7 @@ class Parser {
  public:
   explicit Parser(const std::vector<Token>& tokens) : tokens_(tokens) {}
 
-  NodePtr ParseExpression() { return ParseInner(); }
+  NodePtr ParseExpression() { return ParseSum(); }
   bool    ok() const { return ok_; }
   const Token& Peek() const { return tokens_[pos_]; }
   void    Advance() { if (tokens_[pos_].kind != Tok::End) ++pos_; }
@@ -159,10 +175,30 @@ class Parser {
   }
 
  private:
-  // C++ binds | looser than ^, ^ looser than &, and & looser than + -. That is
-  // why `a + b | c` means `(a + b) | c` and why the brackets are worth writing.
-  // Following C++ here rather than the convention of geometric algebra texts is
-  // the only honest choice: the compiler is what will actually run it.
+  // The loosest first: every algebra operator binds tighter than + and -, and
+  // the sandwich is looser than the products it is made of, so `R >> a * b` is
+  // the versor acting on the product. The same ordering `glslops` uses, since
+  // one of them decides what a line reads as and the other what it does.
+  NodePtr ParseSum() {
+    NodePtr node = ParseSandwich();
+    while (ok_ && (Peek().kind == Tok::Plus || Peek().kind == Tok::Minus)) {
+      const NodeKind kind = (Peek().kind == Tok::Plus) ? NodeKind::Add : NodeKind::Sub;
+      Advance();
+      NodePtr rhs = ParseSandwich();
+      node = Combine(kind, std::move(node), std::move(rhs));
+    }
+    return node;
+  }
+
+  NodePtr ParseSandwich() {
+    NodePtr node = ParseInner();
+    while (ok_ && Peek().kind == Tok::Shift) {
+      Advance();
+      node = Combine(NodeKind::Sandwich, std::move(node), ParseInner());
+    }
+    return node;
+  }
+
   NodePtr ParseInner() {
     NodePtr node = ParseOuter();
     while (ok_ && Peek().kind == Tok::Bar) {
@@ -172,31 +208,15 @@ class Parser {
     return node;
   }
 
+  // The wedge and the vee are one tier, taken left to right, which is what
+  // equal binding powers mean where the shader's rewrite is concerned.
   NodePtr ParseOuter() {
-    NodePtr node = ParseRegressive();
-    while (ok_ && Peek().kind == Tok::Caret) {
-      Advance();
-      node = Combine(NodeKind::Outer, std::move(node), ParseRegressive());
-    }
-    return node;
-  }
-
-  NodePtr ParseRegressive() {
-    NodePtr node = ParseSum();
-    while (ok_ && Peek().kind == Tok::Amp) {
-      Advance();
-      node = Combine(NodeKind::Regressive, std::move(node), ParseSum());
-    }
-    return node;
-  }
-
-  NodePtr ParseSum() {
     NodePtr node = ParseProduct();
-    while (ok_ && (Peek().kind == Tok::Plus || Peek().kind == Tok::Minus)) {
-      const NodeKind kind = (Peek().kind == Tok::Plus) ? NodeKind::Add : NodeKind::Sub;
+    while (ok_ && (Peek().kind == Tok::Caret || Peek().kind == Tok::Amp)) {
+      const NodeKind kind =
+          (Peek().kind == Tok::Caret) ? NodeKind::Outer : NodeKind::Regressive;
       Advance();
-      NodePtr rhs = ParseProduct();
-      node = Combine(kind, std::move(node), std::move(rhs));
+      node = Combine(kind, std::move(node), ParseProduct());
     }
     return node;
   }
@@ -213,11 +233,10 @@ class Parser {
   }
 
   NodePtr ParseUnary() {
-    if (Peek().kind == Tok::Tilde || Peek().kind == Tok::Bang) {
-      const NodeKind kind = (Peek().kind == Tok::Tilde) ? NodeKind::Reverse : NodeKind::Dual;
+    if (Peek().kind == Tok::Tilde) {
       Advance();
       auto node = std::make_unique<Node>();
-      node->kind = kind;
+      node->kind = NodeKind::Reverse;
       node->lhs = ParseUnary();
       return node;
     }
@@ -326,6 +345,24 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
 // read as one symbol rather than as a colon that has fallen onto an equals.
 const char* Defines(bool rule) { return rule ? " := " : " = "; }
 
+// Whether an expression calls anything that is not a constructor. A call is a
+// mention even with nothing inside the brackets: `randChanging()` is a new number
+// every frame and `time`-like functions are exactly the lines that are not fixed,
+// so they are rules. A constructor -- `vec3(1.0, 0.0, 0.0)`, `Tri(...)` -- only
+// spells a value, and is as fixed as the numbers in it.
+bool CallsAnything(const Node& node) {
+  if (node.kind == NodeKind::Call && !node.text.empty() && !IsVectorType(node.text) &&
+      std::isupper(static_cast<unsigned char>(node.text[0])) == 0) {
+    return true;
+  }
+  if (node.lhs && CallsAnything(*node.lhs)) return true;
+  if (node.rhs && CallsAnything(*node.rhs)) return true;
+  for (const auto& arg : node.args) {
+    if (arg && CallsAnything(*arg)) return true;
+  }
+  return false;
+}
+
 // Tags one mention of a name.
 std::string Marked(const std::string& name, std::vector<std::string>* marks) {
   if (marks == nullptr) return NameToLatex(name);
@@ -372,6 +409,12 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
       // what a mathematician has always written as a small x under it.
       return Emit(*node.lhs, precedence, marks) + "_{" + NameToLatex(node.text) + "}";
     case NodeKind::Call: {
+      // An absolute value is bars. The same bars a norm is written with, but
+      // single: a number's size and a vector's length are the same idea and are
+      // told apart by the doubling.
+      if (node.text == "abs" && node.args.size() == 1) {
+        return "\\left| " + Emit(*node.args[0], 0, marks) + " \\right|";
+      }
       if (node.text == "length" && node.args.size() == 1) {
         // A shader's `length` is the norm, and a norm is written with bars.
         return "\\left\\Vert " + Emit(*node.args[0], 0, marks) + " \\right\\Vert";
@@ -446,6 +489,18 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
       break;
     // The geometric product is juxtaposition, so it is already what Mul emits;
     // the other two get the symbols a geometric algebra text uses.
+    // **A sandwich is written out as the sandwich it is**: the versor, the
+    // thing, and the versor reversed. Mathematics has no symbol for it -- what
+    // `>>` is shorthand for is exactly this product -- so the shorthand is
+    // spent here rather than carried through to the page.
+    case NodeKind::Sandwich: {
+      const int tight = Precedence(NodeKind::Mul);
+      // Thin spaces, because this is three things juxtaposed and the names here
+      // are words as often as letters: set tight, `R e12 ~R` runs together.
+      out = Emit(*node.lhs, tight + 1, marks) + " \\, " + Emit(*node.rhs, tight + 1, marks) +
+            " \\, " + "\\widetilde{" + Emit(*node.lhs, 0, marks) + "}";
+      break;
+    }
     case NodeKind::Inner:
       out = Emit(*node.lhs, precedence, marks) + " \\cdot " +
             Emit(*node.rhs, precedence + 1, marks);
@@ -462,9 +517,6 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
     case NodeKind::Reverse:
       out = "\\widetilde{" + Emit(*node.lhs, 0, marks) + "}";
       return out;
-    case NodeKind::Dual:
-      out = Emit(*node.lhs, precedence, marks) + "^{*}";
-      break;
     case NodeKind::Add:
       out = Emit(*node.lhs, precedence, marks) + " + " + Emit(*node.rhs, precedence + 1, marks);
       break;
@@ -504,7 +556,11 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
           // so a centre dot goes in whenever the next factor opens with a digit.
           const bool needsDot =
               !term.empty() && std::isdigit(static_cast<unsigned char>(term[0])) != 0;
-          out += needsDot ? " \\cdot " : " ";
+          // And a name that is a whole word, beside anything, gets a thin space:
+          // `speed time` set tight is `speedtime`, which reads as one name.
+          const bool wordy = keys[i].rfind("\\mathit{", 0) == 0 ||
+                             keys[i - 1].rfind("\\mathit{", 0) == 0;
+          out += needsDot ? " \\cdot " : (wordy ? " \\, " : " ");
         }
         out += term;
         i = j;
@@ -516,11 +572,6 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
   return (precedence < parentPrecedence) ? Bracket(out) : out;
 }
 
-// `[](float x) { return <expr>; }` -- a whole initialiser, which is the only
-// place a function is written out in full. Reports the parameter's name and the
-// token range of the body, or false if the line is not that shape.
-// `(float x) { return <expression>; }` -- everything after the name of a
-// function, whichever way the function was introduced.
 // The types a declaration or a parameter may be written in: the reals, the one
 // function spelling, and whatever the box's algebra calls its elements.
 bool IsKnownType(std::string_view text, const clifford::Signature& sig) {
@@ -528,6 +579,9 @@ bool IsKnownType(std::string_view text, const clifford::Signature& sig) {
          mathline::IsMultivectorType(text, sig);
 }
 
+// `(float x) { return <expression>; }` -- everything after the name of a
+// function written on one line. Reports the parameter's name and the token
+// range of the body, or false if the line is not that shape.
 bool MatchFunctionTail(const std::vector<Token>& tokens, std::size_t index,
                        const clifford::Signature& sig, std::string* parameterType,
                        std::string* parameter, std::size_t* bodyBegin, std::size_t* bodyEnd) {
@@ -559,21 +613,6 @@ bool MatchFunctionTail(const std::vector<Token>& tokens, std::size_t index,
   ++index;
   if (tokens[index].kind == Tok::Semi) ++index;
   return tokens[index].kind == Tok::End;
-}
-
-// The older C++ spelling, kept only so a canvas written before functions became
-// GLSL still reads. The capture list is C++ bookkeeping, not mathematics.
-bool MatchLambda(const std::vector<Token>& tokens, std::size_t index,
-                 const clifford::Signature& sig, std::string* parameterType,
-                 std::string* parameter, std::size_t* bodyBegin, std::size_t* bodyEnd) {
-  if (tokens[index].kind != Tok::LBracket) return false;
-  ++index;
-  while (tokens[index].kind != Tok::RBracket) {
-    if (tokens[index].kind == Tok::End) return false;
-    ++index;
-  }
-  ++index;
-  return MatchFunctionTail(tokens, index, sig, parameterType, parameter, bodyBegin, bodyEnd);
 }
 
 // `Viz(Real);` -- the line that says this box draws that type rather than using
@@ -678,8 +717,8 @@ const char* OperatorGlyph(NodeKind kind) {
     case NodeKind::Inner: return "|";
     case NodeKind::Outer: return "^";
     case NodeKind::Regressive: return "&";
+    case NodeKind::Sandwich: return ">>";
     case NodeKind::Reverse: return "~";
-    case NodeKind::Dual: return "!";
     default: return "";
   }
 }
@@ -762,16 +801,6 @@ Flow Wiring(std::string_view source, const clifford::Signature& sig) {
   ++index;
   if (tokens[index].kind != Tok::Assign) return flow;
   ++index;
-
-  // A lambda defines a function pointwise rather than out of other values, so
-  // there is nothing to wire it to.
-  std::string parameterType;
-  std::string parameter;
-  std::size_t bodyBegin = 0;
-  std::size_t bodyEnd = 0;
-  if (MatchLambda(tokens, index, sig, &parameterType, &parameter, &bodyBegin, &bodyEnd)) {
-    return flow;
-  }
 
   std::vector<Token> rest(tokens.begin() + static_cast<std::ptrdiff_t>(index), tokens.end());
   Parser parser(rest);
@@ -1026,12 +1055,14 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
 
       line.kind = Kind::Return;
       line.name = inside.function;
-      const std::string head =
-          Marked(inside.function, &line.marks) + "(" + NameToLatex(inside.parameter) + ")";
+      // The argument is marked too, so pointing at a picture lights it up here
+      // as well as in the working.
+      const std::string head = Marked(inside.function, &line.marks) + "(" +
+                               Marked(inside.parameter, &line.marks) + ")";
       const std::string shown = Emit(*expression, 0, &line.marks);
-      // The head marks the function's own name, so anything beyond it means the
-      // answer is worked out from something rather than fixed.
-      line.latex = head + Defines(line.marks.size() > 1) + shown;
+      // The head marks the function's name and its argument, so anything beyond
+      // those means the answer is worked out from something rather than fixed.
+      line.latex = head + Defines(line.marks.size() > 2 || CallsAnything(*expression)) + shown;
       return line;
     }
 
@@ -1073,7 +1104,7 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
   }
 
   // A function is written the way GLSL writes one, because a function *is*
-  // GLSL now: `RToR w(float x) { return sin(x); }`. There is no `=` in
+  // GLSL now: `float w(float x) { return sin(x); }`. There is no `=` in
   // it, so it is looked for before one is required. Any known type may stand in
   // front of it -- a function is a shape, not a type.
   if (!type.empty() && tokens[index].kind == Tok::LParen) {
@@ -1098,41 +1129,15 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
     line.type = type;
     line.name = name;
     line.hasInitialiser = true;
-    const std::string head = Marked(name, &line.marks) + "(" + NameToLatex(parameter) + ")";
+    const std::string head =
+        Marked(name, &line.marks) + "(" + Marked(parameter, &line.marks) + ")";
     const std::string shown = Emit(*expression, 0, &line.marks);
-    line.latex = head + Defines(line.marks.size() > 1) + shown;
+    line.latex = head + Defines(line.marks.size() > 2 || CallsAnything(*expression)) + shown;
     return line;
   }
 
   if (tokens[index].kind != Tok::Assign) return line;
   ++index;
-
-  // A function written out in full reads the way one is defined: f(x) = ...
-  std::string parameterType;
-  std::string parameter;
-  std::size_t bodyBegin = 0;
-  std::size_t bodyEnd = 0;
-  if (MatchLambda(tokens, index, sig, &parameterType, &parameter, &bodyBegin, &bodyEnd)) {
-    std::vector<Token> body(tokens.begin() + static_cast<std::ptrdiff_t>(bodyBegin),
-                            tokens.begin() + static_cast<std::ptrdiff_t>(bodyEnd));
-    body.push_back({Tok::End, {}});
-    Parser bodyParser(body);
-    NodePtr expression = bodyParser.ParseExpression();
-    if (!bodyParser.ok() || expression == nullptr || bodyParser.Peek().kind != Tok::End) {
-      return line;
-    }
-
-    line.kind = type.empty() ? Kind::Assignment : Kind::Declaration;
-    line.type = type;
-    line.name = name;
-    line.hasInitialiser = true;
-    const std::string head = Marked(name, &line.marks) + "(" + NameToLatex(parameter) + ")";
-    const std::string body2 = Emit(*expression, 0, &line.marks);
-    // Everything the body mentions is now marked; anything beyond the name
-    // itself means the definition depends on something.
-    line.latex = head + Defines(line.marks.size() > 1) + body2;
-    return line;
-  }
 
   std::vector<Token> rest(tokens.begin() + static_cast<std::ptrdiff_t>(index), tokens.end());
   Parser parser(rest);
@@ -1149,7 +1154,7 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
   line.hasInitialiser = true;
   const std::string head = Marked(name, &line.marks);
   const std::string body = Emit(*expression, 0, &line.marks);
-  line.latex = head + Defines(line.marks.size() > 1) + body;
+  line.latex = head + Defines(line.marks.size() > 1 || CallsAnything(*expression)) + body;
   return line;
 }
 

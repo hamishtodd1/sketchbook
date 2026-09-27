@@ -42,6 +42,14 @@ struct ActiveValue {
   // Being dragged, rather than merely pointed at. A wire's layout is frozen for
   // as long as this is true: see `WireAnchor`.
   bool        held = false;
+  // The lines the name means this on, when that is not the whole box: a
+  // function's argument is a name only inside its function. -1 is everywhere.
+  int         firstLine = -1;
+  int         lastLine = -1;
+
+  bool Covers(int line) const {
+    return firstLine < 0 || (line >= firstLine && line <= lastLine);
+  }
 };
 
 // A function, drawn by being fed.
@@ -154,7 +162,7 @@ class CodeBlock {
 
   // --- prose ---------------------------------------------------------------
   //
-  // A box whose first line begins with 	ext is not code: it is words, and it
+  // A box whose first line begins with \text is not code: it is words, and it
   // is set as words -- upright roman on the bare canvas, with no card behind
   // it, because a caption on a slide is ink rather than a window. Writing the
   // sigil is what turns a code box into one, and deleting it turns it back, so
@@ -209,6 +217,8 @@ class CodeBlock {
   void        ExtendSelection(Vector2 screenPoint, const Viewport& viewport, FontStore& fonts);
   bool        HasSelection() const;
   void        SelectNone() { anchorLine_ = caretLine_; anchorCol_ = caretCol_; }
+  // The whole box, which is what Ctrl+A means while there is a caret in one.
+  void        SelectAll();
   bool        PointInSelection(Vector2 screenPoint, const Viewport& viewport,
                                FontStore& fonts) const;
   // The variable the selection lies inside, if this box declares one by that
@@ -307,10 +317,11 @@ class CodeBlock {
 
   // --- a box that draws rather than computes -------------------------------
   //
-  // `Viz(Real);` makes this box a **viz**: it says how a value of that type is
+  // `Viz(float);` makes this box a **viz**: it says how a value of that type is
   // drawn inside a display window rather than declaring a value of its own. Its
-  // C++ half lays down a mesh; its GLSL half is the vertex shader that places
-  // one. See viz.h for the vocabulary and for how the two halves are paired.
+  // mesh half lays down geometry; its place half is the vertex shader that
+  // places it. See viz.h for the vocabulary and for how the two are paired.
+  //
   // --- drawing one of this box's functions ---------------------------------
   //
   // A function is GLSL, so a window showing one *calls* it rather than reading
@@ -407,7 +418,6 @@ class CodeBlock {
   void DrawPictureInto(Rectangle rect, Vector2 centre, float span) const;
   void DrawSurfaceInto(Rectangle rect, Vector2 centre, float span, Vector3 orbit) const;
   void DrawVolumeInto(Rectangle rect, Vector2 centre, float span, Vector3 orbit) const;
-  void SetProbePoint(Vector2 point) const { probePoint_ = point; }
 
   // --- the live program ---------------------------------------------------
   void RequestCompile();
@@ -448,7 +458,50 @@ class CodeBlock {
   void  SetHighlights(std::vector<ActiveValue> values);
   // A text box's measure being dragged: a gesture like any other.
   bool  SettingMeasure() const { return marginDrag_; }
-  void SetVariableValue(const std::string& name, float value);
+  // `intoText` writes the number back into the line it is typed on, where it is
+  // typed -- which is what keeps the text and what runs the same. A knob being
+  // dragged does; a knob playing does not, since a line rewritten sixty times a
+  // second is not something anybody can read, and the number is written down
+  // when the playing stops.
+  void SetVariableValue(const std::string& name, float value, bool intoText = true);
+  // A knob about to be dragged: if its number is typed in the text, the drag is
+  // an edit of the text, and gets one undo step.
+  void BeginValueEdit(const std::string& name);
+  // Writes a knob's current number into the text, where it has one there.
+  void CommitValue(const std::string& name);
+  // Replaces the text wholesale, keeping everything built from it that still
+  // applies. An undo step uses it for a box whose numbers alone have changed.
+  void RestoreLines(std::vector<std::string> lines);
+
+  // --- a knob that moves by itself ------------------------------------------
+  //
+  // **Playing** a knob swings its value as `centre + amplitude * sin(t)`, where
+  // `t` is the seconds it has been swinging. Not a ramp: a value that runs off in
+  // one direction runs off the axis, and a swing keeps coming back past where it
+  // started, which is where the interesting part usually is.
+  //
+  // A typed number is rewritten as it swings, so what you read is what runs.
+  // Stopping leaves it wherever it had got to. It is not saved: a canvas opens
+  // with nothing moving, and the number in the text is where the swing was.
+  struct Play {
+    std::string name;
+    float       centre = 0.0f;
+    float       amplitude = 1.0f;
+    float       phase = 0.0f;   // the `t` above, which stops while paused
+  };
+  void  StartPlaying(const std::string& name, float amplitude);
+  void  StopPlaying(const std::string& name);
+  bool  Playing(const std::string& name) const;
+  const std::vector<Play>& Plays() const { return playing_; }
+  // The middle of a playing knob's swing, or its value when it is still. What
+  // the play button stands under, since a moving marker is not one to chase.
+  float KnobValue(const mathprogram::Variable& variable) const;
+  bool  AnyPlaying() const { return !playing_.empty(); }
+  // **Everything playing pauses while any box is being written in.** A playing
+  // number rewrites its line, and a line changing under somebody's caret -- or
+  // under the undo they are about to press -- is a line they cannot write in.
+  // The app says so each frame; the swing picks up where it left off.
+  void  SetPlayPaused(bool paused) { playPaused_ = paused; }
   // Knob positions from a loaded canvas, adopted on the next rebuild.
   void RestoreValues(std::vector<std::pair<std::string, float>> values);
 
@@ -472,6 +525,7 @@ class CodeBlock {
   bool    ShowSource() const { return showSource_; }
   void    SetShowSource(bool value) { showSource_ = value; }
   void    SetWorldPosition(Vector2 position) { origin_ = position; }
+  void    SetEm(float em) { em_ = em; }
 
   // --- drawing ------------------------------------------------------------
   void Draw(const Viewport& viewport, FontStore& fonts) const;
@@ -580,7 +634,26 @@ class CodeBlock {
   void   PushUndo(EditKind kind);
   void   Undo();
 
-  void   InsertNewline();
+  // `indent` carries the line's leading whitespace onto the new line, which is
+  // what typing Enter wants and what pasting must not do: text arriving from
+  // somewhere else brings its own indentation, and adding this line's to every
+  // line of it stacks up, deeper on every line.
+  void   InsertNewline(bool indent = true);
+  // Tab over a highlight moves every line it touches, in or out by one step.
+  void   ShiftIndent(bool out);
+  // The lines a gesture about lines covers, and moving a caret that sits on one
+  // whose start has just changed.
+  void   LineRange(int* first, int* last) const;
+  void   ColumnMoved(int line, int at, int by);
+  void   EditKeepingSelection(int anchorLine, int anchorCol);
+  // Ctrl+/ over a highlight comments every line it touches, or takes the
+  // comments off if they are all already commented.
+  void   ToggleComment();
+  // Puts a number into the line in place of the one typed after its `=`.
+  void   WriteLiteral(int line, float value);
+  // Alt+Delete takes the whole line the caret is on, or every line a highlight
+  // touches.
+  void   DeleteLines();
   void   DeleteBefore();
   void   DeleteAt();
   void   DeleteWordBefore();
@@ -676,6 +749,20 @@ class CodeBlock {
   Shader                                vizShader_{};
   bool                                  haveVizShader_ = false;
   std::vector<std::pair<std::string, int>> uniforms_;
+  std::vector<Play>                     playing_;
+  bool                                  playPaused_ = false;
+  // `time` in the shader: when this box last compiled. And the frame, which
+  // `randChanging` is seeded with.
+  double                                compiledAt_ = 0.0;
+  int                                   frame_ = 0;
+  int                                   timeLoc_ = -1;
+  int                                   frameLoc_ = -1;
+  // Whether the box says `time` or `randChanging`. Such a box changes with
+  // nothing having moved, so its values are asked for again every frame.
+  bool                                  animated_ = false;
+  // The knobs, the time and the frame -- everything every one of the shader's
+  // modes needs before it draws.
+  void SetLiveUniforms() const;
   Texture2D                             previewSurface_{};
   bool                                  havePreviewSurface_ = false;
 
@@ -732,12 +819,10 @@ class CodeBlock {
   int                                   thickLoc_ = -1;
   int                                   orbitLoc_ = -1;
   int                                   liftLoc_ = -1;
-  int                                   probePointLoc_ = -1;
   RenderTexture2D                       probeTarget_{};
   bool                                  haveProbeTarget_ = false;
   // Where in the picture the numbers are read: under the pointer while you are
   // over it, its middle otherwise. Resolved while drawing.
-  mutable Vector2                       probePoint_{0.5f, 0.5f};
   std::vector<float>                    probeSignature_;
 
   mutable std::vector<LineCache> cache_;

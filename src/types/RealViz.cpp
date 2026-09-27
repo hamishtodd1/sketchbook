@@ -30,6 +30,12 @@ constexpr float kInset = 20.0f;
 // one thing while the pointer was promising another.
 constexpr float kGrabRadius = 18.0f;
 constexpr float kLabelEm = 17.0f;
+// The play button: how big, and how far below the axis line its middle is.
+constexpr float kPlayRadius = 8.0f;
+constexpr float kPlayDrop = 16.0f;
+// How far a playing knob swings either side of where it started, as a share of
+// the axis's span -- so it sweeps half the row, and stays on it.
+constexpr float kPlaySwing = 0.25f;
 constexpr float kTickEm = 12.0f;
 
 constexpr float kMinSpan = 1e-4f;
@@ -95,8 +101,8 @@ namespace {
 void AxisPanel::EnsureField() const {
   if (haveField_) return;
   // One white pixel, stretched across the row. Everything about how the field
-  // looks is in the box's own shader; this only exists so that `fragTexCoord`
-  // runs 0..1 across the rectangle being painted.
+  // looks is in the box's own shader; this only exists so that the texture
+  // coordinate runs 0..1 across the rectangle being painted.
   Image white = GenImageColor(1, 1, WHITE);
   fieldSamples_ = LoadTextureFromImage(white);
   UnloadImage(white);
@@ -270,7 +276,9 @@ bool AxisPanel::Sync(const Blocks& blocks) {
         // A line thrown away stays thrown away -- unless the variable has gone
         // back to being free. Closing a knob is what wrote its value into the
         // code; taking that value out again is asking for the knob back.
-        if (!variable.free) continue;
+        // A typed number is a knob too, but closing its window left the number
+        // written in the code -- where it still is -- so it stays closed.
+        if (!variable.free || variable.written) continue;
         block->Unhide(variable.name);
       }
 
@@ -517,6 +525,11 @@ Rectangle AxisPanel::RectFor(std::size_t index, const Viewport& viewport,
 
 
 // ------------------------------------------------------------------ selection
+void AxisPanel::Rects(const Viewport& viewport, FontStore& fonts,
+                      std::vector<Rectangle>* out) const {
+  AppendRects(lines_, out, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
+}
+
 void AxisPanel::SelectWithin(const std::vector<Vector2>& lasso, const Viewport& viewport,
                              FontStore& fonts) {
   SelectCaught(lines_, lasso, [&](std::size_t i) { return RectFor(i, viewport, fonts); });
@@ -661,6 +674,10 @@ void AxisPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
     if (!Shown(lines_[i])) continue;
     const Rectangle row = RectFor(i, viewport, fonts);
     if (!CheckCollisionPointRec(pointer, row) && !PointOnRim(row, pointer)) continue;
+    if (const AxisRef* play = PlayButtonAt(i, pointer, viewport, fonts); play != nullptr) {
+      out->push_back({play->block, play->name, MarkerAt(i, *play, viewport, fonts)});
+      return;
+    }
     // The marker the pointer is on -- free or derived. A press only takes hold
     // of a free one, but pointing at a derived value still has something to
     // say: which thing in the code it is, and where that is written.
@@ -727,6 +744,43 @@ const AxisRef* AxisPanel::MarkerNear(std::size_t index, Vector2 pointer,
   if (!CheckCollisionPointRec(pointer, row) && !PointOnRim(row, pointer)) return nullptr;
   return NearestOn(lines_[index], AxisArea(row), row.height / kRowHeight, pointer.x,
                    /*freeOnly=*/false, *this);
+}
+
+bool AxisPanel::PlayButton(std::size_t index, const AxisRef& ref, Vector2 pointer,
+                           const Viewport& viewport, FontStore& fonts, Vector2* centre,
+                           float* radius) const {
+  if (index >= lines_.size() || ref.block == nullptr) return false;
+  const NumberLine&            line = lines_[index];
+  const mathprogram::Variable* variable = Resolve(ref);
+  if (variable == nullptr || !variable->free || !Shown(ref)) return false;
+  const Rectangle row = RectFor(index, viewport, fonts);
+  if (!CheckCollisionPointRec(pointer, row)) return false;
+  const float scale = row.height / kRowHeight;
+  // Too small on screen to press is not offered at all.
+  if (kPlayRadius * scale < 4.0f) return false;
+
+  const bool playing = ref.block->Playing(ref.name);
+  if (!playing && GrabbableAt(index, pointer, viewport, fonts) != &ref) return false;
+
+  const Rectangle area = AxisArea(row);
+  const float     at = ref.block->KnobValue(*variable);
+  const float     x = area.x + area.width * (0.5f + (at - line.centre) / line.span);
+  if (x < area.x || x > area.x + area.width) return false;
+  *centre = {x, row.y + row.height * 0.58f + kPlayDrop * scale};
+  *radius = kPlayRadius * scale;
+  return true;
+}
+
+const AxisRef* AxisPanel::PlayButtonAt(std::size_t index, Vector2 pointer,
+                                       const Viewport& viewport, FontStore& fonts) const {
+  if (index >= lines_.size()) return nullptr;
+  for (const AxisRef& ref : lines_[index].refs) {
+    Vector2 centre{};
+    float   radius = 0.0f;
+    if (!PlayButton(index, ref, pointer, viewport, fonts, &centre, &radius)) continue;
+    if (CheckCollisionPointCircle(pointer, centre, radius * 1.3f)) return &ref;
+  }
+  return nullptr;
 }
 
 bool AxisPanel::VizUnder(Vector2 point, const Viewport& viewport, FontStore& fonts,
@@ -829,6 +883,7 @@ std::size_t AxisPanel::OfferedRow(Vector2 pointer, const Viewport& viewport,
     // The rim carries the row, so it is not offering anything.
     if (PointOnRim(row, pointer)) return kNoRow;
     if (!CheckCollisionPointRec(pointer, row)) continue;
+    if (PlayButtonAt(i, pointer, viewport, fonts) != nullptr) return kNoRow;
     return OverMarker(i, pointer, viewport, fonts) ? kNoRow : i;
   }
   return kNoRow;
@@ -989,11 +1044,28 @@ bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Bl
     }
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return true;  // hovering claims it
 
+    // The play button, before the handle it stands under.
+    if (const AxisRef* play = PlayButtonAt(i, pointer, viewport, fonts); play != nullptr) {
+      if (play->block->Playing(play->name)) {
+        play->block->StopPlaying(play->name);
+        // Where it stopped is where it is now, so that is what the text says.
+        play->block->CommitValue(play->name);
+      } else {
+        play->block->StartPlaying(play->name, line.span * kPlaySwing);
+      }
+      return true;
+    }
+
     // A handle within grabbing distance wins over both the rim and the scroll --
     // and it is the same question the pointer was already answering by blinking
     // that handle, so the press keeps the promise the hover made.
     const AxisRef* best = GrabbableAt(i, pointer, viewport, fonts);
     if (best != nullptr) {
+      // Taking hold of a playing knob takes it over.
+      if (best->block != nullptr) {
+        best->block->StopPlaying(best->name);
+        best->block->BeginValueEdit(best->name);
+      }
       drag_ = Drag::Handle;
       dragLine_ = i;
       dragRef_ = *best;
@@ -1172,6 +1244,27 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts,
         text::Draw(fonts, Face::MainRegular, value,
                    {left + layout.width + 5.0f * scale, baseline}, valueEm,
                    variable->known ? kAxisValue : kAxisPending);
+      }
+    }
+
+    // The play buttons, over the tick labels they stand on.
+    for (const AxisRef& ref : line.refs) {
+      Vector2 centre{};
+      float   radius = 0.0f;
+      if (!PlayButton(i, ref, pointer, viewport, fonts, &centre, &radius)) continue;
+      const bool on = CheckCollisionPointCircle(pointer, centre, radius * 1.3f);
+      DrawCircleV(centre, radius, on ? kAccentHover : kAccent);
+      if (ref.block->Playing(ref.name)) {
+        // Pause: two bars.
+        const float w = radius * 0.28f;
+        const float hgt = radius * 0.95f;
+        DrawRectangleRec({centre.x - radius * 0.38f, centre.y - hgt * 0.5f, w, hgt}, RAYWHITE);
+        DrawRectangleRec({centre.x + radius * 0.38f - w, centre.y - hgt * 0.5f, w, hgt}, RAYWHITE);
+      } else {
+        // Play: a triangle pointing right, anticlockwise for raylib.
+        DrawTriangle({centre.x - radius * 0.32f, centre.y - radius * 0.5f},
+                     {centre.x - radius * 0.32f, centre.y + radius * 0.5f},
+                     {centre.x + radius * 0.55f, centre.y}, RAYWHITE);
       }
     }
 
