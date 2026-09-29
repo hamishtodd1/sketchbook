@@ -18,8 +18,8 @@
 //
 // **Colour is identity, and here colour is also the value.** So a marker's fill
 // is the colour it *is*, and its rim the colour that says *which* variable it
-// is. A knob you can drag wears a ring outside a gap; a derived value only an
-// outline. A colour outside 0..1 is drawn where it is, outside the solid.
+// is, a ring outside a gap. A colour outside 0..1 is drawn where it is, outside
+// the solid.
 //
 // The dropdown is where other choices about this window will go too.
 #pragma once

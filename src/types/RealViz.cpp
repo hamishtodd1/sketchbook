@@ -68,6 +68,13 @@ std::string FormatTick(float value, float step) {
   return out;
 }
 
+// A value's marker on the line. Every value wears the same one, and so does
+// every sample of a spread: a sample is a value of its type like any other.
+void DrawMarker(Vector2 at, float scale, Color tint) {
+  DrawCircleV(at, 7.0f * scale, tint);
+  DrawCircleV(at, 3.0f * scale, kAxisBg);
+}
+
 std::string FormatValue(float value) {
   char buffer[64];
   std::snprintf(buffer, sizeof(buffer), "%.4g", static_cast<double>(value));
@@ -1197,9 +1204,7 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts,
       const bool offLeft = x < area.x;
       const bool offRight = x > area.x + area.width;
       const float clamped = std::clamp(x, area.x, area.x + area.width);
-      // Colour says *which* variable; the shape below says whether it is yours
-      // to drag; and a blink says *this one, now*. Three questions, three
-      // channels.
+      // Colour says *which* variable, and a blink says *this one, now*.
       const Color tint = Blink(ref.block->VariableColor(ref.name), inUse(ref));
 
       if (offLeft || offRight) {
@@ -1220,11 +1225,8 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts,
                       {line.centre, 0.0f, line.span, row.height / std::max(area.width, 1.0f) *
                                                          line.span},
                       scale, tint);
-      } else if (variable->free) {
-        DrawCircleV({clamped, axisY}, 7.0f * scale, tint);
-        DrawCircleV({clamped, axisY}, 3.0f * scale, kAxisBg);
       } else {
-        DrawCircleV({clamped, axisY}, 5.0f * scale, tint);
+        DrawMarker({clamped, axisY}, scale, tint);
       }
 
       // Label the marker with the same glyphs the equation uses.
@@ -1282,8 +1284,7 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts,
         for (int end = 0; end < 2; ++end) {
           Vector2 at{};
           if (!SampleAt(i, held, k, end == 1, viewport, fonts, &at)) continue;
-          const bool on = (k == lit);
-          DrawCircleV(at, (on ? 3.8f : 2.6f) * scale, Fade(tint, on ? 1.0f : 0.85f));
+          DrawMarker(at, scale, Fade(tint, k == lit ? 1.0f : 0.85f));
         }
       }
     }

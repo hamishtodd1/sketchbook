@@ -744,23 +744,18 @@ void SpacePanel::DrawScene(const SpaceWindow& window, Rectangle rect) {
 
   // And the spread a function is being fed with, if this box is being read
   // inside one. A function has no one place to be, so this is what it looks
-  // like: every sample put through it, drawn where its answer lands. Smaller
-  // than a value's own marker, because a sample is a place the function was
-  // asked about rather than a value anybody chose.
+  // like: every sample put through it, drawn where its answer lands, and drawn
+  // exactly as a value is.
   if (window.home && window.dock != nullptr && window.dock->Samples().Live()) {
     const Sampling& fed = window.dock->Samples();
     const Color     tint = window.dock->VariableColor(fed.name);
-    const int       lit = window.dock->SampleHover();
     for (int end = 0; end < 2; ++end) {
       for (int k = 0; k < fed.count; ++k) {
         Point where{};
         if (!SamplePoint(fed, k, end == 1, &where)) continue;
         const float exempt = where.atInfinity ? 1.0f : 0.0f;
         SetShaderValue(solid_, atInfinityLoc_, &exempt, SHADER_UNIFORM_FLOAT);
-        const bool  on = (k == lit);
-        const float size = kPointRadius * (on ? 1.1f : 0.65f) *
-                           (where.atInfinity ? 6.0f : 1.0f);
-        DrawModel(ball_, where.at, size, tint);
+        DrawModel(ball_, where.at, kPointRadius * (where.atInfinity ? 6.0f : 1.0f), tint);
       }
     }
   }

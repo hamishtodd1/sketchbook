@@ -585,12 +585,15 @@ wear the same colour, each being first in a box of its own, and a name used in
 several boxes now wears the same colour in all of them.
 The dark end is skipped, since the cards are already dark.
 
-Colour therefore no longer says whether a variable is free or derived. **Shape**
-does: a ring you can drag, a filled dot you cannot. And a **blink** says *this
-one, now*: a visualization in use flashes white, half a second on and half a
-second off. Three questions, three channels -- and a blink because colour is
-already spoken for, and because on a shared axis several markers wear colours
-from the same map. A hard switch rather than a fade, since a throb reads as
+Colour therefore no longer says whether a variable is free or derived, and
+**nothing else does either**. Every value's marker is the same shape. Shape used
+to say it, a ring you could drag and a filled dot you could not, and that was
+taken out as more than it was worth: every viz would have had to draw two
+things. Editability may want showing some other way, or may not need showing at
+all. A **blink** says *this one, now*: a visualization in use flashes white,
+half a second on and half a second off. A blink because colour is already spoken
+for, and because on a shared axis several markers wear colours from the same
+map. A hard switch rather than a fade, since a throb reads as
 decoration where a blink reads as a signal.
 
 **What lights up is the one thing under the pointer.** Pointing at a number line
@@ -977,17 +980,55 @@ a tube, a field. Across all of them, two things hold. A viz:
 Both come from GLSL functions that belong to the viz, and **both are in one
 window**. A viz is one box, not a pair.
 
-**The app's vizes live in `viz.sketch`.** Each viz's vertex shader and fragment
-shader are in a window there. So is the GLSL that *makes* its geometry, the
-vertices, normals and texture coordinates. That code runs at startup to fill the
-buffers, and it can be run again.
+**One window per type and dw.** A point in space and the same type in some other
+dw are two windows, since how a thing is drawn is a question about where it is
+drawn.
 
-**Most vizes need no fragment shader of their own.** A point of Cl(3,0,1) is a
-lit ball, which needs phong shading and nothing more, and many are like it.
+**A window's parts are functions with standard names:**
 
-Still to be planned: how a window says which of its functions is which, how a
-value reaches the geometry, and how `viz.sketch` reaches a canvas that is not
-itself.
+| | |
+| --- | --- |
+| `mesh` | makes the geometry: vertices, normals, texture coordinates |
+| `vert` | the vertex shader: where each vertex goes, given the value |
+| `frag` | the fragment shader, and optional |
+| `position` | where the viz is in its dw, which is where wires attach |
+| `grab` | how far the pointer is from taking hold of it, in pixels |
+
+The window's first line names both halves of the pair, `Viz(Tri, Space);`, and
+a dw must be named.
+
+**The geometry does not depend on the value.** `mesh` runs once, to fill the
+buffers, and again when it is edited; the value arrives in `vert`. A viz whose
+number of parts depends on the value, such as a bivector that is sometimes one
+line and sometimes two, is meshed at its most, and `vert` collapses the parts
+it does not need.
+
+**A viz with more than one piece numbers them**: `mesh2`, `vert2`, and optionally
+`frag2` and `position2`, and so on up to 4. An arrow is a shaft and a head. A
+window that defines a fifth piece gets a warning, not a fifth piece.
+
+**A viz with no `frag` is lit with phong**, which is the app's, not something
+written in `viz.sketch`. A point of Cl(3,0,1) is a lit ball and needs nothing
+more, and many are like it. A dw's own furniture, such as the space window's
+sky, walls and camera, stays the app's too.
+
+**The app's vizes live in the repo, in one sketch per algebra**:
+`Cl(3,0,1) vizes.sketch` and `Cl(2,1,1) vizes.sketch`. A `Tri` means a different
+thing in each, and a canvas works in one algebra, so their vizes cannot share a
+canvas. These hold the built-in vizes, the ones every canvas has without asking.
+A canvas may also define vizes of its own, and those are local to it.
+
+**A built-in viz is compiled the first time a dw on screen asks for it**, not at
+startup, because a viz of an algebra type is an algebra compile, 60 to 200 ms. Edit
+one and it is run again straight away.
+
+**Functions are drawn by vizes too.** A picture, a surface, a volume, a curve on
+a plot and a field on a number line all draw a function written in another box,
+and all of them are to come out of C++ as well. **A function's viz is compiled
+into the box that defines the function**, as more modes of that box's one
+shader, so a box still builds one shader and a knob still only sets a uniform.
+The price is on edits: changing a function viz rebuilds the boxes with functions
+of that type.
 
 ### How the vizes drifted
 
@@ -1005,8 +1046,8 @@ The fallback became the main road.
 - **The plot's viz has not worked since a function became GLSL.** Its mesh half
   compiles on its own, so it cannot call the function it is meant to draw.
 
-The rule for new work: **drawing a type is a viz, and a viz is GLSL in
-`viz.sketch`.** If a new window needs a drawing that a viz cannot express yet,
+The rule for new work: **drawing a type is a viz, and a viz is GLSL in a
+vizes sketch.** If a new window needs a drawing that a viz cannot express yet,
 extend what a viz can say, or stop and ask. That is never a reason to draw it in
 C++.
 
@@ -1724,8 +1765,8 @@ stack of one-value axes says nothing about how those values compare, and the
 values in a box are read together. So they go on one scale, and that scale
 **frames itself** the first time everything on it has a value, so that every one
 of them is in view. Free variables get a draggable handle, derived ones a
-read-only marker that moves when its inputs do; they are told apart by shape,
-and told from each other by colour, exactly as before.
+read-only marker that moves when its inputs do. Both look the same, and they
+are told from each other by colour.
 
 **And a viz is pulled out of the window it is in.** Hold Ctrl and drag a marker
 off its number line, a curve off its plot, or a point out of its space window --
@@ -2334,6 +2375,10 @@ window. A real to a `Tri` of Cl(3,0,1) is a row of beads along a number line and
 a constellation of points in a space window, and those two runs are the same
 length and line up index for index.
 
+**A sample is drawn exactly as a value of its type is**, with the same marker at
+the same size. Drawing them smaller was tried and taken out: it was one more
+thing for every viz to know about, for no gain.
+
 **Pointing at either end boxes both and draws a wire between them.** Pointing at
 an answer is as good a way of asking about a sample as pointing at the sample is,
 so both ends are searched, and both light up -- the whole claim being made is
@@ -2610,13 +2655,12 @@ reason.
   colours they stand for.
 
 **Colour is identity, and here colour is also the value**, so a marker's fill is
-the colour it *is* and its rim the colour saying *which* variable it is: a ring
-outside a gap for a knob, an outline for a derived value. A colour outside 0..1
-is drawn where it is, outside the solid.
+the colour it *is*, and its rim, a ring outside a gap, the colour saying *which*
+variable it is. A colour outside 0..1 is drawn where it is, outside the solid.
 
 **A function giving a colour, fed a spread**, puts its answers in the window as
-beads the colour they are -- inside the ring in the picker, at their place in the
-cube or cylinder. `C:\sketches\colour.sketch` has both.
+markers the colour they are, ringed in the function's colour. They go inside the
+hue ring in the picker, and at their place in the cube or cylinder. `C:\sketches\colour.sketch` has both.
 
 ### A surface is a picture you can turn
 
@@ -2772,8 +2816,7 @@ float c = (a + b) / 2;
 ```
 
 renders as `a ∈ ℝ`, `b ∈ ℝ`, `c := (a+b)/2` (a real fraction), with one number
-line docked underneath carrying all three: a ring for each free variable, a dot
-for the derived one. Dragging a knob sets a uniform and the derived marker
+line docked underneath carrying a marker for each, in its own colour. Dragging a knob sets a uniform and the derived marker
 follows. Clicking that axis anywhere but on a marker writes a new `float d;`
 into the box, at a caret the box blinks while you are
 pointing -- on its LaTeX as readily as on its code. Hovering a line turns it

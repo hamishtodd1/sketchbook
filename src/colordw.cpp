@@ -272,16 +272,13 @@ void DrawCylinder(const Camera2& camera, float zoom) {
                white, thick);
 }
 
-void DrawMarker(Vector2 at, const float rgb[3], Color identity, bool free, float zoom) {
+// Filled with the colour it is, and ringed, outside a gap, with the colour saying
+// which variable it is. A sample's answer wears the same one.
+void DrawMarker(Vector2 at, const float rgb[3], Color identity, float zoom) {
   const float r = std::max(4.0f, 7.0f * zoom);
   DrawCircleV(at, r, ToColor(rgb));
-  if (free) {
-    // A knob: a ring outside a gap, the shape every knob on the canvas has.
-    DrawRing(at, r + 2.0f * std::max(zoom, 0.6f), r + 4.5f * std::max(zoom, 0.6f), 0.0f, 360.0f,
-             36, identity);
-  } else {
-    DrawRing(at, r, r + 1.6f * std::max(zoom, 0.6f), 0.0f, 360.0f, 36, identity);
-  }
+  DrawRing(at, r + 2.0f * std::max(zoom, 0.6f), r + 4.5f * std::max(zoom, 0.6f), 0.0f, 360.0f,
+           36, identity);
 }
 
 }  // namespace
@@ -769,8 +766,8 @@ void ColorPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
           const float* rgb = &fed.outputs[static_cast<std::size_t>(k * 3)];
           float        hsv[3];
           types::color::RgbToHsv(rgb, hsv);
-          DrawCircleV(picker.At(hsv[0], picker.inner - std::max(5.0f, 8.0f * zoom)),
-                      std::max(2.5f, 3.5f * zoom), ToColor(rgb));
+          DrawMarker(picker.At(hsv[0], picker.inner - std::max(5.0f, 8.0f * zoom)), rgb,
+                     view.block->VariableColor(fed.name), zoom);
         }
       }
     } else {
@@ -786,8 +783,8 @@ void ColorPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
       if (fed.Live() && fed.outputType == types::color::kName && fed.outStride == 3) {
         for (int k = 0; k < fed.count; ++k) {
           const float* rgb = &fed.outputs[static_cast<std::size_t>(k * 3)];
-          DrawCircleV(camera.Screen(PointOf(view.shape, rgb)), std::max(2.5f, 4.0f * zoom),
-                      ToColor(rgb));
+          DrawMarker(camera.Screen(PointOf(view.shape, rgb)), rgb,
+                     view.block->VariableColor(fed.name), zoom);
         }
       }
     }
@@ -797,7 +794,7 @@ void ColorPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
         inUse = inUse || (value.block == view.block && value.name == marker.name);
       }
       DrawMarker(marker.at, marker.rgb, Blink(view.block->VariableColor(marker.name), inUse),
-                 marker.free, zoom);
+                 zoom);
     }
     EndScissorMode();
 
