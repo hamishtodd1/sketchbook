@@ -94,7 +94,7 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   // rather than to the canvas, so it comes last.
   m.fullscreen = {inset, y, inner, kButtonHeight};
   y += kButtonHeight;
-  y += 48.0f;   // the hint, and the panel's own bottom margin
+  y += inset;   // the panel's own bottom margin, the same as its top
 
   const float w = static_cast<float>(GetScreenWidth());
   const float h = static_cast<float>(GetScreenHeight());
@@ -186,6 +186,13 @@ MenuAction OptionsMenu::Update(Options* options) {
   const MenuLayout m = Compute(aspectOpen_, static_cast<int>(recent_.size()));
   const Vector2 mouse = GetMousePosition();
   if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return MenuAction::None;
+
+  // A press anywhere off the panel puts the menu away. The press is still the
+  // menu's -- it does not go on to land on whatever is underneath.
+  if (!CheckCollisionPointRec(mouse, m.panel)) {
+    Close();
+    return MenuAction::None;
+  }
 
   if (CheckCollisionPointRec(mouse, m.aspectHeader)) {
     aspectOpen_ = !aspectOpen_;
@@ -300,10 +307,6 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
   DrawButton(fonts, m.fullscreen,
              options.fullscreen ? "Leave fullscreen" : "Fullscreen",
              CheckCollisionPointRec(mouse, m.fullscreen));
-
-  const float hintBaseline = m.panel.y + m.panel.height - 22.0f;
-  text::Draw(fonts, Face::MainRegular, "Esc to close", {m.panel.x + 24.0f, hintBaseline}, kHintEm,
-             kPanelMuted);
 }
 
 }  // namespace sb

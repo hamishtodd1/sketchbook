@@ -204,6 +204,19 @@ class CodeBlock {
   bool Empty() const;
   bool Dirty() const { return dirty_; }
 
+  // --- sharing with the rest of the canvas ---------------------------------
+  //
+  // What every box offers, gathered by the app, and the algebra they all work
+  // in. The box is built against it and reads its algebra from it.
+  void SetCanvas(const mathprogram::Canvas* canvas) { canvas_ = canvas; }
+  const mathprogram::Program& Program() const { return program_; }
+  // Whether what this box took from the canvas has changed, so it must be built
+  // again; and the current numbers of the knobs it reads from other boxes.
+  bool ImportsStale(const mathprogram::Canvas& canvas) const {
+    return program_.ImportsStale(canvas);
+  }
+  void PullImports(const mathprogram::Canvas& canvas) { program_.PullImports(canvas); }
+
   void HandleInput();
   void InsertCodepoint(int codepoint);
 
@@ -285,7 +298,7 @@ class CodeBlock {
   // Closing is remembered, or the next Sync would put the window straight back.
   // One flag per *kind* of window, because a box can define a picture and a
   // surface at once and closing one of them must not take the other with it.
-  enum Drawn : int { kPicture = 0, kSurface = 1, kVolume = 2, kDrawnKinds = 3 };
+  enum Drawn : int { kPicture = 0, kSurface = 1, kVolume = 2, kColour = 3, kDrawnKinds = 4 };
   void HideDrawn(int kind) { drawnHidden_[kind] = true; }
   bool DrawnHidden(int kind) const { return drawnHidden_[kind]; }
   void SetDrawnHidden(int kind, bool hide) { drawnHidden_[kind] = hide; }
@@ -464,6 +477,13 @@ class CodeBlock {
   // second is not something anybody can read, and the number is written down
   // when the playing stops.
   void SetVariableValue(const std::string& name, float value, bool intoText = true);
+  // The same for a colour: its three numbers, written into the text when they
+  // were typed there.
+  void SetColorValue(const std::string& name, const float rgb[3], bool intoText = true);
+  // Every knob's number, as the canvas file and the clipboard keep them: a real
+  // under its name, a colour as three entries `c.r`, `c.g`, `c.b`. Only what is
+  // not already written in the text.
+  std::vector<std::pair<std::string, float>> KnobValues() const;
   // A knob about to be dragged: if its number is typed in the text, the drag is
   // an edit of the text, and gets one undo step.
   void BeginValueEdit(const std::string& name);
@@ -651,6 +671,7 @@ class CodeBlock {
   void   ToggleComment();
   // Puts a number into the line in place of the one typed after its `=`.
   void   WriteLiteral(int line, float value);
+  void   WriteColorLiteral(int line, const float rgb[3]);
   // Alt+Delete takes the whole line the caret is on, or every line a highlight
   // touches.
   void   DeleteLines();
@@ -707,7 +728,7 @@ class CodeBlock {
   bool   absorbed_ = false;
   bool   selected_ = false;
   std::vector<std::string> hidden_;
-  bool   drawnHidden_[kDrawnKinds] = {false, false, false};
+  bool   drawnHidden_[kDrawnKinds] = {false, false, false, false};
   int    caretLine_ = 0;
   int    caretCol_ = 0;   // byte offset within lines_[caretLine_]
   // The other end of the selection. Equal to the caret when there is none, so
@@ -829,6 +850,10 @@ class CodeBlock {
   // What the cache was last built at, so the common case -- nothing has moved
   // -- costs one comparison per line rather than a re-read of every one.
   mutable unsigned               cacheVersion_ = 0;
+  // The canvas's algebra the line cache was read in. Another box can change it,
+  // so unlike a box's own `Cl` line it is not covered by the lines not changing.
+  mutable clifford::Signature    cacheAlgebra_;
+  const mathprogram::Canvas*     canvas_ = nullptr;
   mutable unsigned               cacheStyle_ = ~0u;
   mutable float                  cacheEmPx_ = -1.0f;
   mutable float                  cacheWrap_ = -1.0f;

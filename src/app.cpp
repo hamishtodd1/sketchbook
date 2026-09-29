@@ -52,6 +52,7 @@ bool App::Init(const std::string& assetDir, std::string* error) {
   surfaces_.SetBefore({&shaders_});
   volumes_.SetBefore({&shaders_, &surfaces_});
   spaces_.SetBefore({&shaders_, &surfaces_, &volumes_});
+  colours_.SetBefore({&shaders_, &surfaces_, &volumes_, &spaces_});
 
   // Nothing is put on the canvas. It opens empty, because what belongs on it is
   // whatever you are about to put there -- and a starting card is a thing to
@@ -114,6 +115,7 @@ Rectangle App::Footprint(const CodeBlock* block) {
   const Rectangle docks[] = {axes_.DockedBounds(block, viewport_, fonts_),
                              plots_.DockedBounds(block, viewport_, fonts_),
                              shaders_.DockedBounds(block, viewport_, fonts_),
+                             colours_.DockedBounds(block, viewport_, fonts_),
                              surfaces_.DockedBounds(block, viewport_, fonts_),
                              volumes_.DockedBounds(block, viewport_, fonts_),
                              spaces_.DockedBounds(block, viewport_, fonts_)};
@@ -254,6 +256,7 @@ void App::RemoveBlock(CodeBlock* block) {
   axes_.Forget(block);
   plots_.Forget(block);
   shaders_.Forget(block);
+  colours_.Forget(block);
   surfaces_.Forget(block);
   volumes_.Forget(block);
   spaces_.Forget(block);
@@ -310,6 +313,7 @@ void App::ClearSelection() {
   axes_.ClearSelection();
   plots_.ClearSelection();
   shaders_.ClearSelection();
+  colours_.ClearSelection();
   surfaces_.ClearSelection();
   volumes_.ClearSelection();
   spaces_.ClearSelection();
@@ -321,6 +325,7 @@ bool App::AnySelected() const {
     if (block->Selected()) return true;
   }
   return axes_.AnySelected() || plots_.AnySelected() || shaders_.AnySelected() ||
+         colours_.AnySelected() ||
          surfaces_.AnySelected() || volumes_.AnySelected() ||
          spaces_.AnySelected() || media_.AnySelected();
 }
@@ -332,6 +337,7 @@ bool App::SelectedRimAt(Vector2 point) {
   return axes_.SelectedRimAt(point, viewport_, fonts_) ||
          plots_.SelectedRimAt(point, viewport_, fonts_) ||
          shaders_.SelectedRimAt(point, viewport_, fonts_) ||
+         colours_.SelectedRimAt(point, viewport_, fonts_) ||
          surfaces_.SelectedRimAt(point, viewport_, fonts_) ||
          volumes_.SelectedRimAt(point, viewport_, fonts_) ||
          spaces_.SelectedRimAt(point, viewport_, fonts_) ||
@@ -342,6 +348,7 @@ void App::DeleteSelection() {
   axes_.DeleteSelection();
   plots_.DeleteSelection();
   shaders_.DeleteSelection();
+  colours_.DeleteSelection();
   surfaces_.DeleteSelection();
   volumes_.DeleteSelection();
   spaces_.DeleteSelection();
@@ -385,11 +392,7 @@ void App::CopySelection(bool cut) {
     const Vector2 origin = block->WorldPosition();
     clip.offset = {origin.x - corner.x, origin.y - corner.y};
     // The knobs come along: a copy that started from zero would not be a copy.
-    for (const mathprogram::Variable& variable : block->Variables()) {
-      if (variable.free && variable.kind == mathprogram::Kind::Real) {
-        clip.values.emplace_back(variable.name, variable.value);
-      }
-    }
+    for (auto& value : block->KnobValues()) clip.values.push_back(std::move(value));
     clipboard_.push_back(std::move(clip));
   }
 
@@ -444,6 +447,7 @@ void App::HandleSelection() {
       axes_.MoveSelection(delta);
       plots_.MoveSelection(delta);
       shaders_.MoveSelection(delta);
+      colours_.MoveSelection(delta);
       surfaces_.MoveSelection(delta);
       volumes_.MoveSelection(delta);
       spaces_.MoveSelection(delta);
@@ -478,6 +482,7 @@ void App::HandleSelection() {
     axes_.BeginSelectionDrag();
     plots_.BeginSelectionDrag();
     shaders_.BeginSelectionDrag();
+    colours_.BeginSelectionDrag();
     surfaces_.BeginSelectionDrag();
     volumes_.BeginSelectionDrag();
     spaces_.BeginSelectionDrag();
@@ -515,6 +520,7 @@ void App::HandleSelection() {
         axes_.SelectWithin(loop, viewport_, fonts_);
         plots_.SelectWithin(loop, viewport_, fonts_);
         shaders_.SelectWithin(loop, viewport_, fonts_);
+        colours_.SelectWithin(loop, viewport_, fonts_);
         surfaces_.SelectWithin(loop, viewport_, fonts_);
         volumes_.SelectWithin(loop, viewport_, fonts_);
         spaces_.SelectWithin(loop, viewport_, fonts_);
@@ -610,6 +616,8 @@ void App::HandleDroppedFiles() {
 std::vector<Vector2> App::WindowsOf(const CodeBlock* block, const std::string& name) {
   std::vector<Vector2> found;
   Vector2              at{};
+  // A shared value's windows are its home box's windows.
+  block = HomeOf(const_cast<CodeBlock*>(block), name);
   if (axes_.MarkerFor(block, name, viewport_, fonts_, &at)) found.push_back(at);
   if (plots_.MarkerFor(block, name, viewport_, fonts_, &at)) found.push_back(at);
   return found;
@@ -1371,6 +1379,7 @@ void App::FrameOnScreen() {
   axes_.Rects(viewport_, fonts_, &rects);
   plots_.Rects(viewport_, fonts_, &rects);
   shaders_.Rects(viewport_, fonts_, &rects);
+  colours_.Rects(viewport_, fonts_, &rects);
   surfaces_.Rects(viewport_, fonts_, &rects);
   volumes_.Rects(viewport_, fonts_, &rects);
   spaces_.Rects(viewport_, fonts_, &rects);
@@ -1415,6 +1424,57 @@ void App::FrameOnScreen() {
   viewport_.GlideTo({(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f}, zoom, 0.45f);
 }
 
+CodeBlock* App::HomeOf(CodeBlock* block, const std::string& name) const {
+  if (block == nullptr) return nullptr;
+  const std::vector<std::string>& taken = block->Program().importedNames();
+  if (std::find(taken.begin(), taken.end(), name) == taken.end()) return block;
+  const mathprogram::Program* home = nullptr;
+  for (const mathprogram::SharedValue& value : canvas_.values) {
+    if (value.name == name && value.home != &block->Program()) home = value.home;
+  }
+  for (const mathprogram::SharedFunction& fn : canvas_.functions) {
+    if (fn.name == name && fn.home != &block->Program()) home = fn.home;
+  }
+  for (const std::unique_ptr<CodeBlock>& other : codeBlocks_) {
+    if (&other->Program() == home) return other.get();
+  }
+  return block;
+}
+
+void App::ShareAcrossCanvas() {
+  // Every box builds against the canvas, including one made since last frame.
+  std::vector<std::pair<const mathprogram::Program*, unsigned long>> now;
+  now.reserve(codeBlocks_.size());
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    block->SetCanvas(&canvas_);
+    now.emplace_back(&block->Program(), block->Program().sharedVersion());
+  }
+
+  // Nothing any box offers has changed -- the answer nearly every frame.
+  if (now != sharedFrom_) {
+    sharedFrom_ = std::move(now);
+    std::vector<const mathprogram::Program*> programs;
+    programs.reserve(sharedFrom_.size());
+    for (const auto& [program, version] : sharedFrom_) programs.push_back(program);
+    canvas_ = mathprogram::Gather(programs);
+
+    // Only a box whose share of it changed is built again, and a build that
+    // comes out the same is not compiled -- so an edit costs the boxes that use
+    // what was edited, and nothing else. A box being written in is left alone:
+    // it builds when the caret leaves it, and would otherwise compile half a
+    // thought.
+    for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+      if (block->IsText()) continue;
+      if (block->Focused() && block->Dirty()) continue;
+      if (block->ImportsStale(canvas_)) block->RequestCompile();
+    }
+  }
+
+  // A knob in one box moves every box that reads it: its number is fetched
+  // here, while the canvas it is fetched through is fresh.
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->PullImports(canvas_);
+}
+
 void App::SelectWithinWorld(Rectangle worldRect) {
   const Vector2 topLeft = viewport_.ToScreen({worldRect.x, worldRect.y});
   const Vector2 bottomRight =
@@ -1426,6 +1486,7 @@ void App::SelectWithinWorld(Rectangle worldRect) {
   axes_.SelectWithin(loop, viewport_, fonts_);
   plots_.SelectWithin(loop, viewport_, fonts_);
   shaders_.SelectWithin(loop, viewport_, fonts_);
+  colours_.SelectWithin(loop, viewport_, fonts_);
   surfaces_.SelectWithin(loop, viewport_, fonts_);
   volumes_.SelectWithin(loop, viewport_, fonts_);
   spaces_.SelectWithin(loop, viewport_, fonts_);
@@ -1457,6 +1518,7 @@ void App::ThrowAwaySlide(Rectangle bounds, float shift) {
     axes_.BeginSelectionDrag();
     plots_.BeginSelectionDrag();
     shaders_.BeginSelectionDrag();
+    colours_.BeginSelectionDrag();
     surfaces_.BeginSelectionDrag();
     volumes_.BeginSelectionDrag();
     spaces_.BeginSelectionDrag();
@@ -1464,6 +1526,7 @@ void App::ThrowAwaySlide(Rectangle bounds, float shift) {
     axes_.MoveSelection({-shift, 0.0f});
     plots_.MoveSelection({-shift, 0.0f});
     shaders_.MoveSelection({-shift, 0.0f});
+    colours_.MoveSelection({-shift, 0.0f});
     surfaces_.MoveSelection({-shift, 0.0f});
     volumes_.MoveSelection({-shift, 0.0f});
     spaces_.MoveSelection({-shift, 0.0f});
@@ -1494,8 +1557,10 @@ bool App::HandleTextGesture() {
       textBlock_ = nullptr;
     } else if (moved > kClickSlop) {
       // Out it comes, and from here it is an ordinary carried row: it follows
-      // the pointer and is dropped wherever the button comes up.
-      axes_.BeginPullOut(textBlock_, pullName_, pointer, viewport_);
+      // the pointer and is dropped wherever the button comes up. A name shared
+      // from another box comes out as its home box's value, since that is where
+      // its window is.
+      axes_.BeginPullOut(HomeOf(textBlock_, pullName_), pullName_, pointer, viewport_);
       textBlock_->SelectNone();
       textDrag_ = TextDrag::None;
       textBlock_ = nullptr;
@@ -1703,6 +1768,9 @@ void App::Update() {
   if (canvasActive && !consumed && shaders_.Dragging()) {
     consumed = shaders_.HandleInput(viewport_, fonts_);
   }
+  if (canvasActive && !consumed && colours_.Dragging()) {
+    consumed = colours_.HandleInput(viewport_, fonts_);
+  }
   // An orbit is a drag too, and owns the pointer the same way.
   if (canvasActive && !consumed && (spaces_.Dragging() || spaces_.Orbiting())) {
     consumed = spaces_.HandleInput(viewport_, fonts_);
@@ -1716,6 +1784,7 @@ void App::Update() {
   // Otherwise input goes to the innermost thing first: a box's buttons -- the
   // ones on a focused code box, and the ones a text box shows whenever you
   // reach for them -- then the windows, then the canvas.
+  if (canvasActive && !consumed) consumed = colours_.HandleMenus(viewport_, fonts_);
   if (canvasActive && !consumed) {
     for (auto it = codeBlocks_.rbegin(); it != codeBlocks_.rend() && !consumed; ++it) {
       consumed = (*it)->HandleChrome(viewport_, fonts_);
@@ -1728,6 +1797,7 @@ void App::Update() {
   if (canvasActive && !consumed) consumed = axes_.HandleInput(viewport_, fonts_, codeBlocks_);
   if (canvasActive && !consumed) consumed = plots_.HandleInput(viewport_, fonts_);
   if (canvasActive && !consumed) consumed = shaders_.HandleInput(viewport_, fonts_);
+  if (canvasActive && !consumed) consumed = colours_.HandleInput(viewport_, fonts_);
   if (canvasActive && !consumed) consumed = surfaces_.HandleInput(viewport_, fonts_);
   if (canvasActive && !consumed) consumed = volumes_.HandleInput(viewport_, fonts_);
   if (canvasActive && !consumed) consumed = spaces_.HandleInput(viewport_, fonts_);
@@ -1792,6 +1862,7 @@ void App::Update() {
   // What each function being read is fed with, before the boxes are polled --
   // polling is where a box puts its spread through its function.
   FeedFunctions();
+  ShareAcrossCanvas();
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->Poll();
 
   // A box that has just gained (or lost) number lines is a different size than
@@ -1807,6 +1878,7 @@ void App::Update() {
   bool shapesChanged = axes_.Sync(codeBlocks_);
   shapesChanged = plots_.Sync(codeBlocks_) || shapesChanged;
   shapesChanged = shaders_.Sync(codeBlocks_) || shapesChanged;
+  shapesChanged = colours_.Sync(codeBlocks_) || shapesChanged;
   shapesChanged = surfaces_.Sync(codeBlocks_) || shapesChanged;
   shapesChanged = volumes_.Sync(codeBlocks_) || shapesChanged;
   shapesChanged = spaces_.Sync(codeBlocks_) || shapesChanged;
@@ -1838,7 +1910,8 @@ void App::Update() {
               pull_.from != PullFrom::None || fingerCarry_ ||
               textDrag_ != TextDrag::None || dragBlock_ != nullptr ||
               (media_.Busy() && !media_.Editing()) || axes_.Dragging() || plots_.Dragging() ||
-              shaders_.Dragging() || surfaces_.Dragging() || surfaces_.Orbiting() ||
+              shaders_.Dragging() || colours_.Dragging() || surfaces_.Dragging() ||
+              surfaces_.Orbiting() ||
               volumes_.Dragging() || volumes_.Orbiting() || spaces_.Dragging() ||
               spaces_.Orbiting() || viewport_.PanningWithMouse() || touch::Count() > 0;
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
@@ -1871,6 +1944,7 @@ void App::Update() {
     axes_.ActiveVariables(viewport_, fonts_, &active);
     plots_.ActiveVariables(viewport_, fonts_, &active);
     shaders_.ActiveVariables(viewport_, fonts_, &active);
+    colours_.ActiveVariables(viewport_, fonts_, &active);
   }
 
   // Taking hold of a name in the text is the same statement as taking hold of
@@ -1880,6 +1954,9 @@ void App::Update() {
   // mention -- read from the other side.
   const auto lightUp = [&](CodeBlock* block, const std::string& name) {
     if (name.empty()) return;
+    // A name shared from another box is lit from its home, where its windows
+    // are; the step below then lights it wherever else it is used.
+    block = HomeOf(block, name);
     for (const ActiveValue& value : active) {
       if (value.block == block && value.name == name) return;
     }
@@ -1909,6 +1986,25 @@ void App::Update() {
   // declaration would land, so the click has somewhere visible to be aimed.
   const CodeBlock* insertInto = canvasActive ? axes_.InsertTarget(viewport_, fonts_) : nullptr;
 
+  // **A shared thing is one thing wherever it is used.** Whatever is lit in its
+  // home box is lit in every box that uses it too, wired from the same window --
+  // so the mentions in another box gather into the same bundle.
+  {
+    const std::size_t lit = active.size();
+    for (std::size_t i = 0; i < lit; ++i) {
+      const ActiveValue value = active[i];
+      for (const std::unique_ptr<CodeBlock>& other : codeBlocks_) {
+        if (other.get() == value.block) continue;
+        const std::vector<std::string>& taken = other->Program().importedNames();
+        if (std::find(taken.begin(), taken.end(), value.name) == taken.end()) continue;
+        if (HomeOf(other.get(), value.name) != value.block) continue;
+        ActiveValue there = value;
+        there.block = other.get();
+        active.push_back(there);
+      }
+    }
+  }
+
   // A value made out of other values gets its whole derivation drawn instead of
   // a plain wire from its window -- the wires end at the same names either way,
   // and one cable is the point.
@@ -1933,7 +2029,7 @@ void App::Update() {
   const bool onSlide = slides_.SlideAtCamera(viewport_, options_.slideAspect) >= 0;
   viewport_.Update(canvasActive, !consumed,
                    !axes_.Scrolling() && !spaces_.Orbiting() && !surfaces_.Orbiting() &&
-                       !volumes_.Orbiting(),
+                       !volumes_.Orbiting() && !colours_.Orbiting(),
                    onSlide);
   if (const int swipe = viewport_.TakeSwipe(); swipe != 0) {
     slides_.Step(swipe, &viewport_, options_.slideAspect);
@@ -1952,7 +2048,8 @@ void App::Update() {
   constexpr float  kGridFadeSeconds = 0.16f;
   const bool carrying = (dragBlock_ != nullptr && dragBlockMoved_) ||
                         (selectionDrag_ && selectionMoved_) || axes_.Carrying() ||
-                        plots_.Carrying() || shaders_.Carrying() || surfaces_.Carrying() ||
+                        plots_.Carrying() || shaders_.Carrying() || colours_.Carrying() ||
+                        surfaces_.Carrying() ||
                         volumes_.Carrying() || spaces_.Carrying() ||
                         media_.Carrying();
   const bool scaling = GetMouseWheelMoveV().y != 0.0f || touch::Count() >= 2;
@@ -1995,6 +2092,7 @@ void App::Draw() {
   axes_.Draw(viewport_, fonts_, &vizes_);
   plots_.Draw(viewport_, fonts_, &vizes_);
   shaders_.Draw(viewport_, fonts_);
+  colours_.Draw(viewport_, fonts_);
   surfaces_.Draw(viewport_, fonts_);
   volumes_.Draw(viewport_, fonts_);
   spaces_.Draw(viewport_, fonts_);
@@ -2027,6 +2125,8 @@ void App::Draw() {
   axes_.DrawSelectionRims(viewport_, fonts_);
   plots_.DrawSelectionRims(viewport_, fonts_);
   shaders_.DrawSelectionRims(viewport_, fonts_);
+  colours_.DrawSelectionRims(viewport_, fonts_);
+  colours_.DrawChrome(viewport_, fonts_);
   surfaces_.DrawSelectionRims(viewport_, fonts_);
   volumes_.DrawSelectionRims(viewport_, fonts_);
   spaces_.DrawSelectionRims(viewport_, fonts_);
@@ -2036,7 +2136,8 @@ void App::Draw() {
 
   // Carrying a window brings up the one place it can be thrown away.
   if (dragBlockMoved_ || selectionMoved_ || axes_.Carrying() || plots_.Carrying() ||
-      shaders_.Carrying() || surfaces_.Carrying() || volumes_.Carrying() ||
+      shaders_.Carrying() || colours_.Carrying() || surfaces_.Carrying() ||
+      volumes_.Carrying() ||
       spaces_.Carrying() || media_.Carrying()) {
     DrawDropTarget(OverDropTarget(carry::Position()));
   }
@@ -2170,18 +2271,17 @@ void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView
          << (block->Italic() ? 1 : 0) << " " << static_cast<int>(block->Justification())
          << " " << block->TextWidth() << " " << (block->ShowSource() ? 1 : 0) << "\n";
     for (const std::string& line : block->Lines()) file << "> " << line << "\n";
-    for (const mathprogram::Variable& variable : block->Variables()) {
-      // Only a real has a value worth keeping. A free function's choice lives in
-      // its example generator, which is deterministic in the variable's name.
-      // A typed number is saved as the text it is typed in.
-      if (variable.free && variable.kind == mathprogram::Kind::Real && !variable.written) {
-        file << "val " << variable.name << " " << variable.value << "\n";
-      }
+    // A knob's number, where the text does not already say it: a real under its
+    // name, a colour as its three parts. A free function's choice lives in its
+    // example generator, which is deterministic in the variable's name.
+    for (const auto& [name, value] : block->KnobValues()) {
+      file << "val " << name << " " << value << "\n";
     }
     for (const std::string& name : block->Hidden()) file << "hide " << name << "\n";
     if (block->DrawnHidden(CodeBlock::kPicture)) file << "hideshader\n";
     if (block->DrawnHidden(CodeBlock::kSurface)) file << "hidesurface\n";
     if (block->DrawnHidden(CodeBlock::kVolume)) file << "hidevolume\n";
+    if (block->DrawnHidden(CodeBlock::kColour)) file << "hidecolour\n";
     file << "end\n";
   }
 
@@ -2205,6 +2305,12 @@ void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView
     }
   }
 
+  // Which way it is being looked at, and from where, is part of what was set up.
+  for (const ColorView& view : colours_.Views()) {
+    file << "colour " << (view.docked ? 1 : 0) << " " << view.worldPos.x << " "
+         << view.worldPos.y << " " << indexOf(view.block) << " "
+         << static_cast<int>(view.shape) << " " << view.yaw << " " << view.pitch << "\n";
+  }
   for (const ShaderView& view : shaders_.Views()) {
     file << "shader " << (view.docked ? 1 : 0) << " " << view.worldPos.x << " "
          << view.worldPos.y << " " << indexOf(view.block) << " " << view.centre.x << " "
@@ -2307,6 +2413,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
     bool                                       shaderHidden = false;
     bool                                       surfaceHidden = false;
     bool                                       volumeHidden = false;
+    bool                                       colourHidden = false;
   };
   struct LoadedMedia {
     int         kind = 0;
@@ -2377,6 +2484,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   std::vector<LoadedAxis>   axes;
   std::vector<LoadedPlot>   plots;
   std::vector<LoadedShader> shaderViews;
+  std::vector<std::pair<int, ColorView>> colourViews;
   std::vector<LoadedTurned> surfaceViews;
   std::vector<LoadedTurned> volumeViews;
   std::vector<LoadedSpace>  spaceWindows;
@@ -2467,6 +2575,18 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       blocks.back().surfaceHidden = true;
     } else if (keyword == "hidevolume" && inBlock) {
       blocks.back().volumeHidden = true;
+    } else if (keyword == "hidecolour" && inBlock) {
+      blocks.back().colourHidden = true;
+    } else if (keyword == "colour") {
+      int docked = 1;
+      int shape = 0;
+      int block = -1;
+      ColorView view;
+      stream >> docked >> view.worldPos.x >> view.worldPos.y >> block >> shape >> view.yaw >>
+          view.pitch;
+      view.docked = (docked != 0);
+      view.shape = static_cast<ColorShape>(std::clamp(shape, 0, 2));
+      colourViews.emplace_back(block, view);
     } else if (keyword == "shader") {
       LoadedShader view;
       int docked = 1;
@@ -2558,6 +2678,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   axes_.Clear();
   plots_.Clear();
   shaders_.Clear();
+  colours_.Clear();
   surfaces_.Clear();
   volumes_.Clear();
   spaces_.Clear();
@@ -2619,6 +2740,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
     block->SetDrawnHidden(CodeBlock::kPicture, loaded.shaderHidden);
     block->SetDrawnHidden(CodeBlock::kSurface, loaded.surfaceHidden);
     block->SetDrawnHidden(CodeBlock::kVolume, loaded.volumeHidden);
+    block->SetDrawnHidden(CodeBlock::kColour, loaded.colourHidden);
     if (kept) {
       // Already built, so its knobs are set where they are rather than on the
       // next build -- there is not going to be one. And whatever was swinging
@@ -2629,9 +2751,30 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       for (const auto& [name, value] : loaded.values) {
         const mathprogram::Variable* variable = block->FindVariable(name);
         if (variable != nullptr && variable->free && !variable->written &&
-            variable->value != value) {
+            variable->kind == mathprogram::Kind::Real && variable->value != value) {
           block->SetVariableValue(name, value, /*intoText=*/false);
         }
+      }
+      // A colour comes back as its three parts.
+      for (const mathprogram::Variable& variable : block->Variables()) {
+        if (variable.kind != mathprogram::Kind::Color || !variable.free || variable.written ||
+            variable.literals.empty() || variable.literals.front().components.size() != 3) {
+          continue;
+        }
+        float rgb[3] = {variable.literals.front().components[0],
+                        variable.literals.front().components[1],
+                        variable.literals.front().components[2]};
+        const char* const parts[] = {"r", "g", "b"};
+        bool changed = false;
+        for (int i = 0; i < 3; ++i) {
+          for (const auto& [name, value] : loaded.values) {
+            if (name == variable.name + "." + parts[i] && rgb[i] != value) {
+              rgb[i] = value;
+              changed = true;
+            }
+          }
+        }
+        if (changed) block->SetColorValue(variable.name, rgb, /*intoText=*/false);
       }
     } else {
       block->RestoreValues(std::move(loaded.values));
@@ -2699,6 +2842,14 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
     views.push_back(view);
   }
   shaders_.Adopt(std::move(views));
+
+  std::vector<ColorView> colourOut;
+  for (auto& [index, view] : colourViews) {
+    if (index < 0 || index >= static_cast<int>(codeBlocks_.size())) continue;
+    view.block = codeBlocks_[static_cast<std::size_t>(index)].get();
+    colourOut.push_back(view);
+  }
+  colours_.Adopt(std::move(colourOut));
 
   std::vector<SurfaceView> surfaceOut;
   for (const LoadedTurned& loaded : surfaceViews) {

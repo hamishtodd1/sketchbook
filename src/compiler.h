@@ -30,6 +30,10 @@ struct ShaderLines {
   int functionsAt = 0;   // first line of the hoisted block
   int bodyAt = 0;        // first line of main's body
   int count = 0;         // how many lines the box has
+  // What other boxes share, compiled into this one: lines after `sharedAt` up
+  // to and including `sharedEnd`. None when they are equal.
+  int sharedAt = 0;
+  int sharedEnd = 0;
 };
 
 // Every vendor words its log differently. The two shapes in the wild are

@@ -44,11 +44,13 @@ add_executable(sketchbook
   src/volumedw.cpp
   src/types/Clifford.cpp
   src/types/Complex.cpp
+  src/types/Color.cpp
   src/types/Complex.cpp
   src/types/RealFunction.cpp
   src/types/RealViz.cpp
   src/types/RealFunctionViz.cpp
   src/shaderwindow.cpp
+  src/colordw.cpp
   src/media.cpp
   src/video.cpp
   src/slides.cpp

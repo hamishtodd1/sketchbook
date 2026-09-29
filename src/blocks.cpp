@@ -315,7 +315,10 @@ CodeBlock::~CodeBlock() {
 }
 
 clifford::Signature CodeBlock::Algebra() const {
-  clifford::Signature signature = clifford::kDefaultSignature;
+  // The canvas's, since a canvas works in one -- unless this box names one
+  // itself, which is the same one unless two boxes disagree.
+  clifford::Signature signature =
+      canvas_ != nullptr ? canvas_->signature : clifford::kDefaultSignature;
   for (const std::string& line : lines_) clifford::ParseAlgebra(line, &signature);
   return signature;
 }
@@ -325,11 +328,15 @@ void CodeBlock::EnsureCache(FontStore& fonts, float emPx, float measurePx) const
   const unsigned styleBits = (bold_ ? 1u : 0u) | (italic_ ? 2u : 0u) | (prose ? 4u : 0u);
 
   // The cheapest question first, because it is nearly always the answer: has
-  // anything moved at all? The algebra is deliberately not asked for here. It
-  // is read off the lines themselves, so no line changing means it cannot have
-  // changed either -- and asking costs a parse of every line.
+  // anything moved at all? A box's own `Cl` line is covered by its lines not
+  // changing; the canvas's algebra is not, since another box can change it, so
+  // that is compared too -- three integers, not a parse.
+  const clifford::Signature canvasAlgebra =
+      canvas_ != nullptr ? canvas_->signature : clifford::kDefaultSignature;
   bool stale = cache_.size() != lines_.size() || cacheStyle_ != styleBits ||
-               cacheEmPx_ != emPx || (prose && cacheWrap_ != measurePx);
+               cacheEmPx_ != emPx || (prose && cacheWrap_ != measurePx) ||
+               cacheAlgebra_.p != canvasAlgebra.p || cacheAlgebra_.q != canvasAlgebra.q ||
+               cacheAlgebra_.r != canvasAlgebra.r;
   for (std::size_t i = 0; !stale && i < lines_.size(); ++i) {
     stale = cache_[i].source != lines_[i];
   }
@@ -338,6 +345,7 @@ void CodeBlock::EnsureCache(FontStore& fonts, float emPx, float measurePx) const
   cacheStyle_ = styleBits;
   cacheEmPx_ = emPx;
   cacheWrap_ = measurePx;
+  cacheAlgebra_ = canvasAlgebra;
   ++cacheVersion_;
 
   // Bold and italic change which face the words are set in, so they invalidate
@@ -523,6 +531,15 @@ std::string CodeBlock::Injection(int line) const {
   for (const mathprogram::Variable& variable : program_.variables()) {
     if (variable.name != parsed.name) continue;
     const int governing = variable.GoverningLiteral(line);
+    // A colour shows the three numbers its knob chose.
+    if (variable.kind == mathprogram::Kind::Color && governing >= 0) {
+      const std::vector<float>& rgb =
+          variable.literals[static_cast<std::size_t>(governing)].components;
+      if (rgb.size() == 3) {
+        return " = Color(" + FormatInjected(rgb[0]) + ", " + FormatInjected(rgb[1]) + ", " +
+               FormatInjected(rgb[2]) + ")";
+      }
+    }
     if (governing >= 0) {
       return " = " + FormatInjected(variable.literals[static_cast<std::size_t>(governing)].value);
     }
@@ -555,6 +572,12 @@ std::string CodeBlock::MentionAt(Vector2 screenPoint, const Viewport& viewport,
       if (CheckCollisionPointRec(screenPoint, box)) return variable.name;
     }
   }
+  // And what it uses from other boxes, which is pointed at the same way.
+  for (const std::string& name : program_.importedNames()) {
+    for (const Rectangle& box : MentionRects(static_cast<std::size_t>(row), name, g, fonts)) {
+      if (CheckCollisionPointRec(screenPoint, box)) return name;
+    }
+  }
   return {};
 }
 
@@ -576,6 +599,18 @@ mathline::Flow CodeBlock::FlowFor(const std::string& name) const {
 }
 
 Color CodeBlock::VariableColor(const std::string& name) const {
+  // Handed out across the whole canvas, so a name has one colour on it however
+  // many boxes mention it, and two names in one box never share one.
+  if (canvas_ != nullptr) {
+    const std::vector<std::string>& order = canvas_->colourOrder;
+    for (std::size_t i = 0; i < order.size(); ++i) {
+      if (order[i] == name) return sb::VariableColor(static_cast<int>(i));
+    }
+    // Something no box declares -- the argument of the function a picture
+    // draws, which the pointer stands for. It takes the next colour along.
+    return sb::VariableColor(static_cast<int>(order.size()));
+  }
+  // Before the canvas has been gathered: by position in the box.
   const std::vector<mathprogram::Variable>& variables = program_.variables();
   for (std::size_t i = 0; i < variables.size(); ++i) {
     if (variables[i].name == name) return sb::VariableColor(static_cast<int>(i));
@@ -665,6 +700,13 @@ std::vector<std::string> CodeBlock::HighlightedVariables() const {
   for (const mathprogram::Variable& variable : program_.variables()) {
     if (MentionedBetween(variable.name, fromLine, fromCol, toLine, toCol, /*wholeLines=*/false)) {
       named.push_back(variable.name);
+    }
+  }
+  // And what it uses from other boxes: highlighting a shared name is taking
+  // hold of that thing, wherever it lives.
+  for (const std::string& name : program_.importedNames()) {
+    if (MentionedBetween(name, fromLine, fromCol, toLine, toCol, /*wholeLines=*/false)) {
+      named.push_back(name);
     }
   }
   return named;
@@ -848,7 +890,11 @@ void CodeBlock::SetLiveUniforms() const {
     if (location < 0) continue;
     const mathprogram::Literal* literal = program_.FindLiteral(uniform);
     if (literal == nullptr) continue;
-    SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
+    if (literal->components.size() == 3) {
+      SetShaderValue(shader_, location, literal->components.data(), SHADER_UNIFORM_VEC3);
+    } else {
+      SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
+    }
   }
   const float seconds = static_cast<float>(GetTime() - compiledAt_);
   if (timeLoc_ >= 0) SetShaderValue(shader_, timeLoc_, &seconds, SHADER_UNIFORM_FLOAT);
@@ -1466,6 +1512,14 @@ std::string CodeBlock::SelectedVariable() const {
   for (const mathprogram::Variable& variable : program_.variables()) {
     if (variable.name == word && variable.kind == mathprogram::Kind::Real) return word;
   }
+  // A real shared from another box comes out too. Its axis is its home box's,
+  // which is the app's business: here it is enough that it is a real.
+  const std::vector<std::string>& taken = program_.importedNames();
+  if (canvas_ != nullptr && std::find(taken.begin(), taken.end(), word) != taken.end()) {
+    for (const mathprogram::SharedValue& value : canvas_->values) {
+      if (value.name == word && value.home != &program_ && value.type == "float") return word;
+    }
+  }
   return {};
 }
 
@@ -1613,6 +1667,38 @@ void CodeBlock::SetVariableValue(const std::string& name, float value, bool into
       return;
     }
   }
+}
+
+void CodeBlock::SetColorValue(const std::string& name, const float rgb[3], bool intoText) {
+  const std::vector<mathprogram::Variable>& variables = program_.variables();
+  for (std::size_t i = 0; i < variables.size(); ++i) {
+    if (variables[i].name != name || variables[i].kind != mathprogram::Kind::Color) continue;
+    const int governing = variables[i].GoverningLiteral(ExecutedUpTo());
+    program_.SetColor(i, rgb, ExecutedUpTo());
+    if (intoText && governing >= 0) {
+      const mathprogram::Literal& literal =
+          variables[i].literals[static_cast<std::size_t>(governing)];
+      if (literal.written) WriteColorLiteral(literal.line, rgb);
+    }
+    return;
+  }
+}
+
+std::vector<std::pair<std::string, float>> CodeBlock::KnobValues() const {
+  std::vector<std::pair<std::string, float>> out;
+  for (const mathprogram::Variable& variable : program_.variables()) {
+    if (!variable.free || variable.written) continue;
+    if (variable.kind == mathprogram::Kind::Real) {
+      out.emplace_back(variable.name, variable.value);
+    } else if (variable.kind == mathprogram::Kind::Color && !variable.literals.empty() &&
+               variable.literals.front().components.size() == 3) {
+      const std::vector<float>& rgb = variable.literals.front().components;
+      out.emplace_back(variable.name + ".r", rgb[0]);
+      out.emplace_back(variable.name + ".g", rgb[1]);
+      out.emplace_back(variable.name + ".b", rgb[2]);
+    }
+  }
+  return out;
 }
 
 void CodeBlock::BeginValueEdit(const std::string& name) {
@@ -1856,6 +1942,23 @@ void CodeBlock::WriteLiteral(int line, float value) {
   // Not an edit in the usual sense: nothing is rebuilt, because the shader is
   // already reading this number as a uniform. The caret only has to stay on
   // the line.
+  ClampCaret();
+  if (anchorLine_ == line) {
+    anchorCol_ = std::min(anchorCol_, static_cast<int>(text.size()));
+  }
+}
+
+void CodeBlock::WriteColorLiteral(int line, const float rgb[3]) {
+  if (line < 0 || line >= static_cast<int>(lines_.size())) return;
+  std::string&      text = lines_[static_cast<std::size_t>(line)];
+  const std::size_t equals = text.find('=');
+  if (equals == std::string::npos) return;
+  const std::size_t open = text.find('(', equals);
+  const std::size_t close = (open == std::string::npos) ? open : text.find(')', open);
+  if (open == std::string::npos || close == std::string::npos) return;
+  text.replace(open + 1, close - open - 1,
+               FormatInjected(rgb[0]) + ", " + FormatInjected(rgb[1]) + ", " +
+                   FormatInjected(rgb[2]));
   ClampCaret();
   if (anchorLine_ == line) {
     anchorCol_ = std::min(anchorCol_, static_cast<int>(text.size()));
@@ -2207,7 +2310,9 @@ void CodeBlock::RequestCompile() {
   dirty_ = false;
   // A text box is not a program. Nothing about words compiles, and trying
   // would put a diagnostic on a sentence.
-  program_.Rebuild(IsText() ? std::vector<std::string>{} : lines_);
+  static const mathprogram::Canvas kAlone;
+  program_.Rebuild(IsText() ? std::vector<std::string>{} : lines_,
+                   canvas_ != nullptr ? *canvas_ : kAlone);
 }
 
 void CodeBlock::ReleaseGpu() {
@@ -2376,6 +2481,9 @@ void CodeBlock::FeedFunction() {
   for (const auto& [uniform, location] : uniforms_) {
     const mathprogram::Literal* literal = program_.FindLiteral(uniform);
     signature.push_back(literal == nullptr ? 0.0f : literal->value);
+    if (literal != nullptr) {
+      for (float part : literal->components) signature.push_back(part);
+    }
   }
   if (animated_) signature.push_back(static_cast<float>(frame_));
   if (signature == fnSignature_ && sampling_.ready) return;
@@ -2433,6 +2541,9 @@ void CodeBlock::ProbeIfNeeded() {
   for (const auto& [uniform, location] : uniforms_) {
     const mathprogram::Literal* literal = program_.FindLiteral(uniform);
     signature.push_back(literal == nullptr ? 0.0f : literal->value);
+    if (literal != nullptr) {
+      for (float part : literal->components) signature.push_back(part);
+    }
   }
   // A box that says `time` or `randChanging` has moved whether or not anything
   // else has, so it is asked again every frame.
@@ -2561,11 +2672,18 @@ void CodeBlock::CompileShader() {
     // The knobs drive uniforms. Their slots are looked up once here rather than
     // every frame: each one is a round trip to the driver.
     for (const mathprogram::Variable& variable : program_.variables()) {
-      if (!variable.free || variable.kind != mathprogram::Kind::Real) continue;
+      if (!variable.free) continue;
+      if (variable.kind != mathprogram::Kind::Real && variable.kind != mathprogram::Kind::Color) {
+        continue;
+      }
       for (const mathprogram::Literal& literal : variable.literals) {
         uniforms_.emplace_back(literal.uniform,
                                GetShaderLocation(shader_, literal.uniform.c_str()));
       }
+    }
+    // And the knobs of other boxes that this one reads, which move it too.
+    for (const mathprogram::Literal& literal : program_.imported()) {
+      uniforms_.emplace_back(literal.uniform, GetShaderLocation(shader_, literal.uniform.c_str()));
     }
     if (!havePreviewSurface_) {
       // Something for the shader to cover. One white pixel stretched over the
@@ -2587,6 +2705,9 @@ void CodeBlock::CompileShader() {
     for (const std::string& line : lines_) {
       if (MentionsWord(line, "time") || MentionsWord(line, "randChanging")) animated_ = true;
     }
+    // Something shared from another box that moves by itself moves this one.
+    const std::string& shared = program_.importedSource();
+    if (MentionsWord(shared, "time") || MentionsWord(shared, "randChanging")) animated_ = true;
     rangeLoc_ = GetShaderLocation(shader_, "sbRange");
     verticalLoc_ = GetShaderLocation(shader_, "sbVertical");
     indexLoc_ = GetShaderLocation(shader_, "sbIndex");

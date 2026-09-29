@@ -12,6 +12,7 @@
 #include "media.h"
 #include "selection.h"
 #include "slides.h"
+#include "colordw.h"
 #include "shaderwindow.h"
 #include "surfacedw.h"
 #include "volumedw.h"
@@ -123,6 +124,12 @@ class App {
   // Selects every window whose middle is inside a world rectangle, by handing
   // the rectangle to the lasso's own machinery.
   void SelectWithinWorld(Rectangle worldRect);
+  // Gathers what every box shares, and rebuilds any box whose share of it has
+  // changed. Once a frame, before the boxes compile.
+  void ShareAcrossCanvas();
+  // The box a name belongs to as seen from `block`: the block itself if it
+  // defines the name, otherwise whichever box shares it -- or `block`, if none.
+  CodeBlock* HomeOf(CodeBlock* block, const std::string& name) const;
   // Glides the camera so that every window whose middle is on screen is framed,
   // centred and filling the view. The Home key.
   void FrameOnScreen();
@@ -204,6 +211,7 @@ class App {
   AxisPanel                               axes_;
   PlotPanel                               plots_;
   ShaderPanel                             shaders_;
+  ColorPanel                              colours_;
   // One kind of window per shape of function: a colour-valued map of the plane
   // is a picture with no camera, a real-valued one is a surface under an
   // orthographic camera, and a function of three variables is a volume under a
@@ -214,6 +222,10 @@ class App {
   // Pictures and video. Not mathematics, so not in types/ -- but windows, and
   // so subject to every rule the others are.
   MediaPanel                              media_;
+  // What the boxes offer each other, and which version of each box it was
+  // gathered from -- so it is gathered again only when something changed.
+  mathprogram::Canvas                     canvas_;
+  std::vector<std::pair<const mathprogram::Program*, unsigned long>> sharedFrom_;
   // Slides: regions of the canvas worth looking at on their own, and the button
   // that makes them.
   SlidePanel                              slides_;

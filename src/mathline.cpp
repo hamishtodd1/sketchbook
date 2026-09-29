@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 
+#include "types/Color.h"
 #include "types/Complex.h"
 
 namespace sb::mathline {
@@ -576,6 +577,7 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
 // function spelling, and whatever the box's algebra calls its elements.
 bool IsKnownType(std::string_view text, const clifford::Signature& sig) {
   return IsRealType(text) || mathline::IsVectorType(text) || mathline::IsComplexType(text) ||
+         mathline::IsColorType(text) ||
          mathline::IsMultivectorType(text, sig);
 }
 
@@ -907,6 +909,8 @@ bool IsVectorType(std::string_view type) {
 
 bool IsComplexType(std::string_view type) { return type == types::complexnum::kName; }
 
+bool IsColorType(std::string_view type) { return type == types::color::kName; }
+
 std::string NameToLatex(std::string_view name) {
   if (name.empty()) return {};
 
@@ -1030,6 +1034,9 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
     // punctuation. It is the one part of a definition's frame that says
     // something a mathematician would also want said: the arrow claims what the
     // function is, and the brace says the working for it starts here.
+    // A colour has no reading as mathematics yet, so an arrow to or from one
+    // would be a claim about a set nothing names: that line stays code.
+    if (IsColorType(head.paramType) || IsColorType(head.returnType)) return line;
     line.latex = Marked(head.name, &line.marks) + " : " + SetLatex(head.paramType, sig) +
                  " \\to " + SetLatex(head.returnType, sig);
     // A prototype opens no brace, so it gets none -- which is the whole of what
@@ -1080,7 +1087,7 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
   std::size_t index = 0;
   std::string type;
   if (tokens[index].kind == Tok::Ident &&
-      (IsRealType(tokens[index].text) ||
+      (IsRealType(tokens[index].text) || IsColorType(tokens[index].text) ||
        mathline::IsMultivectorType(tokens[index].text, sig))) {
     type = tokens[index].text;
     ++index;
@@ -1088,6 +1095,20 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
   if (tokens[index].kind != Tok::Ident) return line;
   const std::string name = tokens[index].text;
   ++index;
+  // A colour is recognised -- it is a value, with a knob -- but it has no
+  // reading as mathematics yet, so its line stays code.
+  if (IsColorType(type)) {
+    line.type = type;
+    line.name = name;
+    if (tokens[index].kind == Tok::Semi && tokens[index + 1].kind == Tok::End) {
+      line.kind = Kind::Declaration;
+      line.hasInitialiser = false;
+    } else if (tokens[index].kind == Tok::Assign) {
+      line.kind = Kind::Declaration;
+      line.hasInitialiser = true;
+    }
+    return line;
+  }
 
   // `float a;`
   if (tokens[index].kind == Tok::Semi && !type.empty()) {

@@ -9,10 +9,12 @@
 #pragma once
 
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "compiler.h"
+#include "types/Clifford.h"
 #include "types/RealFunction.h"
 
 namespace sb::mathprogram {
@@ -23,6 +25,7 @@ enum class Kind {
   Real,         // float / double
   Function,     // RToR: a function from reals to reals
   Multivector,  // an element of a Clifford algebra: Bi, Even, ...
+  Color,        // a vec3 that is a colour: three numbers, one knob
 };
 
 // One literal assignment to a variable, and the uniform standing behind it.
@@ -46,6 +49,9 @@ struct Literal {
   // Moving its knob then writes the number back, so the text and what runs
   // never disagree.
   bool        written = false;
+  // A colour's three numbers, behind one vec3 uniform. Empty for a real, whose
+  // one number is `value`.
+  std::vector<float> components;
 };
 
 // What a type is, *as a space*.
@@ -168,6 +174,69 @@ struct Variable {
   }
 };
 
+class Program;
+
+// --- what boxes share -------------------------------------------------------
+//
+// **Everything shareable is visible everywhere.** A function defined in any box
+// can be called from any other, and a free value declared in any box can be read
+// by any other -- the way a paper defines a thing once and then uses it. Nothing
+// is imported by name and no box is special: the app gathers what every box
+// offers into one `Canvas`, and a box that mentions a name it does not define
+// itself gets that name compiled in.
+//
+// A function travels as text: its GLSL, with the knobs inside it as uniforms. A
+// value travels as a uniform, so a knob in one box moves every box that reads it
+// and nothing is compiled. A *derived* value does not travel at all -- it is
+// made by running its box's lines, and sharing it would make the canvas one
+// program with an order between its boxes, which a canvas does not have.
+struct SharedFunction {
+  std::string              name;
+  std::string              declaration;   // `float f(float x);`
+  std::string              text;          // its GLSL, operators already rewritten
+  std::vector<std::string> uniforms;      // the knobs inside it
+  const Program*           home = nullptr;
+};
+
+struct SharedValue {
+  std::string    name;
+  std::string    type;      // as GLSL spells it
+  std::string    init;      // what it is set to where it is declared
+  std::string    uniform;   // the knob behind it, or empty for a multivector
+  int            width = 1; // how many numbers that knob is: 3 for a colour
+  const Program* home = nullptr;
+};
+
+// Everything the boxes of one canvas offer each other, and the one algebra they
+// all work in. `home` is only ever compared, never followed, except by whoever
+// gathered this -- a box can go away between one gathering and the next.
+struct Canvas {
+  clifford::Signature         signature = clifford::kDefaultSignature;
+  // Two boxes naming different algebras. A canvas works in one, so this is an
+  // error on every line that names one.
+  bool                        algebraClash = false;
+  std::vector<SharedFunction> functions;
+  std::vector<SharedValue>    values;
+  // Names defined in more than one box. With no order between boxes, "the later
+  // one wins" means nothing, so each is an error in every box defining it.
+  std::vector<std::string>    duplicated;
+  // Which box each shared knob belongs to, so its number can be fetched.
+  std::unordered_map<std::string, const Program*> uniformHome;
+  // Names a box defines and does not share -- derived values, worked out by
+  // running that box. Another box mentioning one gets told why it is missing,
+  // rather than only that it is.
+  std::vector<std::pair<std::string, const Program*>> unshared;
+  // **Colour is handed out across the canvas**, not box by box: every name, in
+  // the order the boxes are in and then the order each declares them. A name
+  // means one thing on a canvas, so it gets one colour on it -- and two things
+  // in one box can no longer both be the first colour of their own box.
+  std::vector<std::string> colourOrder;
+};
+
+// Everything the boxes offer, gathered. Boxes that offer nothing -- words, a
+// viz, a sampler -- are passed like any other and simply contribute nothing.
+Canvas Gather(const std::vector<const Program*>& programs);
+
 // There is one language. A box is GLSL, and compiling GLSL means talking to the
 // graphics context -- which this half of the program knows nothing about and
 // must keep knowing nothing about. So it assembles the source, stops, and waits
@@ -181,20 +250,55 @@ enum class State {
 
 class Program {
  public:
-  Program() = default;
+  Program();
   Program(const Program&) = delete;
   Program& operator=(const Program&) = delete;
 
-  // Rebuilds from the box's lines. Values of variables that survive the edit
-  // are carried over, so editing does not reset the knobs you have set.
-  void Rebuild(const std::vector<std::string>& lines);
+  // Rebuilds from the box's lines, in the algebra the canvas works in and with
+  // whatever the canvas shares compiled in where the box mentions it. Values of
+  // variables that survive the edit are carried over, so editing does not reset
+  // the knobs you have set.
+  void Rebuild(const std::vector<std::string>& lines, const Canvas& canvas);
+
+  // --- sharing ---------------------------------------------------------------
+  //
+  // What this box offers the rest of the canvas. Worked out on every rebuild,
+  // including one that fails, so a mistake in a box does not make its names
+  // vanish and reappear -- which would make a clash come and go with it.
+  const std::vector<SharedFunction>& sharedFunctions() const { return sharedFunctions_; }
+  const std::vector<SharedValue>&    sharedValues() const { return sharedValues_; }
+  // Every name the box defines at the top level, shared or not: a name means
+  // one thing on a canvas.
+  const std::vector<std::string>&    definedNames() const { return definedNames_; }
+  // The algebra this box names with a `Cl(...)` line, if it names one.
+  bool                               saysAlgebra() const { return saysAlgebra_; }
+  const clifford::Signature&         saidAlgebra() const { return saidAlgebra_; }
+  // Changes whenever what this box offers does, and never repeats between
+  // boxes, so a list of these says whether anything on the canvas has changed.
+  unsigned long                      sharedVersion() const { return sharedVersion_; }
+  // Whether what this box took from `canvas` is no longer what the canvas says
+  // -- in which case it has to be built again.
+  bool                               ImportsStale(const Canvas& canvas) const;
+  // Fetches the current numbers of the knobs this box reads from other boxes.
+  // Called by whoever gathered `canvas`, while it is fresh.
+  void                               PullImports(const Canvas& canvas);
+  // The text this box has compiled in from elsewhere, for anything that needs
+  // to ask what it mentions.
+  const std::string&                 importedSource() const { return importedSource_; }
+  // The names it took: shared values and functions defined in other boxes.
+  const std::vector<std::string>&    importedNames() const { return importedNames_; }
 
   // Sets a free variable: moves the literal governing `atLine`, which is the one
   // responsible for what the window showing this variable is displaying. -1
   // means the end. Nothing is rebuilt; the uniform carries it.
   void SetValue(std::size_t index, float value, int atLine = -1);
-  // The literal a uniform of this name stands behind, or null.
+  // The same for a colour, whose knob is three numbers.
+  void SetColor(std::size_t index, const float rgb[3], int atLine = -1);
+  // The literal a uniform of this name stands behind, or null -- this box's own,
+  // or one it reads from another box.
   const Literal* FindLiteral(const std::string& uniform) const;
+  // The knobs this box reads from other boxes.
+  const std::vector<Literal>& imported() const { return imported_; }
 
   // Values to adopt on the next rebuild, for a canvas loaded from disk. They
   // lose to anything already on screen, and are consumed once.
@@ -304,6 +408,28 @@ class Program {
   compiler::Diagnostic     error_;
 
   std::vector<std::pair<std::string, float>> restore_;
+
+  // Unique to this box, so the uniforms of two boxes never share a name once
+  // one box's functions are compiled into the other.
+  int                         id_ = 0;
+  std::vector<SharedFunction> sharedFunctions_;
+  std::vector<SharedValue>    sharedValues_;
+  std::vector<std::string>    definedNames_;
+  bool                        saysAlgebra_ = false;
+  clifford::Signature         saidAlgebra_;
+  int                         algebraLine_ = -1;
+  unsigned long               sharedVersion_ = 0;
+  std::string                 sharedKey_;
+  // Names the box mentions and does not define: what it may take from others.
+  std::vector<std::string>    wanted_;
+  // What it took, said as one string so that "has it changed" is a comparison.
+  std::string                 importKey_;
+  // The knobs it reads from other boxes, with their current numbers.
+  std::vector<Literal>        imported_;
+  std::string                 importedSource_;
+  std::vector<std::string>    importedNames_;
+  // Names this box mentions that are derived values in another box.
+  std::vector<std::string>    derivedElsewhere_;
 };
 
 }  // namespace sb::mathprogram

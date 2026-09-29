@@ -570,12 +570,19 @@ not decoration, and every new kind of window has to answer for it.
 Two mechanisms so far, and both should be extended rather than replaced:
 
 **Colour is identity.** Every variable has its own colour, taken from
-**viridis** by its position in its box (`VariableColor`, in `theme.h`), and
+**viridis** by its position on the canvas -- the boxes in order, and each box's
+names in the order it declares them (`Canvas::colourOrder`, and `VariableColor`
+in `theme.h`), and
 everything standing for that variable wears it: the handle or marker on its
 number line, its curve on a plot, its name written beside its marker. Viridis
 because it is perceptually even -- two colours the same distance apart on the
 map look equally different -- and the walk along it is by the golden ratio, so
-neighbouring variables land far apart and adding one never recolours the others.
+neighbouring variables land far apart and a name added at the end recolours
+nothing. A name added *earlier* -- in a box further up the list, or above
+another in its own box -- moves everything after it along by one step. That is
+the price of the canvas having one list: two names in one box used to be able to
+wear the same colour, each being first in a box of its own, and a name used in
+several boxes now wears the same colour in all of them.
 The dark end is skipped, since the cards are already dark.
 
 Colour therefore no longer says whether a variable is free or derived. **Shape**
@@ -955,7 +962,58 @@ the app's: `AxisPanel::GrabbableAt` is the third and the `Drag::Handle` case of
 `AxisPanel::HandleInput` is the fourth, and a function has neither, which is why
 a curve cannot be dragged.
 
+### Vizes are bootstrapped
+
+**The app's own vizes are written the way a user's would be: in GLSL, on a
+canvas.** That is the aim. There are already many kinds of viz, and there will be
+many more: a ball, an arrow, a line through space, a plane, a conic swept into
+a tube, a field. Across all of them, two things hold. A viz:
+
+- **is drawn** in a chosen dw, or a chosen set of them, and how it is drawn
+  depends on the value of the variable it stands for;
+- **has a position** in that dw, which is where its wires attach, and that
+  position can depend on the value too.
+
+Both come from GLSL functions that belong to the viz, and **both are in one
+window**. A viz is one box, not a pair.
+
+**The app's vizes live in `viz.sketch`.** Each viz's vertex shader and fragment
+shader are in a window there. So is the GLSL that *makes* its geometry, the
+vertices, normals and texture coordinates. That code runs at startup to fill the
+buffers, and it can be run again.
+
+**Most vizes need no fragment shader of their own.** A point of Cl(3,0,1) is a
+lit ball, which needs phong shading and nothing more, and many are like it.
+
+Still to be planned: how a window says which of its functions is which, how a
+value reaches the geometry, and how `viz.sketch` reaches a canvas that is not
+itself.
+
+### How the vizes drifted
+
+This is recorded so that it does not happen again. Viz boxes arrived with a
+fallback: *a type with no viz boxes keeps the drawing the app was born with*.
+The fallback became the main road.
+
+- **Every window added since then was drawn in C++**, in its dw's own file: the
+  space window's balls, the surface, the volume, the picture, the colour
+  window, and the beads of a spread. None of it asks the canvas for a viz.
+- **The viz box could not have said any of it.** It is 2D and works in screen
+  pixels, with no normals, no lighting and no fragment shader of its own.
+- **Nobody extended it instead, and nobody said that was a choice.**
+- **Only two places ask for a viz**: the number line and the plot.
+- **The plot's viz has not worked since a function became GLSL.** Its mesh half
+  compiles on its own, so it cannot call the function it is meant to draw.
+
+The rule for new work: **drawing a type is a viz, and a viz is GLSL in
+`viz.sketch`.** If a new window needs a drawing that a viz cannot express yet,
+extend what a viz can say, or stop and ask. That is never a reason to draw it in
+C++.
+
 ### Writing a viz inside the app
+
+This is what exists now, and it is what the section above replaces: two boxes
+per viz, 2D, with the mesh laid down again for every value.
 
 **The first two questions can now be answered on the canvas.** A box whose first
 line is `Viz(float);` is a **viz box**: it says how a value of that type is
@@ -1039,8 +1097,9 @@ for (int i = 0; i < 20; ++i) {             float px = value(-8.0f), py = -8.0f;
                                            }
 ```
 
-`C:\sketches\viz.sketch` is exactly that, both of them, and editing any of the
-four boxes changes what is drawn on the next rebuild.
+`C:\sketches\viz.sketch` has the ring, and editing either of its boxes changes
+what is drawn on the next rebuild. Its two `RToR` boxes are empty, and the
+`RToR` viz could not draw a function anyway (*How the vizes drifted*).
 
 `C:\sketches\spaces.sketch` is one of each window a function's type can ask
 for: a picture, a domain colouring, a surface and a volume.
@@ -1061,10 +1120,6 @@ and what it toggles instead is whether you are shown its source. What differs
 between kinds of code box is which side the toggle starts on, never whether it
 is there.
 
-**A type with no viz boxes keeps the drawing the app was born with.** Nothing has
-to be authored for a canvas to work -- authoring one is how you take it over. So
-the built-in ring, dot and polyline are still there, and still the fallback.
-
 **Winding does not decide whether you can see it.** raylib culls back faces, and
 screen space turns the y axis upside down, so a ring written the way anyone would
 write one -- anticlockwise, in the coordinates it was thought in -- comes out
@@ -1083,9 +1138,8 @@ which of the three is doing the work -- geometry for a marker, a path for a
 curve, a fragment for a field. Unifying them is not done, but the vocabulary now
 says what unifying them would mean.
 
-`vdw2` is where the elaborate ones live -- `BiViz22.js`, `TriPViz.js`,
-`ScalarFieldViz.js` and the rest -- and its shape is the one to grow towards:
-there a viz is `{geometries, transform, getDist, onDrag}`, which is the same four
+The elaborate vizes still to come have the same shape. Each is some
+geometries, a transform from the value, a distance and a drag: the same four
 questions under different names.
 
 ### What a viz still cannot say
@@ -1445,6 +1499,82 @@ variable's marker are all views: closing one takes away the view and nothing
 else. The rule is worth stating plainly -- **a window that controls something
 bakes what it controlled; a window that only shows something does not.**
 
+### Sharing between boxes
+
+A box is still one shader, but it is no longer a world of its own:
+
+**Everything shareable is visible everywhere, automatically.** No imports and
+no names for boxes: a function defined in any box can be called from any other,
+and a free value declared in any box can be read by any other -- the way a paper
+defines a thing once and then uses it. Any box can be the home of something
+shared; there is no special box of definitions.
+
+**What is shared is functions and free values, and nothing else.** A function
+-- a definition or a prototype -- is text, and a box that calls it gets it
+compiled in. A free value, `float a;` or `float a = 0.4;`, is a uniform, so
+another box reads the same uniform and one knob moves both without anything
+being compiled. A **derived** value is not shared: `c = a + b` is worked out by
+running its box's lines, and sharing it would make the canvas one program with
+an order between boxes, which a canvas does not have.
+
+**The algebra is the canvas's.** A canvas works in one Clifford algebra, so
+nothing is ever written in two at once. The `Cl(...)` line is still written in a
+box and still reads "Consider Cl_{3,0,1}", but it is a statement about the
+whole canvas; a canvas that says two different ones is an error on those lines.
+A box with no `Cl` line is read and built in the canvas's algebra, which is why
+the line cache compares the canvas's algebra as well as the box's own lines.
+
+What follows from those:
+
+- **A knob still never recompiles.** Only editing shared *text* rebuilds the
+  boxes that use it, and a rebuild that comes out the same is still not
+  compiled -- so a box that does not mention what changed costs nothing.
+- **The cost is on edits.** Every box calling an edited function is rebuilt, on
+  the drawing thread, and with an algebra that is 60 to 200 ms each.
+- **A name defined twice on the canvas is an error in both places**, since with
+  no order between boxes "the later one wins" means nothing.
+- **Sameness is shown.** A call in one box lights up the definition in another
+  and wires to it; a shared value's windows are its home box's windows.
+- **A box copied to another canvas** can be left calling something that is not
+  there.
+
+**How it works.** Every box's build works out what it *offers* -- its functions
+as the GLSL it compiles them to, its free values as the uniform behind the
+number they are given where they are declared -- and every name it defines at
+the top level. Once a frame the app lists which version of each box's offer it
+has; when that list changes it gathers them into one `mathprogram::Canvas`
+(`App::ShareAcrossCanvas`), and each box asks whether what it *took* from the
+canvas has changed. Only those are built again, and only those whose shader
+comes out different are compiled.
+
+A box takes what it mentions and does not define, and whatever that mentions in
+turn. Values arrive as a uniform and a global set where every drawing starts;
+functions arrive as their declarations first and then their text, so functions
+in different boxes can call each other whatever order they are gathered in.
+
+- **A shared value is what it is given where it is declared.** `a = 0.9;`
+  further down its home box is part of that box's run of lines, which no other
+  box runs.
+- **A knob's uniform is named for its box as well as its line**, `k_5_12`, since
+  a function from one box is compiled into another and two boxes can each have
+  a `k` on line 5.
+- **A mistake in shared code is reported at home.** Compiled into another box,
+  it can only say that it is in something shared -- pointing at a line of that
+  box would be a lie.
+- **Pointing is shared too.** A shared name wears its home colour everywhere,
+  pointing at a mention of it in any box -- or highlighting one -- lights it up
+  from its home, and whatever lights up at home lights up in every box that uses
+  it, wired from the same window. Dragging a shared real out of the box that uses
+  it pulls out its home's value, since that is where its window is.
+- **A derived value from elsewhere says why it is missing.** The driver can only
+  say the name is undeclared; when it is a value another box works out, the
+  message says so, and that only free values and functions are shared.
+- **A box being written in is left alone** until the caret leaves it, or a
+  change elsewhere would compile half a thought.
+
+`C:\sketches\sharing.sketch` shows it: one box defines `k` and `bump`, and three
+others use them.
+
 ### Words
 
 Not everything on this canvas is mathematics. A slide has a title; a diagram
@@ -1766,6 +1896,7 @@ A type is three concerns, and they are three files:
 | `Clifford.*` | a whole family of types: it writes out the structs and products of Cl(p,q,r) on demand |
 | `RealFunctionViz.*` | how one is shown and how an example of one is made -- the *viz*, plus the plot it is shown in |
 | `RealViz.*` | the same two things for a real: the number line (a *dw*) and the marker on it (a *viz*) |
+| `Color.*` | the alias, `hsv`, an example colour, and the conversions the window draws with |
 
 There is no `Real.*`, because `float` is already GLSL and needs no definition.
 That asymmetry is the point of splitting a type from its viz: only some types
@@ -1856,10 +1987,11 @@ is not.
 
 **The signature is written the way it is spoken.** `Cl(3,0,1);` on a line
 of its own says p generators squaring to +1, q to -1 and r to 0 -- and that line
-is a statement *about* the box rather than one *in* it, so it leaves a blank
-behind rather than being compiled, and it reads as the sentence that names the
-algebra rather than as code. A box that says nothing works in Cl(3,0,1),
-3D projective geometric algebra, which is what these tools are mostly for.
+is a statement *about* the canvas rather than one *in* a box, so it leaves a
+blank behind rather than being compiled, and it reads as the sentence that names
+the algebra rather than as code. Every box on the canvas works in it (see
+*Sharing between boxes*). A canvas that says nothing works in Cl(3,0,1), 3D
+projective geometric algebra, which is what these tools are mostly for.
 
 **`e0` is the null generator, and only an algebra with one has an e0.** The
 generators are counted from one, the way the axes of a space always are, so
@@ -2261,9 +2393,8 @@ than anything random -- the same integer always gives the same number, because a
 canvas that spread itself differently every frame would be a canvas nobody could
 point at anything on.
 
-**A type with no sampler box gets the spread the app was born with**, exactly as
-a type with no viz box keeps the drawing it was born with: authoring one is how
-you take it over, not how you switch it on. Only the reals have one -- 24 of
+**A type with no sampler box gets the spread the app was born with**: authoring
+one is how you take it over, not how you switch it on. Only the reals have one -- 24 of
 them, evenly across [-4, 4] -- because a spread of reals is the one thing the app
 can guess at. What a spread of *points* should be is a question only the person
 drawing it can answer.
@@ -2429,6 +2560,63 @@ as an algebra is, and its products answer to the names the operator rewrite
 produces -- so `z * w` is a complex multiplication, `~z` is the conjugate (which
 is what the reverse of a one-generator algebra is), and there is nothing extra
 to learn.
+
+### Colours
+
+**`Color` is a vec3 that means a colour.** The shader is told `#define Color
+vec3` -- only when a box mentions one, like an algebra -- and nothing else, so
+`.rgb`, swizzles, `mix`, `clamp`, `pow` and every other built-in come for
+nothing, and so does the operator rewrite, which already writes `add`, `gp` and
+the rest for vec3. `hsv(h, s, v)` makes one, hue in turns.
+
+**A new struct when the algebra differs; an alias when only the meaning does.**
+`Complex` had to be a struct because `z * w` is not a component-by-component
+product. A colour has no algebra of its own -- adding two is adding light,
+scaling one dims it, multiplying two is a filter -- so what makes one different
+is only what it means, and meaning is exactly what the app reads off the declared
+type. This is not the aliasing *A renamed spelling is renamed* forbids: that is
+two names for one thing, and a colour and a vector are two things GLSL stores
+the same way. The price is that the driver's messages say vec3.
+
+**Its knob is three numbers behind one `vec3` uniform** -- `Color c;` and a typed
+`Color c = Color(0.2, 0.5, 0.9);` alike, the second rewritten as it is dragged.
+So a `Literal` carries `components` as well as its one `value`, a colour is saved
+as three records, `val c.r` and so on, and a colour shared from another box
+travels as a vec3 uniform. Derived colours are traced part by part, the way a
+multivector's components are.
+
+**There is no reading as mathematics for one yet**, by decision: a line declaring
+a colour, and the signature of a function taking or giving one, stay code. A
+function of the plane giving a `Color` is a picture, as one giving a vec3 is --
+and one giving a vec3 still is a colour picture, which was kept.
+
+**Its window has three views, chosen from a dropdown** that appears to the right
+of it while the pointer is on it -- where later choices about the window will go
+too. The dropdown is asked before anything else on the canvas, since it stands
+over whatever is beside the window, and drawn after every window for the same
+reason.
+
+- **Picker** -- a hue ring, and inside it a triangle whose corners are black,
+  white and the hue it points at: what drawing programs have long used for
+  choosing. Drag round the ring for hue, inside the triangle for saturation and
+  value. Every colour sits on the ring at its hue; the one the triangle points at
+  -- the one last taken hold of -- is also in the triangle. The triangle is a
+  mesh with a colour at each corner, which the GPU blends in exactly the
+  proportions the colour model says.
+- **RGB cube** and **HSV cylinder** -- turned on the right button like every
+  window with a camera, and orthographic, since a colour space is a graph of
+  three numbers rather than a place to look into. A drag moves a colour in the
+  plane facing you. The cube's edges and the cylinder's walls run through the
+  colours they stand for.
+
+**Colour is identity, and here colour is also the value**, so a marker's fill is
+the colour it *is* and its rim the colour saying *which* variable it is: a ring
+outside a gap for a knob, an outline for a derived value. A colour outside 0..1
+is drawn where it is, outside the solid.
+
+**A function giving a colour, fed a spread**, puts its answers in the window as
+beads the colour they are -- inside the ring in the picker, at their place in the
+cube or cylinder. `C:\sketches\colour.sketch` has both.
 
 ### A surface is a picture you can turn
 
@@ -2703,8 +2891,11 @@ that **is no longer there is left out** rather than offered and then failing: a
 place you cannot go back to is not a place. `recent.*` is raylib-free like the
 rest of the layer that talks to the outside world.
 
+**A press anywhere off the menu closes it**, and there is no "Esc to close" line:
+Escape still works, but clicking away is what everyone tries first.
+
 **A press the menu acted on belongs to the menu**, including the press that
-closed it. Without that rule, choosing a recent canvas spends one click on two
+closed it -- whether that was a button or a click off the panel. Without that rule, choosing a recent canvas spends one click on two
 canvases: it closes the menu, and then the same press lands on whatever box of
 the *newly loaded* canvas happens to be under the pointer and puts a caret in
 it.
@@ -2786,8 +2977,8 @@ wheel belongs to whatever window it is over, since that is what resizes it.
 A viz can now be written on the canvas itself. Two boxes saying `Viz(float);`
 -- one laying down a mesh with `vertex(x, y)`, one placing its vertices
 -- are what draws the markers on the number line, and editing either changes
-them on the next rebuild. `C:\sketches\viz.sketch` is that, working. A type
-with no viz boxes keeps the drawing the app was born with.
+them on the next rebuild. `C:\sketches\viz.sketch` is that, for the ring.
+Everything else is still drawn in C++ (*How the vizes drifted*).
 
 A function from a real to a point works end to end. A box of
 
@@ -2816,7 +3007,8 @@ toolchain: reading a driver's log), `dock.h` (where a window a box makes goes be
 `carry.h` (what a carried window follows: the mouse, or one finger),
 `busy.*` (the busy cursor while a shader compiles; Win32, raylib-free),
 `logging.h` (what the log says, and mostly what it does not),
-`shaderwindow.*` (a colour-valued map of the plane, flat), `surfacedw.*` (a
+`shaderwindow.*` (a colour-valued map of the plane, flat), `colordw.*` (a
+colour, as a picker, a cube or a cylinder), `surfacedw.*` (a
 real-valued one, as relief under an orthographic camera), `volumedw.*` (a
 function of three variables, looked through under a perspective one),
 `media.*` (pictures and video as windows),
@@ -2868,7 +3060,8 @@ sections above.
 
 - **A multivector has no knob.** Its chosen value is written into the source, so
   changing it would be a compile. One uniform per component would fix it, by the
-  rule every real already follows.
+  rule every real already follows -- and a colour's knob is exactly that, three
+  numbers in `Literal::components`, so the machinery now exists.
 
 - **A multivector shows no injected value.** A real shows its number and a
   function shows its body, but a multivector of Cl(3,0,1) has sixteen

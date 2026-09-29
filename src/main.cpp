@@ -118,7 +118,7 @@ int main(int argc, char** argv) {
       lines.push_back(line);
     }
     sb::mathprogram::Program program;
-    program.Rebuild(lines);
+    program.Rebuild(lines, sb::mathprogram::Canvas{});
     for (const sb::mathprogram::Function& fn : program.functions()) {
       std::printf("// function %s : %s -> %s   lines %d..%d  %s\n", fn.name.c_str(),
                   fn.inputType.c_str(), fn.outputType.c_str(), fn.firstLine, fn.lastLine,

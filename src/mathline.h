@@ -202,11 +202,9 @@ bool IsRealType(std::string_view type);
 // this file has to know them: a function is recognised by its shape.
 bool IsVectorType(std::string_view type);
 bool IsComplexType(std::string_view type);
-// The plane and the space of ordinary GLSL, and the plane with a multiplication
-// on it. They are types a function can take and give, which is the only reason
-// this file has to know them: a function is recognised by its shape.
-bool IsVectorType(std::string_view type);
-bool IsComplexType(std::string_view type);
+// A colour: a vec3 that means one. A declaration of one is a value with a knob,
+// and has no mathematical reading yet -- it stays code.
+bool IsColorType(std::string_view type);
 // An element of a Clifford algebra: Bi, Even, ScalarQuad, ...
 bool IsMultivectorType(std::string_view type, const clifford::Signature& sig);
 

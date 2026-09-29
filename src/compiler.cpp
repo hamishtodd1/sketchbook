@@ -89,7 +89,12 @@ Diagnostic ParseGlslLog(const std::string& log, const ShaderLines& where) {
     // inside it -- so which range the driver's line falls in decides which one
     // it was. The body first: an error there is about what a line *does*.
     int boxLine = 1;
-    if (haveLine) {
+    // A mistake in something another box shares is that box's mistake, and it
+    // is reported there on its own line. Here it can only be said to be in
+    // something shared -- pointing at a line of this box would be a lie.
+    if (haveLine && atLine > where.sharedAt && atLine <= where.sharedEnd) {
+      message = "in something shared from another box: " + message;
+    } else if (haveLine) {
       if (where.count > 0 && atLine >= where.bodyAt && atLine < where.bodyAt + where.count) {
         boxLine = std::max(1, atLine - where.bodyAt);
       } else if (where.count > 0 && atLine >= where.functionsAt &&
