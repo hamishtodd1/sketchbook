@@ -1,0 +1,130 @@
+sketchbook 3
+view 4520 0 2.02
+aspect 1.5
+slide -520 0
+slide 740 0
+slide 2000 0
+slide 3260 0
+slide 4520 0
+slide 5780 0
+block -1076.28 -422.822 72 0 1 0 0 1000 0
+> \text sketchbook
+end
+block -1076.28 -153.754 30 0 0 0 0 1000 0
+> \text An infinite canvas for exploring mathematics through programming. Behind every piece of LaTeX here there is some compileable GLSL: the LaTeX is what you read, the shader is what runs.
+end
+block -1076.28 76.8768 24 0 0 1 0 1000 0
+> \text Press right to go through the deck. Everything on a slide is an ordinary window of the canvas -- carry it by its rim, resize it with the wheel, drop it on the cross at the foot of the screen to throw it away.
+end
+block 192.192 -422.822 44 0 1 0 0 900 0
+> \text Reals
+end
+block 192.192 -269.069 26 0 0 0 0 0 0
+> float a;
+> float b;
+> float c = (a + b) / 2;
+val a -0.431373
+val b 0.5077
+end
+block 768.768 -269.069 26 0 0 0 0 470 0
+> \text A box gets one number line, carrying all of its reals on one scale. A ring is yours to drag; a filled dot is derived, so move its inputs instead. Colour says which variable, shape says whether it moves.
+end
+block 768.768 -0 22 0 0 1 0 470 0
+> \text a has been pulled out onto an axis of its own: highlight any mention of a variable in the code and drag it out of the box. Press the bare part of an axis to make a new one there.
+end
+block 1460.66 -384.384 44 0 1 0 0 900 0
+> \text Functions
+end
+block 1460.66 -76.8768 22 0 0 0 0 0 0
+> float w;
+> float f(float x);
+> float g(float x);
+> float h(float x) { return f(x) + w * g(x); }
+val w 1.09959
+end
+block 1460.66 -230.63 22 0 0 0 0 1000 0
+> \text A function is a GLSL function, so a curve is evaluated per pixel rather than joined up between samples -- and a knob reshapes one at display rate. All three curves share one plot: drop a plot onto another and they merge.
+end
+block 2729.13 -384.384 44 0 1 0 0 900 0
+> \text Pictures
+end
+block 2729.13 -230.63 22 0 0 0 0 0 0
+> float u;
+> float v;
+> vec3 ripple(vec2 p) {
+>   float r = length(p) * (3.0 + 10.0 * u);
+>   float t = 0.5 + 0.5 * cos(r + v);
+>   return vec3(t, t * t, 1.0 - t);
+> }
+val u 0.439152
+val v 0.875625
+end
+block 2729.13 153.754 24 0 0 0 0 1000 0
+> \text A box draws because it defines a function of two variables. A picture is what a map from the plane looks like: one pixel for every input, coloured by what comes out -- viridis for a real, the colour itself for a vec3, hue and lightness for a complex number. Its knobs are uniforms, so they reshape the picture without rebuilding, and the wheel over it zooms the patch of the plane on show.
+end
+block 3959.16 -384.384 44 0 1 0 0 900 0
+> \text Geometric algebra
+end
+block 4074.47 -230.63 22 0 0 0 0 0 0
+> Cl(3,0,1);
+> Tri P;
+> Tri Q;
+> float k;
+> Tri R = P + k * Q;
+> Bi L = P & R;
+> float m = grade0(L * ~L);
+val P.e012 -0.05
+val P.e013 -0.12
+val P.e023 -0.58
+val P.e123 0.4
+val Q.e012 -0.61
+val Q.e013 -0.85
+val Q.e023 -0.57
+val Q.e123 0.26
+val k 0.544315
+end
+block 4535.73 -230.63 24 0 0 0 0 470 0
+> \text The algebra is generated rather than included: concrete structs and concrete products, fully unrolled, no templates and no runtime dispatch. A type is a set of grades, so every product has an exact result type and every result type has a name.
+end
+block 4535.73 76.8768 22 0 0 1 0 470 0
+> \text P and Q are points of 3D projective GA and R is a point between them, so joining P to R gives the line through both -- and dragging k grows that line's weight.
+end
+block 5227.62 -307.507 44 0 1 0 0 900 0
+> \text Pictures and video
+end
+block 5227.62 115.315 23.9314 0 0 0 0 997.145 0
+> \text Neither is mathematics, so neither lives in types/ -- but both are windows: carried by the rim, landing on the grid, caught by the lasso, resized by the wheel. A corner crops. There is no decoder here; the frames come off an ffmpeg pipe as they arrive.
+end
+block 5227.62 307.507 22 0 0 1 0 1000 0
+> \text The clip is trimmed to the second and a half between the markers, and plays round in a loop. Double-click a time to type an exact one.
+end
+axis 1 0 0 -0.135 2.2 4
+ref 4 b
+ref 4 c
+axis 0 196 56 -0.778 2.2 4
+ref 4 a
+axis 1 0 0 1.4 4 8
+ref 8 w
+axis 1 0 0 0.7 0.857143 11
+ref 11 u
+ref 11 v
+axis 0 4631.83 269.069 0.327842 0.777594 14
+ref 14 k
+ref 14 m
+axis 1 0 0 0 4 8
+field 8 f
+axis 1 0 0 0 4 8
+field 8 g
+axis 1 0 0 0 4 8
+field 8 h
+shader 1 0 0 11 0 0 4
+space 0 0 3959.16 76.8768 14 2.25 -0.3 16 1 1
+point 14 P
+point 14 Q
+point 14 R
+media 0 5246.84 -201.802 479.999 0 0 1 1 0 0 mandelbrot.png
+media 1 5776 -214 480 0 0 1 1 1.5 3 clip.mp4
+plot 0 2133.33 -76.8768 0 0 6 8
+curve 8 f
+curve 8 g
+curve 8 h

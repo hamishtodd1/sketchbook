@@ -18,6 +18,7 @@
 #include "raylib.h"
 #include "tex/tex.h"
 #include "viewport.h"
+#include "viz.h"
 
 namespace sb {
 
@@ -330,10 +331,9 @@ class CodeBlock {
 
   // --- a box that draws rather than computes -------------------------------
   //
-  // `Viz(float);` makes this box a **viz**: it says how a value of that type is
-  // drawn inside a display window rather than declaring a value of its own. Its
-  // mesh half lays down geometry; its place half is the vertex shader that
-  // places it. See viz.h for the vocabulary and for how the two are paired.
+  // `Viz(Tri, "Space");` makes this box a **viz**: how a value of that type is
+  // drawn in that kind of window, rather than a value of its own. See viz.h and
+  // vizglsl.h.
   //
   // --- drawing one of this box's functions ---------------------------------
   //
@@ -356,6 +356,12 @@ class CodeBlock {
   bool BeginField(const std::string& name, int mode, Vector2 range, Vector2 vertical,
                   float halfWidth) const;
   void EndField() const;
+  // How far, in pixels, the pointer is from the drawing of one of this box's
+  // functions -- its viz's `grab`, for the window `shape` names -- when the
+  // pointer is at `at` in that window's own space and a pixel there is `pixel`
+  // long. Huge where the viz does not say. A read back from the GPU, so it is
+  // asked once, when a gesture begins.
+  float GrabAt(const std::string& name, int shape, Vector2 at, float pixel) const;
 
   // --- what a box draws ----------------------------------------------------
   //
@@ -405,22 +411,13 @@ class CodeBlock {
   int                SamplerStride() const { return program_.samplerStride(); }
   const std::vector<float>& SamplerRun() const;
 
-  const std::string&        VizType() const { return program_.vizType(); }
-  // How much geometry the last run laid down, and where it is. The vertices
-  // never come back to the CPU: what is here is the count, which is all a draw
-  // call needs to know.
-  int          VizTriCount() const { return vizTriCount_; }
-  int          VizLineCount() const { return vizLineCount_; }
-  unsigned int VizTriBuffer() const { return vizTriBuffer_; }
-  unsigned int VizLineBuffer() const { return vizLineBuffer_; }
-  // A viz box whose half lays geometry down: it holds a compute program and the
-  // buffers that program writes into. Running it for a value is what produces
-  // the mesh; it only actually dispatches when the value has changed.
-  bool HasVizMesh() const { return vizMeshProgram_ != 0; }
-  void RunVizMesh(float value) const;
-  bool                      HasVizShader() const { return haveVizShader_; }
-  Shader                    VizShader() const { return vizShader_; }
-  int                       VizUniform(const char* name) const;
+  // `Tri@Space` for a box saying `Viz(Tri, "Space");`, and empty for any other.
+  const std::string& VizType() const { return program_.vizType(); }
+  // The viz this box is, compiled and ready to draw -- or null.
+  const VizGpu*      VizProgram() const { return viz_.Ready() ? &viz_ : nullptr; }
+  // A viz of a function compiled standing alone, against a stand-in function:
+  // one that has is one a box can compile in.
+  bool               FunctionVizReady() const { return functionVizOk_; }
 
   // Draws this box's shader into a rectangle. The window that owns that
   // rectangle lives elsewhere; the GPU side of it lives here.
@@ -480,9 +477,13 @@ class CodeBlock {
   // The same for a colour: its three numbers, written into the text when they
   // were typed there.
   void SetColorValue(const std::string& name, const float rgb[3], bool intoText = true);
+  // And a multivector's, one number per member. Only a knob the app chose has
+  // one yet, so there is no text to write back.
+  void SetComponentValues(const std::string& name, const std::vector<float>& parts);
   // Every knob's number, as the canvas file and the clipboard keep them: a real
-  // under its name, a colour as three entries `c.r`, `c.g`, `c.b`. Only what is
-  // not already written in the text.
+  // under its name, a colour as three entries `c.r`, `c.g`, `c.b`, a multivector
+  // as one per member, `p.e012` and so on. Only what is not already written in
+  // the text.
   std::vector<std::pair<std::string, float>> KnobValues() const;
   // A knob about to be dragged: if its number is typed in the text, the drag is
   // an edit of the text, and gets one undo step.
@@ -542,6 +543,11 @@ class CodeBlock {
   // Whether the whole box is code right now, which is what the button has to
   // ask before it can say what pressing it would do.
   bool ReadsAsCode() const;
+  // The canvas's "always show code": every code box reads as code, whatever its
+  // own toggle says, with no injected values, and the toggle is not offered.
+  // Prose is words either way.
+  static void SetAlwaysCode(bool on) { alwaysCode_ = on; }
+  static bool AlwaysCode() { return alwaysCode_; }
   bool    ShowSource() const { return showSource_; }
   void    SetShowSource(bool value) { showSource_ = value; }
   void    SetWorldPosition(Vector2 position) { origin_ = position; }
@@ -725,6 +731,7 @@ class CodeBlock {
   // When focused, the box shows all code. The toggle flips it back to reading
   // as mathematics while still being editable line by line.
   Reading reading_ = Reading::Auto;
+  static inline bool alwaysCode_ = false;
   bool   absorbed_ = false;
   bool   selected_ = false;
   std::vector<std::string> hidden_;
@@ -765,10 +772,9 @@ class CodeBlock {
   // the uniform slots its knobs drive, and a blank surface for it to cover.
   Shader                                shader_{};
   bool                                  haveShader_ = false;
-  // A viz box's vertex shader, which is a different thing from the fragment
-  // shader above: it places a mesh rather than colouring a square.
-  Shader                                vizShader_{};
-  bool                                  haveVizShader_ = false;
+  // A viz box's programs and meshes.
+  VizGpu                                viz_;
+  bool                                  functionVizOk_ = false;
   std::vector<std::pair<std::string, int>> uniforms_;
   std::vector<Play>                     playing_;
   bool                                  playPaused_ = false;
@@ -793,17 +799,6 @@ class CodeBlock {
   // Where the box is being read. -1 for neither, which means the end.
   unsigned int                          traceBuffer_ = 0;
   int                                   traceFloats_ = 0;
-
-  // The viz mesh half: a compute program, the two buffers it lays geometry
-  // into, and what came back.
-  unsigned int                          vizMeshProgram_ = 0;
-  unsigned int                          vizTriBuffer_ = 0;
-  unsigned int                          vizLineBuffer_ = 0;
-  int                                   vizMeshValueLoc_ = -1;
-  mutable int                           vizTriCount_ = 0;
-  mutable int                           vizLineCount_ = 0;
-  mutable float                         vizMeshValue_ = 0.0f;
-  mutable bool                          vizMeshRun_ = false;
 
   // Feeding a function. Two buffers -- the spread in, the answers out -- and a
   // strip of fragments to run it, one per sample. It is a pass of its own
@@ -837,6 +832,8 @@ class CodeBlock {
   int                                   verticalLoc_ = -1;
   int                                   indexLoc_ = -1;
   int                                   shapeLoc_ = -1;
+  int                                   atLoc_ = -1;
+  int                                   pixelLoc_ = -1;
   int                                   thickLoc_ = -1;
   int                                   orbitLoc_ = -1;
   int                                   liftLoc_ = -1;

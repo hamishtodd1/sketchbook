@@ -36,6 +36,8 @@ class App {
   // Fills the monitor the window is on, without a title bar, or puts the window
   // back as it was.
   void SetFullscreen(bool on);
+  // Every code box on this canvas reads as code, never as mathematics.
+  void SetAlwaysCode(bool on);
 
   void Update();
   void Draw();

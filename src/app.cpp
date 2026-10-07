@@ -20,6 +20,7 @@
 #include "hover.h"
 #include "theme.h"
 #include "touch.h"
+#include "windowname.h"
 
 namespace sb {
 namespace {
@@ -74,9 +75,11 @@ void App::Shutdown() {
   media_.ReleaseGpu();
   // And the shared render target, shaders and meshes behind the space windows.
   spaces_.ReleaseGpu();
+  colours_.ReleaseGpu();
   axes_.ReleaseGpu();
   plots_.ReleaseGpu();
-  VizStore::ReleaseGpu();
+  // The built-in vizes, which are boxes too, just not on this canvas.
+  vizes_.ReleaseGpu();
   if (cursorHidden_) {
     ShowCursor();
     cursorHidden_ = false;
@@ -695,6 +698,11 @@ void App::ComposeInto(const std::string& op) {
                                    term(left) + " " + op + " " + term(right) + "; }");
 }
 
+void App::SetAlwaysCode(bool on) {
+  options_.alwaysCode = on;
+  CodeBlock::SetAlwaysCode(on);
+}
+
 void App::SetFullscreen(bool on) {
   if (on == options_.fullscreen) return;
   // Done by hand rather than with raylib's ToggleBorderlessWindowed, which also
@@ -740,7 +748,7 @@ bool App::FindPullable(Vector2 at, Pull* out) {
     // One curve on it and there is no question which. Several, and the frame is
     // asked: whatever is drawn under the pointer, drawn last, is the one.
     if (curve.block == nullptr) {
-      plots_.AskCurveAt(plot, at);
+      plots_.AskCurveAt(plot, at, viewport_, fonts_);
       out->picking = true;
     }
     return true;
@@ -1450,13 +1458,17 @@ void App::ShareAcrossCanvas() {
     now.emplace_back(&block->Program(), block->Program().sharedVersion());
   }
 
+  // And how the functions on it are drawn: vizes, which a box compiles in.
+  std::map<std::string, mathprogram::FunctionViz> drawnWith = vizes_.FunctionVizes(codeBlocks_);
+
   // Nothing any box offers has changed -- the answer nearly every frame.
-  if (now != sharedFrom_) {
+  if (now != sharedFrom_ || drawnWith != canvas_.functionVizes) {
     sharedFrom_ = std::move(now);
     std::vector<const mathprogram::Program*> programs;
     programs.reserve(sharedFrom_.size());
     for (const auto& [program, version] : sharedFrom_) programs.push_back(program);
     canvas_ = mathprogram::Gather(programs);
+    canvas_.functionVizes = std::move(drawnWith);
 
     // Only a box whose share of it changed is built again, and a build that
     // comes out the same is not compiled -- so an edit costs the boxes that use
@@ -1661,6 +1673,10 @@ void App::Update() {
       // the canvas.
       SetFullscreen(!options_.fullscreen);
       menu_.Close();
+      break;
+    case MenuAction::AlwaysCode:
+      // The menu stays, so the tick can be seen to have changed.
+      SetAlwaysCode(!options_.alwaysCode);
       break;
     case MenuAction::Save: {
       const std::string path = filedialog::Save("canvas.sketch");
@@ -1873,7 +1889,7 @@ void App::Update() {
   // the boxes saying so are edited like any others. Nothing else has to be
   // rebuilt when it changes -- a viz box owns its own shaders, and a window
   // asking for one simply gets the new one.
-  vizes_.Sync(codeBlocks_);
+  vizes_.Sync(codeBlocks_, canvas_.signature);
 
   bool shapesChanged = axes_.Sync(codeBlocks_);
   shapesChanged = plots_.Sync(codeBlocks_) || shapesChanged;
@@ -1881,7 +1897,7 @@ void App::Update() {
   shapesChanged = colours_.Sync(codeBlocks_) || shapesChanged;
   shapesChanged = surfaces_.Sync(codeBlocks_) || shapesChanged;
   shapesChanged = volumes_.Sync(codeBlocks_) || shapesChanged;
-  shapesChanged = spaces_.Sync(codeBlocks_) || shapesChanged;
+  shapesChanged = spaces_.Sync(codeBlocks_, vizes_) || shapesChanged;
   if (shapesChanged) SettleBlocks();
 
   // **The pointer and the keyboard are two different claims.** Everything above
@@ -1945,6 +1961,7 @@ void App::Update() {
     plots_.ActiveVariables(viewport_, fonts_, &active);
     shaders_.ActiveVariables(viewport_, fonts_, &active);
     colours_.ActiveVariables(viewport_, fonts_, &active);
+    spaces_.ActiveVariables(viewport_, fonts_, &active);
   }
 
   // Taking hold of a name in the text is the same statement as taking hold of
@@ -1961,8 +1978,12 @@ void App::Update() {
       if (value.block == block && value.name == name) return;
     }
     Vector2 at{};
+    // Every window that stands for a value is asked, so that pointing at a name
+    // is two-way for every kind of value rather than only the ones asked first.
     if (axes_.MarkerFor(block, name, viewport_, fonts_, &at) ||
-        plots_.MarkerFor(block, name, viewport_, fonts_, &at)) {
+        plots_.MarkerFor(block, name, viewport_, fonts_, &at) ||
+        colours_.MarkerFor(block, name, viewport_, fonts_, &at) ||
+        spaces_.MarkerFor(block, name, viewport_, fonts_, &at)) {
       active.push_back({block, name, at});
     }
   };
@@ -2089,13 +2110,13 @@ void App::Draw() {
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->Draw(viewport_, fonts_);
   for (const MathBlock& block : mathBlocks_) block.Draw(viewport_, fonts_);
 
-  axes_.Draw(viewport_, fonts_, &vizes_);
-  plots_.Draw(viewport_, fonts_, &vizes_);
+  axes_.Draw(viewport_, fonts_, vizes_);
+  plots_.Draw(viewport_, fonts_);
   shaders_.Draw(viewport_, fonts_);
-  colours_.Draw(viewport_, fonts_);
+  colours_.Draw(viewport_, fonts_, vizes_);
   surfaces_.Draw(viewport_, fonts_);
   volumes_.Draw(viewport_, fonts_);
-  spaces_.Draw(viewport_, fonts_);
+  spaces_.Draw(viewport_, fonts_, vizes_);
   media_.Draw(viewport_, fonts_);
 
   // Every box's controls, after every box: a strip half under the card next to
@@ -2131,6 +2152,9 @@ void App::Draw() {
   volumes_.DrawSelectionRims(viewport_, fonts_);
   spaces_.DrawSelectionRims(viewport_, fonts_);
   media_.DrawSelectionRims(viewport_);
+
+  // The name of the window being pointed at, over every window so none covers it.
+  windowname::Draw(fonts_);
 
   if (lassoActive_) DrawLasso(lasso_);
 
@@ -2258,6 +2282,8 @@ void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView
     file << "view " << centre.x << " " << centre.y << " " << viewport_.Zoom() << "\n";
   }
   file << "aspect " << options_.slideAspect << "\n";
+  // Only written when ticked, so a canvas that never asked for it reads as before.
+  if (options_.alwaysCode) file << "alwayscode 1\n";
   // A slide is only its rim now: its title and its body are text boxes, and so
   // they are saved as boxes along with every other window.
   for (const Slide& slide : slides_.Slides()) {
@@ -2494,6 +2520,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   float   zoom = 1.0f;
   bool    inBlock = false;
   float   aspect = kDefaultSlideAspect;
+  int     alwaysCode = 0;
   std::vector<Slide> slides;
 
   std::string raw;
@@ -2543,6 +2570,8 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       blocks.back().values.emplace_back(name, value);
     } else if (keyword == "aspect") {
       stream >> aspect;
+    } else if (keyword == "alwayscode") {
+      stream >> alwaysCode;
     } else if (keyword == "slide") {
       Slide slide;
       stream >> slide.centre.x >> slide.centre.y;
@@ -2776,6 +2805,26 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
         }
         if (changed) block->SetColorValue(variable.name, rgb, /*intoText=*/false);
       }
+      // And a multivector as one number per member.
+      for (const mathprogram::Variable& variable : block->Variables()) {
+        if (variable.kind != mathprogram::Kind::Multivector || !variable.free ||
+            variable.literals.empty() || !variable.literals.front().array) {
+          continue;
+        }
+        std::vector<float> parts = variable.literals.front().components;
+        const std::vector<std::string> members =
+            clifford::MemberNames(variable.type, block->Algebra());
+        bool changed = false;
+        for (std::size_t i = 0; i < parts.size() && i < members.size(); ++i) {
+          for (const auto& [name, value] : loaded.values) {
+            if (name == variable.name + "." + members[i] && parts[i] != value) {
+              parts[i] = value;
+              changed = true;
+            }
+          }
+        }
+        if (changed) block->SetComponentValues(variable.name, parts);
+      }
     } else {
       block->RestoreValues(std::move(loaded.values));
       block->RequestCompile();
@@ -2912,6 +2961,9 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   }
 
   options_.slideAspect = (aspect > 0.05f) ? aspect : kDefaultSlideAspect;
+  // Here rather than in the menu, so a new canvas, a loaded one and an undo
+  // step all set it the same way.
+  SetAlwaysCode(alwaysCode != 0);
   slides_.Adopt(std::move(slides));
   if (!restoring) viewport_.Reset(centre, zoom);
 

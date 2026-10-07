@@ -617,10 +617,16 @@ bool MatchFunctionTail(const std::vector<Token>& tokens, std::size_t index,
   return tokens[index].kind == Tok::End;
 }
 
-// `Viz(Real);` -- the line that says this box draws that type rather than using
-// one. Hand-parsed, like `Cl(...)`, because it is a statement about the box
-// and never reaches a compiler.
-bool ParseVizSigil(std::string_view line, std::string* type, std::string* window) {
+// `Viz(Tri, "Space");` -- the line that says this box draws that type, in that
+// window, rather than using one. Hand-parsed, like `Cl(...)`, because it is a
+// statement about the box and never reaches a compiler.
+//
+// The window is a name in quotes: a type is something the program has, and a
+// window is only something the canvas calls one of its own. A window written
+// without them is still recognised, so that it can be reported as the mistake
+// it is rather than compiled as a call nobody can find.
+bool ParseVizSigil(std::string_view line, std::string* type, std::string* window,
+                   bool* quoted) {
   std::size_t at = line.find_first_not_of(" 	");
   if (at == std::string_view::npos) return false;
   if (line.compare(at, 4, "Viz(") != 0) return false;
@@ -635,10 +641,13 @@ bool ParseVizSigil(std::string_view line, std::string* type, std::string* window
 
   // An optional second name: which window this viz is for.
   std::string_view where;
+  bool             inQuotes = false;
   while (at < line.size() && line[at] == ' ') ++at;
   if (at < line.size() && line[at] == ',') {
     ++at;
     while (at < line.size() && line[at] == ' ') ++at;
+    inQuotes = at < line.size() && line[at] == '"';
+    if (inQuotes) ++at;
     const std::size_t from = at;
     while (at < line.size() && (IsIdentPart(line[at]) ||
                                 (at == from && IsIdentStart(line[at])))) {
@@ -646,6 +655,10 @@ bool ParseVizSigil(std::string_view line, std::string* type, std::string* window
     }
     if (at == from) return false;
     where = line.substr(from, at - from);
+    if (inQuotes) {
+      if (at >= line.size() || line[at] != '"') return false;
+      ++at;
+    }
   }
 
   while (at < line.size() && line[at] == ' ') ++at;
@@ -657,6 +670,7 @@ bool ParseVizSigil(std::string_view line, std::string* type, std::string* window
 
   if (type != nullptr) *type = std::string(name);
   if (window != nullptr) *window = std::string(where);
+  if (quoted != nullptr) *quoted = inQuotes || where.empty();
   return true;
 }
 
@@ -974,23 +988,26 @@ bool BracesBalance(std::string_view source) {
 Line Parse(std::string_view source, const clifford::Signature& sig, const Inside& inside) {
   Line line;
 
+  // Saying what this box draws is a statement *about* the box rather than one
+  // in it, exactly as choosing the algebra is. Asked before the line is
+  // tokenized, since the window's name is in quotes and code has no strings.
+  bool quoted = true;
+  if (std::string drawn, where; ParseVizSigil(source, &drawn, &where, &quoted)) {
+    line.kind = Kind::Viz;
+    line.latex = "\\mathrm{viz}\\;" + NameToLatex(drawn);
+    // The window rides along in the name, so nothing downstream needs a second
+    // field to carry it and two vizes for one type key apart on their own.
+    line.name = where.empty() ? drawn : (drawn + "@" + where);
+    line.unquoted = !quoted;
+    return line;
+  }
+
   bool tokenizeOk = false;
   const std::vector<Token> tokens = Tokenize(source, &tokenizeOk);
   if (tokens.size() == 1 && tokens[0].kind == Tok::End) return line;  // blank
 
   line.kind = Kind::Unparsed;
   if (!tokenizeOk) return line;
-
-  // Saying what this box draws is a statement *about* the box rather than one
-  // in it, exactly as choosing the algebra is.
-  if (std::string drawn, where; ParseVizSigil(source, &drawn, &where)) {
-    line.kind = Kind::Viz;
-    line.latex = "\\mathrm{viz}\\;" + NameToLatex(drawn);
-    // The window rides along in the name, so nothing downstream needs a second
-    // field to carry it and two vizes for one type key apart on their own.
-    line.name = where.empty() ? drawn : (drawn + "@" + where);
-    return line;
-  }
 
   // A set of samples is a set, and it is written as one: 24 of them, drawn out
   // of whatever space the type is.

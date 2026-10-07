@@ -1,0 +1,47 @@
+sketchbook 3
+view 380 40 0.58
+grid 1
+aspect 1.5
+block -760 -560 34 0 1 0 0 1000 0
+> \text What goes in, and what comes out
+end
+block -760 -490 20 0 0 0 0 900 0
+> \text A box draws because it defines a function. How many variables that function takes decides which window it gets -- a line of pixels, a square of them, or a volume -- and what it gives back decides the colour.
+end
+block -760 -300 20 0 0 0 0 0 0
+> float a;
+> vec3 swirl(vec2 p) {
+>   float t = atan(p.y, p.x) + length(p) * (2.0 + 6.0 * a);
+>   return 0.5 + 0.5 * vec3(cos(t), cos(t + 2.1), cos(t + 4.2));
+> }
+val a 0.4
+end
+block -760 -50 20 0 0 0 0 620 0
+> \text R2 to R3: the answer is a colour, so it is used as one. No camera -- a colour has nowhere to go but the pixel it is at.
+end
+block -760 90 20 0 0 0 0 0 0
+> Complex sq(Complex z) {
+>   return z * z - Complex(0.6, 0.3);
+> }
+end
+block -760 210 20 0 0 0 0 620 0
+> \text C to C: hue for the argument, lightness for the size. The two zeros are the black points, and the hue winds twice round each.
+end
+block 600 -300 20 0 0 0 0 0 0
+> float k;
+> float hill(vec2 p) {
+>   return sin(2.0 * p.x + k) * cos(2.0 * p.y);
+> }
+val k 0.3
+end
+block 600 -150 20 0 0 0 0 620 0
+> \text R2 to R1 opens as the flat viridis picture. Turn it with the right button: it was a topographic map seen from straight above. Orthographic, because a graph must draw the same height the same size wherever it stands.
+end
+block 600 60 20 0 0 0 0 0 0
+> float blob(vec3 q) {
+>   return (1.0 - length(q)) * sin(4.0 * q.x) * cos(4.0 * q.z);
+> }
+end
+block 600 180 20 0 0 0 0 620 0
+> \text R3 to R1 is a volume, looked through rather than at. Perspective, because here the near things being bigger is what says they are near.
+end

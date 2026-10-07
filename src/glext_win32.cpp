@@ -25,6 +25,19 @@ MaxThreadsFn g_maxThreads = nullptr;
 using GetStringiFn = const unsigned char*(__stdcall*)(unsigned int, unsigned int);
 GetStringiFn g_getStringi = nullptr;
 
+using InstancedFn = void(__stdcall*)(unsigned int, int, int, int);
+InstancedFn g_drawInstanced = nullptr;
+using FenceSyncFn = void*(__stdcall*)(unsigned int, unsigned int);
+using ClientWaitFn = unsigned int(__stdcall*)(void*, unsigned int, unsigned long long);
+using DeleteSyncFn = void(__stdcall*)(void*);
+FenceSyncFn  g_fenceSync = nullptr;
+ClientWaitFn g_clientWait = nullptr;
+DeleteSyncFn g_deleteSync = nullptr;
+constexpr unsigned int kSyncGpuCommandsComplete = 0x9117;   // GL_SYNC_GPU_COMMANDS_COMPLETE
+constexpr unsigned int kSyncFlushCommands = 0x00000001;     // GL_SYNC_FLUSH_COMMANDS_BIT
+constexpr unsigned int kAlreadySignaled = 0x911A;           // GL_ALREADY_SIGNALED
+constexpr unsigned int kConditionSatisfied = 0x911C;        // GL_CONDITION_SATISFIED
+
 constexpr unsigned int kNumExtensions = 0x821D;   // GL_NUM_EXTENSIONS
 constexpr unsigned int kExtensions = 0x1F03;      // GL_EXTENSIONS
 
@@ -89,6 +102,10 @@ bool Init() {
   }
   g_getStringi = reinterpret_cast<GetStringiFn>(
       reinterpret_cast<void*>(wglGetProcAddress("glGetStringi")));
+  g_drawInstanced = Fetch<InstancedFn>("glDrawArraysInstanced");
+  g_fenceSync = Fetch<FenceSyncFn>("glFenceSync");
+  g_clientWait = Fetch<ClientWaitFn>("glClientWaitSync");
+  g_deleteSync = Fetch<DeleteSyncFn>("glDeleteSync");
 
   g_genFramebuffers = Fetch<GenFn>("glGenFramebuffers");
   g_genRenderbuffers = Fetch<GenFn>("glGenRenderbuffers");
@@ -181,6 +198,26 @@ void DrawArrays(unsigned int mode, int first, int count) {
   glDrawArrays(mode, first, count);
 }
 
+void DrawArraysInstanced(unsigned int mode, int first, int count, int instances) {
+  if (count <= 0 || instances <= 0 || g_drawInstanced == nullptr) return;
+  g_drawInstanced(mode, first, count, instances);
+}
+
+void* Fence() {
+  return g_fenceSync != nullptr ? g_fenceSync(kSyncGpuCommandsComplete, 0) : nullptr;
+}
+
+bool Passed(void* fence) {
+  if (fence == nullptr || g_clientWait == nullptr) return true;
+  // Flushed, so a fence nobody else is waiting behind still gets to the GPU.
+  const unsigned int state = g_clientWait(fence, kSyncFlushCommands, 0);
+  return state == kAlreadySignaled || state == kConditionSatisfied;
+}
+
+void DropFence(void* fence) {
+  if (fence != nullptr && g_deleteSync != nullptr) g_deleteSync(fence);
+}
+
 void ReadPixels(int x, int y, int width, int height, unsigned char* rgba) {
   if (rgba == nullptr || width <= 0 || height <= 0) return;
   glReadPixels(x, y, width, height, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, rgba);
@@ -203,6 +240,10 @@ bool Init() { return false; }
 bool Available() { return false; }
 void Barrier(unsigned int) {}
 void DrawArrays(unsigned int, int, int) {}
+void DrawArraysInstanced(unsigned int, int, int, int) {}
+void* Fence() { return nullptr; }
+bool Passed(void*) { return true; }
+void DropFence(void*) {}
 void ReadPixels(int, int, int, int, unsigned char*) {}
 bool ParallelCompile() { return false; }
 void UseAllCompilerThreads() {}

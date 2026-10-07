@@ -12,6 +12,18 @@ std::string GlslPrologue() {
       "Color hsv(float h, float s, float v) {\n"
       "  vec3 k = clamp(abs(mod(h * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);\n"
       "  return v * mix(vec3(1.0), k, s);\n"
+      "}\n"
+      // And back: hue in turns, saturation, value.
+      "vec3 hsvOf(Color c) {\n"
+      "  float high = max(c.r, max(c.g, c.b));\n"
+      "  float range = high - min(c.r, min(c.g, c.b));\n"
+      "  float h = 0.0;\n"
+      "  if (range > 0.000001) {\n"
+      "    if (high == c.r) h = mod((c.g - c.b) / range, 6.0);\n"
+      "    else if (high == c.g) h = (c.b - c.r) / range + 2.0;\n"
+      "    else h = (c.r - c.g) / range + 4.0;\n"
+      "  }\n"
+      "  return vec3(h / 6.0, high > 0.000001 ? range / high : 0.0, high);\n"
       "}\n";
 }
 

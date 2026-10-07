@@ -31,81 +31,6 @@ int Dimension(Space space) {
 
 namespace {
 
-// And its GLSL half is a *vertex* shader: the one that decides where each of
-// those vertices ends up. The attribute and uniform names are raylib's, since
-// the mesh is submitted through its batch.
-std::string VizShaderPrologue(int* lines) {
-  const std::string out =
-      "#version 430\n"
-      // No vertex attributes: the geometry is in the buffer the mesh half wrote,
-      // and this reads it straight out of there. Nothing goes back to the CPU
-      // between the two halves.
-      "layout(std430, binding = 1) readonly buffer SbMesh { uint sbMeshN; float sbMeshV[]; };\n"
-      "out vec2 fragTexCoord;\n"
-      "out vec4 fragColor;\n"
-      "uniform vec4 sbTint;\n"
-      "uniform mat4 mvp;\n"
-      // What the display window can tell a viz about the value it is drawing.
-      "uniform float value;\n"     // the number itself, for a real
-      "uniform vec4 sbArea;\n"     // where it draws: x, y, w, h, middle at the centre
-      "uniform vec4 sbView;\n"     // what that rectangle spans: cx, cy, wide, high
-      "uniform float sbScale;\n"   // how big chrome is drawn at this zoom
-      // The operators the rewrite turns `a + b` into. A place shader is written
-      // with operators like anything else on this canvas, so it needs them too.
-      + glslops::BuiltinOverloads() +
-      // Value space to screen. Provided rather than left to be written out,
-      // because every viz needs it and a place box should be one line.
-      "vec2 sbMap(vec2 v) {\n"
-      "  return vec2(sbArea.x + sbArea.z * (0.5 + (v.x - sbView.x) / sbView.z),\n"
-      "              sbArea.y + sbArea.w * (0.5 - (v.y - sbView.y) / sbView.w));\n"
-      "}\n"
-      "void main() {\n"
-      "  fragTexCoord = vec2(0.0);\n"
-      "  fragColor = sbTint;\n"
-      "  vec2 p = vec2(sbMeshV[2 * gl_VertexID], sbMeshV[2 * gl_VertexID + 1]);\n";
-  *lines = static_cast<int>(std::count(out.begin(), out.end(), '\n'));
-  return out;
-}
-
-// A viz box has two halves and they are both GLSL now, so what tells them apart
-// is what they do: the mesh half is the one that *lays geometry down*. Nothing
-// else calls `vertex` or `line`, and a half that calls neither is the one that
-// places what the other made.
-bool LaysGeometryDown(const std::string& body) {
-  return body.find("vertex(") != std::string::npos || body.find("line(") != std::string::npos;
-}
-
-// The mesh half, as a compute shader. One invocation: these are small meshes
-// written as a loop, and laying them down in parallel would only mean sorting
-// them again afterwards.
-std::string VizComputePrologue() {
-  return std::string(
-             "#version 430\n"
-             "layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;\n"
-             "layout(std430, binding = 1) buffer SbTris  { uint sbTriN;  float sbTriV[]; };\n"
-             "layout(std430, binding = 2) buffer SbLines { uint sbLineN; float sbLineV[]; };\n"
-             "uniform float value;\n") +
-         glslops::BuiltinOverloads() +
-         "const uint sbCap = " + std::to_string(Program::kVizVertexCap) +
-         "u;\n"
-         // The two ways of laying geometry down, and no more. A path is not a
-         // ribbon of triangles because its width has to be constant on screen
-         // while the mesh is in value units.
-         "void vertex(float x, float y) {\n"
-         "  uint i = atomicAdd(sbTriN, 1u);\n"
-         "  if (i < sbCap) { sbTriV[2u * i] = x; sbTriV[2u * i + 1u] = y; }\n"
-         "}\n"
-         "void line(float ax, float ay, float bx, float by) {\n"
-         "  uint i = atomicAdd(sbLineN, 2u);\n"
-         "  if (i + 1u < sbCap) {\n"
-         "    sbLineV[2u * i] = ax; sbLineV[2u * i + 1u] = ay;\n"
-         "    sbLineV[2u * i + 2u] = bx; sbLineV[2u * i + 3u] = by;\n"
-         "  }\n"
-         "}\n"
-         "void main() {\n";
-}
-
-std::string VizComputeEpilogue() { return "}\n"; }
 
 // The same line with its leading type name taken off: `float c = a + b;`
 // becomes `c = a + b;`. A box's variables are globals now, so the line that
@@ -286,282 +211,130 @@ int ComponentCount(const std::string& type, const clifford::Signature& sig) {
   return Dimension(SpaceOf(type, sig));
 }
 
-// How a picture is coloured, which is a question about the *output* alone. Only
-// the ones a box actually needs are written out.
-std::string PaintSource(const std::vector<Function>& fns) {
-  bool real = false, colour = false, complex = false;
-  for (const Function& fn : fns) {
-    if (!fn.IsDrawn()) continue;
-    real = real || fn.out == Space::R1;
-    colour = colour || fn.out == Space::R3;
-    complex = complex || fn.out == Space::C;
-  }
-  std::string out;
-  if (real) {
-    // The same map a function of one variable gets along a number line, so the
-    // colour means the same number whichever window it is read in.
-    out +=
-        "vec4 sbPaint(float v) {\n"
-        "  float t = clamp(v, -1.0, 1.0);\n"
-        "  vec3 green  = vec3(109.0 / 255.0, 205.0 / 255.0,  89.0 / 255.0);\n"
-        "  vec3 yellow = vec3(253.0 / 255.0, 231.0 / 255.0,  37.0 / 255.0);\n"
-        "  return vec4(mix(vec3(0.0), t >= 0.0 ? green : yellow, abs(t)), 1.0);\n"
-        "}\n";
-  }
-  if (colour) out += "vec4 sbPaint(vec3 c) { return vec4(c, 1.0); }\n";
-  if (real) {
-    out +=
-        "vec3 sbTint(float v) {\n"
-        "  vec3 green  = vec3(109.0 / 255.0, 205.0 / 255.0,  89.0 / 255.0);\n"
-        "  vec3 yellow = vec3(253.0 / 255.0, 231.0 / 255.0,  37.0 / 255.0);\n"
-        "  return v >= 0.0 ? green : yellow;\n"
-        "}\n"
-        "float sbThickness(float v) { return clamp(abs(v), 0.0, 1.0); }\n";
-  }
-  if (complex) {
-    // Domain colouring, the way it is always done: the argument is the hue and
-    // the size is the lightness, black at a zero and white as it runs away. Both
-    // halves of the answer are on screen at once, which is the whole reason to
-    // hold C apart from R2.
-    out +=
-        "vec3 sbHue(float h) {\n"
-        "  vec3 k = fract(h + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0));\n"
-        "  return clamp(abs(k * 6.0 - 3.0) - 1.0, 0.0, 1.0);\n"
-        "}\n"
-        "vec4 sbPaint(Complex z) {\n"
-        "  float a = carg(z) / 6.2831853 + 0.5;\n"
-        "  float m = cabs(z);\n"
-        "  float l = m / (1.0 + m);\n"
-        "  vec3 hue = sbHue(a);\n"
-        "  vec3 rgb = l < 0.5 ? hue * (l * 2.0) : mix(hue, vec3(1.0), (l - 0.5) * 2.0);\n"
-        "  return vec4(rgb, 1.0);\n"
-        "}\n"
-        "vec3 sbTint(Complex z) { return sbHue(carg(z) / 6.2831853 + 0.5); }\n"
-        "float sbThickness(Complex z) { float m = cabs(z); return m / (1.0 + m); }\n";
+// Which of a box's functions each window draws with which viz, as the box's
+// shader dispatches them. `sbIndex` is a function's place in the box's list.
+struct Drawn {
+  std::string type;    // `RToR`
+  std::string dw;      // `Plot`
+  std::vector<std::size_t> which;
+};
+
+std::vector<Drawn> DrawnBy(const std::vector<Function>& fns, const Canvas& canvas) {
+  std::vector<Drawn> out;
+  for (std::size_t i = 0; i < fns.size(); ++i) {
+    const std::string type = vizglsl::FunctionTypeOf(mathline::GlslTypeName(fns[i].inputType),
+                                                     mathline::GlslTypeName(fns[i].outputType));
+    for (const std::string& dw : vizglsl::FunctionWindows(type)) {
+      if (canvas.functionVizes.count(type + "@" + dw) == 0) continue;
+      auto found = std::find_if(out.begin(), out.end(), [&](const Drawn& d) {
+        return d.type == type && d.dw == dw;
+      });
+      if (found == out.end()) {
+        out.push_back({type, dw, {}});
+        found = out.end() - 1;
+      }
+      found->which.push_back(i);
+    }
   }
   return out;
 }
 
-// A function of two variables is a picture: one pixel per input, coloured by
-// what comes out. The same rule the field along a number line already follows,
-// with two variables instead of one.
-std::string PictureDispatch(const std::vector<Function>& fns) {
-  std::string branches;
-  bool        any = false;
-  for (std::size_t i = 0; i < fns.size(); ++i) {
-    if (!fns[i].IsPicture()) continue;
-    const std::string arg = (fns[i].in == Space::C) ? "Complex(sbP.x, sbP.y)" : "sbP";
-    branches += "    " + std::string(any ? "else if" : "if") + " (sbIndex == " +
-                std::to_string(i) + ") { finalColor = sbPaint(" + fns[i].name + "(" + arg +
-                ")); return; }\n";
-    any = true;
+// What a box draws its functions with, as a key: a box whose vizes change has
+// to be built again, exactly as one whose imports do.
+std::string VizzesKey(const std::vector<Function>& fns, const Canvas& canvas) {
+  std::string key;
+  for (const Drawn& drawn : DrawnBy(fns, canvas)) {
+    const FunctionViz& viz = canvas.functionVizes.at(drawn.type + "@" + drawn.dw);
+    key += drawn.type + "@" + drawn.dw + (viz.grab ? "+" : "") + ":" + viz.text + ";";
   }
-  if (!any) return {};
-  return "  if (sbMode == 2 && sbShape == 2) {\n"
-         "    vec2 sbP = vec2(mix(sbRange.x, sbRange.y, sbVarying.x),\n"
-         "                    mix(sbVertical.x, sbVertical.y, sbVarying.y));\n" +
-         branches + "    discard;\n  }\n";
+  return key;
 }
 
-// The same functions again, as height. A surface is ray-marched rather than
-// meshed: the march is a dozen lines in the shader that is already there, where
-// a mesh would be a vertex buffer, a second program and a draw path of its own
-// -- and the same march is what a volume will want.
-//
-// **Orthographic, not perspective.** Height here is a quantity, and under a
-// perspective the same quantity would draw a different size depending on where
-// it stood. The other 3D window shows *points*, where perspective is what tells
-// you which is nearer; this one shows a graph, where it would only lie.
-// Where the eye is and which way is up, shared by everything with a camera of
-// its own. Orthographic in both: these are graphs, and under a perspective the
-// same quantity would draw a different size depending on where it stood.
-std::string EyeSource() {
-  return
-      "vec3 sbEye() {\n"
-      "  return vec3(-sin(sbOrbit.x) * cos(sbOrbit.y), sin(sbOrbit.y),\n"
-      "              cos(sbOrbit.x) * cos(sbOrbit.y));\n"
-      "}\n"
-      "void sbFrame(out vec3 fwd, out vec3 rt, out vec3 up) {\n"
-      "  fwd = -sbEye();\n"
-      // Straight down leaves 'which way is up' with no answer, so it is given
-      // one rather than left to a normalize of nothing.
-      "  vec3 wup = abs(fwd.y) > 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);\n"
-      "  rt = normalize(cross(fwd, wup));\n"
-      "  up = cross(rt, fwd);\n"
-      "}\n"
-      "vec2 sbFilm() { return vec2(sbVarying.x, 1.0 - sbVarying.y) * 2.0 - 1.0; }\n"
-      "vec2 sbMid() {\n"
-      "  return vec2((sbRange.x + sbRange.y) * 0.5, (sbVertical.x + sbVertical.y) * 0.5);\n"
-      "}\n";
+// The vizes a box's functions are drawn with, compiled into its shader: for
+// each, which function `value` is -- the one `sbIndex` names -- then the app's
+// helpers, then the viz itself.
+std::string VizzesSource(const std::vector<Function>& fns, const Canvas& canvas) {
+  const std::vector<Drawn> drawn = DrawnBy(fns, canvas);
+  if (drawn.empty()) return {};
+  std::string out;
+  bool paintReal = false, paintColour = false, paintComplex = false;
+  bool surface = false, volume = false;
+  for (const Drawn& d : drawn) {
+    std::string in, ret;
+    vizglsl::FunctionType(d.type, &in, &ret);
+    out += ret + " " + vizglsl::Spliced("value", d.type, d.dw) + "(" + in + " x) {\n";
+    for (std::size_t i : d.which) {
+      out += "  if (sbIndex == " + std::to_string(i) + ") return " + fns[i].name + "(x);\n";
+    }
+    out += "  return " + ((ret == "float")     ? std::string("0.0")
+                          : (ret == "Complex") ? std::string("Complex(0.0, 0.0)")
+                                               : ret + "(0.0)") +
+           ";\n}\n";
+    paintReal = paintReal || ret == "float";
+    paintColour = paintColour || ret == "vec3";
+    paintComplex = paintComplex || ret == "Complex";
+    surface = surface || d.dw == "Surface";
+    volume = volume || d.dw == "Volume";
+  }
+  out += vizglsl::FunctionHelpers(paintReal, paintColour, paintComplex, surface, volume);
+  out += "vec4 sbTint;\n";
+  for (const Drawn& d : drawn) out += canvas.functionVizes.at(d.type + "@" + d.dw).text;
+  return out;
 }
 
-// A function of three variables, drawn by looking through it. The same march as
-// the surface, accumulating instead of stopping: colour by what the value is,
-// opacity by how much of it there is, front to back so what is nearer hides
-// what is behind it.
-std::string VolumeDispatch(const std::vector<Function>& fns) {
-  std::string branches;
-  bool        any = false;
-  for (std::size_t i = 0; i < fns.size(); ++i) {
-    if (!fns[i].IsVolume()) continue;
-    const std::string call = fns[i].name + "(q)";
-    branches += "    " + std::string(any ? "else if" : "if") + " (sbIndex == " +
-                std::to_string(i) + ") { vec3 t = sbTint(" + call +
-                "); return vec4(t, sbThickness(" + call + ")); }\n";
-    any = true;
+// And where each is chosen, in main: the window says which shape it is and
+// which function, and the viz's `frag` says what the pixel is. A viz with
+// `grab` also answers how near the pointer is, when that is what is asked.
+std::string VizzesMain(const std::vector<Function>& fns, const Canvas& canvas) {
+  const std::vector<Drawn> drawn = DrawnBy(fns, canvas);
+  if (drawn.empty()) return {};
+  std::string out;
+  std::string grabs;
+  for (const Drawn& d : drawn) {
+    std::string pick;
+    for (std::size_t i : d.which) {
+      pick += "    " + std::string(pick.empty() ? "if" : "else if") + " (sbIndex == " +
+              std::to_string(i) + ") sbC = " + vizglsl::Spliced("frag", d.type, d.dw) +
+              "(sbHere);\n";
+    }
+    out += "  if (sbMode == 2 && sbShape == " + std::to_string(vizglsl::ShapeOf(d.dw)) + " && " +
+           [&] {
+             std::string any;
+             for (std::size_t i : d.which) {
+               any += (any.empty() ? "(" : " || ") + std::string("sbIndex == ") +
+                      std::to_string(i);
+             }
+             return any + ")";
+           }() +
+           ") {\n"
+           "    sbTint = fragColor;\n"
+           "    vec2 sbHere = " + vizglsl::AtOf(d.dw) + ";\n"
+           "    vec4 sbC = vec4(0.0);\n" +
+           pick +
+           "    if (sbC.a <= 0.0) discard;\n"
+           "    finalColor = sbC;\n"
+           "    return;\n"
+           "  }\n";
+    if (canvas.functionVizes.at(d.type + "@" + d.dw).grab) {
+      for (std::size_t i : d.which) {
+        grabs += "    if (sbShape == " + std::to_string(vizglsl::ShapeOf(d.dw)) +
+                 " && sbIndex == " + std::to_string(i) + ") g = " +
+                 vizglsl::Spliced("grab", d.type, d.dw) + "(sbAt);\n";
+      }
+    }
   }
-  if (!any) return {};
-
-  return "vec4 sbCloud(vec3 q) {\n" + branches +
-         "  return vec4(0.0);\n"
-         "}\n"
-         // **Perspective**, where the surface is orthographic. A surface is a
-         // graph, and a graph must draw the same quantity the same size wherever
-         // it stands. A volume is a place you are looking *into*, and there the
-         // near things being bigger is exactly what says they are near -- take
-         // it away and a cloud has no depth in it at all. The march is clipped
-         // to the box first, so its steps are spent where something could be.
-         "vec4 sbVolume() {\n"
-         "  vec3 fwd, rt, up;\n"
-         "  sbFrame(fwd, rt, up);\n"
-         "  vec2  mid = sbMid();\n"
-         "  float sbHalf = abs(sbRange.y - sbRange.x) * 0.5;\n"
-         "  vec2  uv = sbFilm();\n"
-         "  vec3  hub = vec3(mid.x, mid.y, 0.0);\n"
-         "  vec3  eye = hub + sbEye() * sbOrbit.z * sbHalf;\n"
-         "  float wide = tan(0.4);\n"
-         "  vec3  dir = normalize(fwd + (uv.x * rt + uv.y * up) * wide);\n"
-         "  vec3 inv = 1.0 / dir;\n"
-         "  vec3 t0 = (hub - vec3(sbHalf) - eye) * inv;\n"
-         "  vec3 t1 = (hub + vec3(sbHalf) - eye) * inv;\n"
-         "  vec3 tn = min(t0, t1);\n"
-         "  vec3 tf = max(t0, t1);\n"
-         "  float in0 = max(max(max(tn.x, tn.y), tn.z), 0.0);\n"
-         "  float out0 = min(min(tf.x, tf.y), tf.z);\n"
-         "  if (out0 <= in0) return vec4(0.0);\n"
-         "  float sbStep = (out0 - in0) / 96.0;\n"
-         "  vec4  acc = vec4(0.0);\n"
-         "  for (int i = 0; i < 96; ++i) {\n"
-         "    vec3 q = eye + dir * (in0 + (float(i) + 0.5) * sbStep) - hub;\n"
-         "    vec4 c = sbCloud(q);\n"
-         "    float a = 1.0 - exp(-c.a * sbStep * 6.0);\n"
-         "    acc.rgb += (1.0 - acc.a) * c.rgb * a;\n"
-         "    acc.a += (1.0 - acc.a) * a;\n"
-         "    if (acc.a > 0.995) break;\n"
-         "  }\n"
-         "  return acc;\n"
-         "}\n";
-}
-
-std::string SurfaceDispatch(const std::vector<Function>& fns) {
-  std::string branches;
-  bool        any = false;
-  for (std::size_t i = 0; i < fns.size(); ++i) {
-    if (!fns[i].IsSurface()) continue;
-    branches += "      " + std::string(any ? "else if" : "if") + " (sbIndex == " +
-                std::to_string(i) + ") return clamp(" + fns[i].name +
-                "(q), -sbLift, sbLift);\n";
-    any = true;
+  if (!grabs.empty()) {
+    // How near the pointer is to the drawing of one function, in pixels, asked
+    // once when a gesture begins and read back from the feed buffer.
+    out = "  if (sbMode == 5) {\n"
+          "    float g = 1.0e9;\n" +
+          grabs +
+          "    sbFnOut[0] = g;\n"
+          "    finalColor = vec4(0.0);\n"
+          "    return;\n"
+          "  }\n" + out;
   }
-  if (!any) return {};
-
-  return "float sbHeight(vec2 q) {\n" + branches +
-         "  return 0.0;\n"
-         "}\n"
-         // One ray, from a point on the film. `nearest` comes back as how close,
-         // in pixels, it passed to the surface *before* the approach it landed
-         // on -- the two steps leading into a crossing are always close, and
-         // are not an edge.
-         "vec4 sbSurfaceRay(vec2 uv, float pixel, out float nearest) {\n"
-         "  vec3 fwd, rt, up;\n"
-         "  sbFrame(fwd, rt, up);\n"
-         "  vec2  mid = sbMid();\n"
-         "  float sbHalf = abs(sbRange.y - sbRange.x) * 0.5;\n"
-         "  vec3 o = vec3(mid.x, 0.0, mid.y) + (uv.x * rt + uv.y * up) * sbHalf +\n"
-         "           sbEye() * (sbLift * 3.0 + sbHalf * 3.0);\n"
-         "  float sbFar = sbLift * 6.0 + sbHalf * 6.0;\n"
-         "  float sbStep = sbFar / 160.0;\n"
-         // A vertical gap, seen by an orthographic eye, is that gap times how far
-         // the view is from looking straight down it.
-         "  float sbToPixels = sqrt(max(1.0 - fwd.y * fwd.y, 0.0)) / max(pixel, 1e-9);\n"
-         "  float lag1 = 1e9;\n"
-         "  float lag2 = 1e9;\n"
-         "  nearest = 1e9;\n"
-         "  float t = 0.0;\n"
-         "  float was = 1.0;\n"
-         "  for (int i = 0; i < 160; ++i) {\n"
-         "    t += sbStep;\n"
-         "    vec3 p = o + fwd * t;\n"
-         "    if (abs(p.y) > sbLift * 1.02 && was > 0.0) continue;\n"
-         "    float d = p.y - sbHeight(vec2(p.x, p.z));\n"
-         "    if (d <= 0.0 && was > 0.0) {\n"
-         // Where between the two steps it crossed. Halving eight times is
-         // enough to put it inside a pixel -- and it matters because the
-         // *colour* is the height at the point that is hit. Taking the step
-         // itself banded the surface along the ray, so the bands moved with
-         // the camera and it read as though it were coloured by distance.
-         "      float lo = t - sbStep;\n"
-         "      float hi = t;\n"
-         "      for (int k = 0; k < 8; ++k) {\n"
-         "        float mid = 0.5 * (lo + hi);\n"
-         "        vec3 m = o + fwd * mid;\n"
-         "        if (m.y - sbHeight(vec2(m.x, m.z)) > 0.0) lo = mid; else hi = mid;\n"
-         "      }\n"
-         "      vec3 h = o + fwd * hi;\n"
-         "      vec4 sbHit = sbPaint(sbHeight(vec2(h.x, h.z)));\n"
-         // An edge has two sides. The rays that just miss a crest are found by
-         // how close they passed; the rays that just *clip* it are found by
-         // going on a little and seeing them come back out before they got a
-         // pixel and a half deep. A hit that is really a hit is that deep in a
-         // step, so this costs nothing where there is no edge.
-         "      float sbDeepest = 0.0;\n"
-         "      for (int j = 0; j < 24 && sbDeepest < 1.5; ++j) {\n"
-         "        t += sbStep;\n"
-         "        vec3  q = o + fwd * t;\n"
-         "        float e = q.y - sbHeight(vec2(q.x, q.z));\n"
-         "        if (e > 0.0) { nearest = min(nearest, sbDeepest); break; }\n"
-         "        sbDeepest = max(sbDeepest, -e * sbToPixels);\n"
-         "      }\n"
-         "      return sbHit;\n"
-         "    }\n"
-         "    nearest = min(nearest, lag2);\n"
-         "    lag2 = lag1;\n"
-         "    lag1 = d * sbToPixels;\n"
-         "    was = d;\n"
-         "  }\n"
-         "  nearest = min(nearest, min(lag1, lag2));\n"
-         "  return vec4(0.0);\n"
-         "}\n"
-         // Whether a ray hits is yes or no, so a silhouette is a staircase, and
-         // multisampling cannot see it: it is not the edge of any geometry. Four
-         // rays for every pixel would be four times a 160-step march on every
-         // pixel every frame. So one is marched, and only a ray that passed
-         // within a pixel and a half of the surface -- the march samples its
-         // approach a dozen pixels apart, so what it sees can be a pixel further
-         // off than what happened -- or that clipped a crest and came back out.
-         // That is what being next to an edge
-         // is, a silhouette or a near hill in front of a far one -- is marched
-         // again, four times across the pixel, and the four are averaged by how
-         // much each covered. That is a line of pixels, not the window.
-         "vec4 sbSurface() {\n"
-         "  vec2  uv = sbFilm();\n"
-         // Taken before any ray is marched: a derivative is only worth anything
-         // outside the loops.
-         "  vec2  sbPx = vec2(fwidth(uv.x), fwidth(uv.y));\n"
-         "  float pixel = sbPx.x * abs(sbRange.y - sbRange.x) * 0.5;\n"
-         "  float nearest;\n"
-         "  vec4  c = sbSurfaceRay(uv, pixel, nearest);\n"
-         "  if (nearest >= 1.5) return c;\n"
-         "  vec4  sum = vec4(0.0);\n"
-         "  float ignored;\n"
-         "  const vec2 sbGrid[4] = vec2[4](vec2(0.375, 0.125), vec2(-0.125, 0.375),\n"
-         "                                 vec2(-0.375, -0.125), vec2(0.125, -0.375));\n"
-         "  for (int k = 0; k < 4; ++k) {\n"
-         "    vec4 s = sbSurfaceRay(uv + sbGrid[k] * sbPx, pixel, ignored);\n"
-         "    sum += vec4(s.rgb * s.a, s.a);\n"
-         "  }\n"
-         "  return sum.a > 0.0 ? vec4(sum.rgb / sum.a, sum.a * 0.25) : vec4(0.0);\n"
-         "}\n";
+  return out;
 }
 
 // Where each function in the box begins and ends. Reading the code is
@@ -643,7 +416,7 @@ std::string SampleDispatch(const std::vector<Function>& fns, const clifford::Sig
 
 // A sampler box: `Samples(float, 24);` and a body that lays samples down.
 //
-// The same shape as a viz's mesh half, and for the same reason -- a spread of
+// The same shape as a viz's `mesh`, and for the same reason -- a spread of
 // points is geometry, and geometry belongs on the GPU. One invocation: these
 // are short loops, and laying them down in parallel would only mean sorting
 // them again afterwards.
@@ -693,10 +466,6 @@ std::string SamplerPrologue(const std::string& type, int count, int stride,
   return out;
 }
 
-std::string VizShaderEpilogue() {
-  return std::string("  gl_Position = mvp * vec4(p, 0.0, 1.0);\n}\n");
-}
-
 std::string ShaderPrologue(const std::vector<Variable>& variables,
                            const clifford::Signature& sig,
                            const std::vector<std::string>& algebraTypes,
@@ -704,7 +473,7 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
                            const std::string& seed,
                            const std::vector<std::string>& functionNames,
                            const std::vector<Function>& defined, bool complex, bool colour,
-                           int* lines, int* functionsAt, int* sharedAt) {
+                           const Canvas& canvas, int* lines, int* functionsAt, int* sharedAt) {
   // One shader, three modes. A box used to build three -- one to draw its
   // picture, one to report its values, one to draw its functions -- from the
   // same lines with different ends. They are the same shader with a uniform
@@ -725,6 +494,8 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
       "uniform float sbThick;\n"    // half a curve's width, in value units
       "uniform vec3 sbOrbit;\n"     // where the eye is: yaw, pitch, how far off
       "uniform float sbLift;\n"     // how far a surface is allowed to rise
+      "uniform float sbPixel;\n"    // one pixel, in value units, when a grab is asked
+      "uniform vec2 sbAt;\n"        // where the pointer is, when a grab is asked
       "layout(std430, binding = 0) buffer SbTrace { float sbTrace[]; };\n"
       // Seconds since this box was last compiled, for anything that moves by
       // itself. And the frame, which is what `randChanging` changes with.
@@ -771,8 +542,16 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
   // The variable itself is an ordinary mutable local, so it can be assigned
   // over; what a knob moves is whichever literal governs the line being read.
   for (const Variable& variable : variables) {
-    if (variable.kind != Kind::Real && variable.kind != Kind::Color) continue;
+    if (variable.kind != Kind::Real && variable.kind != Kind::Color &&
+        variable.kind != Kind::Multivector) {
+      continue;
+    }
     for (const Literal& literal : variable.literals) {
+      if (literal.array) {
+        out += "uniform float " + literal.uniform + "[" +
+               std::to_string(literal.components.size()) + "];\n";
+        continue;
+      }
       out += std::string(variable.kind == Kind::Color ? "uniform vec3 " : "uniform float ") +
              literal.uniform + ";\n";
     }
@@ -788,7 +567,6 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
   // so. Its products answer to the names the operator rewrite produces, so
   // `z * w` in a box is `gp(z, w)` here.
   if (complex) out += types::complexnum::GlslPrologue();
-  out += PaintSource(defined);
 
   // **A box's variables are globals.** GLSL has nowhere to put a nested
   // function, so a function the user writes is hoisted above main -- and a
@@ -817,21 +595,9 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
   out += imports;
   *functionsAt = static_cast<int>(std::count(out.begin(), out.end(), '\n'));
   out += functions;
-  const std::string surface = SurfaceDispatch(defined);
-  const std::string volume = VolumeDispatch(defined);
-  if (!surface.empty() || !volume.empty()) out += EyeSource();
-  out += surface;
-  out += volume;
-
-  // Which of the box's functions a field or a curve is drawing.
-  out += "float sbEval(float x) {\n";
-  for (std::size_t i = 0; i < functionNames.size(); ++i) {
-    out += "  " + std::string(i == 0 ? "if" : "else if") + " (sbIndex == " + std::to_string(i) +
-           ") return " + functionNames[i] + "(x);\n";
-  }
+  // How each of its functions is drawn: the vizes of their types.
+  out += VizzesSource(defined, canvas);
   out +=
-      "  return 0.0;\n"
-      "}\n"
       "void main() {\n"
       // Seeded by the pixel, so neighbouring pixels differ. Not when reporting:
       // there every pixel of the target runs the same body for a different value,
@@ -847,58 +613,10 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
   // the picture, the surface and the volume, which had been added above it, so
   // those three drew with every variable at nought and their knobs did nothing.
   out += seed;
-  // A picture is drawn from the definitions alone, like every other way of
-  // drawing a function, so it comes before the body and returns.
-  out += PictureDispatch(defined);
-  if (!surface.empty()) {
-    out +=
-        "  if (sbMode == 2 && sbShape == 3) {\n"
-        "    vec4 c = sbSurface();\n"
-        "    if (c.a <= 0.0) discard;\n"
-        "    finalColor = c;\n"
-        "    return;\n"
-        "  }\n";
-  }
-  if (!volume.empty()) {
-    out +=
-        "  if (sbMode == 2 && sbShape == 4) {\n"
-        "    vec4 c = sbVolume();\n"
-        "    if (c.a <= 0.002) discard;\n"
-        // Already multiplied through by how much of the ray each step covered,
-        // so it goes down as it is rather than being multiplied again.
-        "    finalColor = vec4(c.rgb / max(c.a, 1e-4), c.a);\n"
-        "    return;\n"
-        "  }\n";
-  }
-  out +=
-      // A function is drawn from the definitions alone, so this never runs the
-      // body -- which is what keeps merging the three free rather than making
-      // every pixel of a field pay for the whole box.
-      "  if (sbMode == 2) {\n"
-      "    float sbIn = sbShape == 0 ? mix(sbRange.x, sbRange.y, sbVarying.x)\n"
-      "                              : mix(sbVertical.x, sbVertical.y, sbVarying.y);\n"
-      "    float sbOut = sbEval(sbIn);\n"
-      "    if (sbShape == 0) {\n"
-      "      float v = clamp(sbOut, -1.0, 1.0);\n"
-      "      vec3 green  = vec3(109.0 / 255.0, 205.0 / 255.0,  89.0 / 255.0);\n"
-      "      vec3 yellow = vec3(253.0 / 255.0, 231.0 / 255.0,  37.0 / 255.0);\n"
-      "      finalColor = vec4(v >= 0.0 ? green : yellow, abs(v) * fragColor.a);\n"
-      "      return;\n"
-      "    }\n"
-      "    float here = mix(sbRange.x, sbRange.y, sbVarying.x);\n"
-      "    float step = (sbVertical.y - sbVertical.x) * 0.0025;\n"
-      "    float slope = (sbEval(sbIn + step) - sbEval(sbIn - step)) / (2.0 * step);\n"
-      // By how much of the pixel the band covers, rather than in or out. In or
-      // out is a staircase, and multisampling cannot help: the edge is decided
-      // in here, not by the edge of any geometry. `fwidth` is how far the value
-      // moves across one pixel, which turns a distance in value units into one
-      // in pixels -- both axes are at one scale, so either direction will do.
-      "    float sbGap = abs(here - sbOut) / sqrt(1.0 + slope * slope);\n"
-      "    float sbCover = clamp((sbThick - sbGap) / max(fwidth(here), 1e-6) + 0.5, 0.0, 1.0);\n"
-      "    if (sbCover <= 0.0) discard;\n"
-      "    finalColor = vec4(fragColor.rgb, fragColor.a * sbCover);\n"
-      "    return;\n"
-      "  }\n";
+  // Every drawing of a function is drawn from the definitions alone, so it
+  // comes before the body and returns -- which is what keeps a field or a curve
+  // from making every pixel pay for the whole box.
+  out += VizzesMain(defined, canvas);
   *lines = static_cast<int>(std::count(out.begin(), out.end(), '\n'));
   return out;
 }
@@ -1130,7 +848,8 @@ Canvas Gather(const std::vector<const Program*>& programs) {
 bool Program::ImportsStale(const Canvas& canvas) const {
   const Taken taken = Take(canvas, wanted_, this, definedNames_);
   return KeyOf(canvas, taken, definedNames_, saysAlgebra_,
-               DerivedElsewhere(canvas, wanted_, this)) != importKey_;
+               DerivedElsewhere(canvas, wanted_, this)) + VizzesKey(functions_, canvas) !=
+         importKey_;
 }
 
 void Program::PullImports(const Canvas& canvas) {
@@ -1152,12 +871,14 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   const std::string runningGlsl = glsl_;
   const bool        running = (state_ == State::ShaderReady);
 
-  // Remember what the knobs were set to, so an edit does not reset them.
+  // Remember what the knobs were set to, so an edit does not reset them. A
+  // colour's and a multivector's are several numbers each.
   std::unordered_map<std::string, float> previous;
   std::unordered_map<std::string, std::vector<float>> previousColour;
   for (const Variable& variable : variables_) {
     if (variable.free) previous.emplace(variable.name, variable.value);
-    if (variable.free && variable.kind == Kind::Color && !variable.literals.empty()) {
+    if (variable.free && (variable.kind == Kind::Color || variable.kind == Kind::Multivector) &&
+        !variable.literals.empty()) {
       previousColour.emplace(variable.name, variable.literals.front().components);
     }
   }
@@ -1169,8 +890,11 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   clifford::Signature signature = canvas.signature;
   saysAlgebra_ = false;
   algebraLine_ = -1;
+  int                 vizLine = 0;
+  int                 vizAgain = -1;   // a second `Viz(...)` line, which is a mistake
+  bool                vizUnquoted = false;
   std::string         joined;
-  // And what, if anything, this box draws. `Viz(Real);` makes it a viz: it says
+  // And what, if anything, this box draws. `Viz(Tri, "Space");` makes it a viz: it says
   // how a value of that type is shown rather than declaring one, so it is
   // assembled entirely differently from here on.
   vizType_.clear();
@@ -1188,7 +912,16 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
       signature = said;
     }
     const mathline::Line sigil = mathline::Parse(raw);
-    if (sigil.kind == mathline::Kind::Viz) vizType_ = sigil.name;
+    // A box is one viz. A second sigil is a mistake -- usually one left over
+    // from copying another viz -- not a change of mind, so it is reported rather
+    // than quietly deciding what the box draws.
+    if (sigil.kind == mathline::Kind::Viz && !vizType_.empty()) {
+      if (vizAgain < 0) vizAgain = static_cast<int>(i);
+    } else if (sigil.kind == mathline::Kind::Viz) {
+      vizType_ = sigil.name;
+      vizLine = static_cast<int>(i);
+      vizUnquoted = sigil.unquoted;
+    }
     // And what, if anything, it spreads out. `Samples(float, 24);` makes a box
     // a sampler: it says how a type's space is laid out for a function to be
     // fed from, rather than declaring a value of its own.
@@ -1200,6 +933,81 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
     joined += '\n';
   }
   std::vector<std::string> algebraTypes = clifford::TypesMentioned(joined, signature);
+
+  // **A viz box is assembled whole, and apart.** It has no variables, grows no
+  // windows, offers the canvas nothing and takes nothing from it: its lines are
+  // GLSL functions with standard names, and they become the three programs that
+  // run it (`vizglsl.*`).
+  if (!vizType_.empty()) {
+    variables_.clear();
+    probed_.clear();
+    functions_.clear();
+    functionNames_.clear();
+    tracedSlots_.clear();
+    sharedFunctions_.clear();
+    sharedValues_.clear();
+    definedNames_.clear();
+    wanted_.clear();
+    imported_.clear();
+    importedNames_.clear();
+    importedSource_.clear();
+    derivedElsewhere_.clear();
+    importKey_ = KeyOf(canvas, Taken{}, definedNames_, saysAlgebra_, derivedElsewhere_);
+    {
+      const std::string key =
+          saysAlgebra_ ? ("Cl" + std::to_string(saidAlgebra_.p) + std::to_string(saidAlgebra_.q) +
+                          std::to_string(saidAlgebra_.r))
+                       : std::string();
+      if (key != sharedKey_ || sharedVersion_ == 0) {
+        sharedKey_ = key;
+        sharedVersion_ = NextSharedVersion();
+      }
+    }
+
+    const auto fail = [&](int line, std::string message) {
+      glsl_.clear();
+      state_ = State::Failed;
+      error_ = {};
+      error_.present = true;
+      error_.line = line + 1;
+      error_.message = std::move(message);
+    };
+    if (vizAgain >= 0) {
+      fail(vizAgain, "a box is one viz, and this one already said `" +
+                         lines[static_cast<std::size_t>(vizLine)] +
+                         "` -- take this line out, or move it to a box of its own");
+      return;
+    }
+    const std::size_t at = vizType_.find('@');
+    const std::string type = vizType_.substr(0, at);
+    const std::string dw = (at == std::string::npos) ? std::string() : vizType_.substr(at + 1);
+    if (dw.empty()) {
+      fail(vizLine, "a viz names the window it is drawn in, `Viz(" + type + ", \"Space\");` -- " +
+                        "the windows are " + vizglsl::KnownWindows());
+      return;
+    }
+    if (vizUnquoted) {
+      fail(vizLine, "a window's name goes in quotes: `Viz(" + type + ", \"" + dw + "\");`");
+      return;
+    }
+    if (!vizglsl::KnownWindow(dw)) {
+      fail(vizLine, "there is no window called `" + dw + "` -- the windows are " +
+                        vizglsl::KnownWindows());
+      return;
+    }
+    viz_ = vizglsl::Assemble(lines, type, dw, signature, algebraTypes);
+    if (!viz_.error.empty()) {
+      fail(viz_.errorLine, viz_.error);
+      return;
+    }
+    glslLines_ = {viz_.bodyAt, viz_.bodyAt, static_cast<int>(lines.size())};
+    // Compared whole, so an edit that leaves all three as they were compiles
+    // nothing, like any other box.
+    glsl_ = viz_.function ? viz_.standalone : viz_.compute + viz_.vertex + viz_.fragment;
+    error_ = {};
+    state_ = (running && glsl_ == runningGlsl) ? State::ShaderReady : State::Shading;
+    return;
+  }
 
   // Every function the box defines, and where each one begins and ends. Found
   // before anything is assembled, because a function's lines are hoisted out of
@@ -1418,10 +1226,8 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
 
       // A function of reals to reals is a value as far as the windows are
       // concerned: it gets a plot and a field, which are its two special cases.
-      // Its *type* is RToR however it was spelled, because that is what
-      // a viz for one has to claim. Only that one shape: `sbEval` dispatches
-      // over these by calling them with a float and returning a float, so a
-      // picture in the list is a picture called with the wrong thing.
+      // Its *type* is RToR however it was spelled, because that is what a viz
+      // for one claims -- `Viz(RToR, "Plot")`.
       const Function& made = functions_[static_cast<std::size_t>(span)];
       if (thisLine == found.first && made.in == Space::R1 && made.out == Space::R1) {
         Variable variable;
@@ -1479,18 +1285,41 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
         continue;
       }
 
+      // **A multivector's knob is its members behind one float array**, the
+      // way a colour's is three numbers behind a vec3: so choosing one -- and
+      // dragging one -- compiles nothing. Chosen as a colour's is: what it was
+      // before this edit, else what the file said, else the type's example.
       if (variable.kind == Kind::Multivector) {
-        // A multivector is not one number, so its chosen value is written into
-        // the source the way a function's is. That makes choosing one a
-        // rebuild, which is why it has no knob yet.
+        const std::vector<std::string> members =
+            clifford::MemberNames(line.type, signature);
+        std::vector<float> parts = clifford::ExampleComponents(line.type, line.name, signature);
+        if (auto was = previousColour.find(line.name);
+            was != previousColour.end() && was->second.size() == parts.size()) {
+          parts = was->second;
+        } else if (members.size() == parts.size()) {
+          for (std::size_t i = 0; i < members.size(); ++i) {
+            for (const auto& [name, value] : restore_) {
+              if (name == line.name + "." + members[i]) parts[i] = value;
+            }
+          }
+        }
+        Literal injected;
+        injected.line = thisLine;
+        injected.uniform = uniformFor(variable.name, thisLine);
+        injected.components = parts;
+        injected.array = true;
+        variable.literals.push_back(injected);
+        variable.components = parts;
         variables.push_back(variable);
         addSlots(variable, thisLine);
-        // The chosen value is written into the source -- so the shader gets
-        // the declaration too, rather than a blank where its value should be.
-        const std::string chosen = clifford::ExampleValue(line.type, line.name, signature);
         // The variable itself is a global, declared in the prologue so that the
         // box's functions can see it. This line only gives it its value.
-        shaderBody += "  " + (ordinary ? "" : line.type + " ") + line.name + " = " + chosen +
+        std::string made = line.type + "(";
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+          made += (i == 0 ? "" : ", ") + injected.uniform + "[" + std::to_string(i) + "]";
+        }
+        made += ")";
+        shaderBody += "  " + (ordinary ? "" : line.type + " ") + line.name + " = " + made +
                       ";\n";
         shaderFunctions += "\n";
         continue;
@@ -1717,9 +1546,18 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
         value.uniform = variable.literals.front().uniform;
         value.init = value.uniform;
         value.width = 3;
-      } else if (variable.kind == Kind::Multivector) {
+      } else if (variable.kind == Kind::Multivector && !variable.literals.empty() &&
+                 variable.literals.front().array) {
+        const Literal& literal = variable.literals.front();
         value.type = variable.type;
-        value.init = clifford::ExampleValue(variable.type, variable.name, signature);
+        value.uniform = literal.uniform;
+        value.width = static_cast<int>(literal.components.size());
+        value.array = true;
+        value.init = variable.type + "(";
+        for (int i = 0; i < value.width; ++i) {
+          value.init += (i == 0 ? "" : ", ") + literal.uniform + "[" + std::to_string(i) + "]";
+        }
+        value.init += ")";
       } else {
         continue;
       }
@@ -1757,7 +1595,8 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   }
   const Taken taken = Take(canvas, wanted_, this, definedNames_);
   derivedElsewhere_ = DerivedElsewhere(canvas, wanted_, this);
-  importKey_ = KeyOf(canvas, taken, definedNames_, saysAlgebra_, derivedElsewhere_);
+  importKey_ = KeyOf(canvas, taken, definedNames_, saysAlgebra_, derivedElsewhere_) +
+               VizzesKey(functions_, canvas);
 
   // Declared in the prologue, before this box's own functions: the knobs as
   // uniforms, the values as globals, then every function's declaration -- so
@@ -1768,10 +1607,11 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   {
     std::vector<Literal> kept = std::move(imported_);
     imported_.clear();
-    const auto knob = [&](const std::string& uniform, int width) {
+    const auto knob = [&](const std::string& uniform, int width, bool array) {
       Literal literal;
       literal.uniform = uniform;
-      if (width == 3) literal.components.assign(3, 0.0f);
+      literal.array = array;
+      if (width > 1) literal.components.assign(static_cast<std::size_t>(width), 0.0f);
       for (const Literal& was : kept) {
         if (was.uniform != uniform) continue;
         literal.value = was.value;
@@ -1780,20 +1620,24 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
         }
       }
       imported_.push_back(literal);
-      imports += std::string(width == 3 ? "uniform vec3 " : "uniform float ") + uniform + ";\n";
+      if (array) {
+        imports += "uniform float " + uniform + "[" + std::to_string(width) + "];\n";
+      } else {
+        imports += std::string(width == 3 ? "uniform vec3 " : "uniform float ") + uniform + ";\n";
+      }
     };
     importedSource_.clear();
     importedNames_.clear();
     for (const SharedValue* value : taken.values) importedNames_.push_back(value->name);
     for (const SharedFunction* fn : taken.functions) importedNames_.push_back(fn->name);
     for (const SharedValue* value : taken.values) {
-      if (!value->uniform.empty()) knob(value->uniform, value->width);
+      if (!value->uniform.empty()) knob(value->uniform, value->width, value->array);
       imports += value->type + " " + value->name + ";\n";
       importSeed += "  " + value->name + " = " + value->init + ";\n";
       importedSource_ += value->type + " " + value->name + " = " + value->init + ";\n";
     }
     for (const SharedFunction* fn : taken.functions) {
-      for (const std::string& uniform : fn->uniforms) knob(uniform, 1);
+      for (const std::string& uniform : fn->uniforms) knob(uniform, 1, false);
     }
     for (const SharedFunction* fn : taken.functions) imports += fn->declaration + "\n";
     for (const SharedFunction* fn : taken.functions) {
@@ -1841,7 +1685,7 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
 
   // A sampler box has no variables and wants none either: what it produces is a
   // spread of points for somebody else's function to be fed from. It is the
-  // same shape as a viz's mesh half -- a compute shader writing into a buffer
+  // same shape as a viz's `mesh` -- a compute shader writing into a buffer
   // through an atomic counter -- because a spread of points is geometry.
   if (!samplerType_.empty()) {
     variables_.clear();
@@ -1859,43 +1703,11 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
                   sampleBody + "}\n";
     glslLines_ = {head, head, static_cast<int>(lines.size())};
     glsl_.clear();
-    glslMesh_.clear();
     state_ = State::Shading;
     error_ = {};
     return;
   }
 
-  // A viz box has no variables and wants none: what it produces is a mesh, or
-  // the shader that places one. Both halves are assembled from the same lines.
-  if (!vizType_.empty()) {
-    variables_.clear();
-    probed_.clear();
-
-    // Both halves are GLSL; which one this is depends on what it does.
-    std::string vizBody = shaderBody;
-    glslops::Rewrite(shaderBody, &vizBody, nullptr);
-
-    glslMesh_.clear();
-    int vizPrologueLines = 0;
-    if (LaysGeometryDown(shaderBody)) {
-      const std::string head = VizComputePrologue();
-      glslMesh_ = head + vizBody + VizComputeEpilogue();
-      vizPrologueLines = static_cast<int>(std::count(head.begin(), head.end(), '\n'));
-      // A mesh half draws nothing itself, so it has no place-shader to offer.
-      glsl_.clear();
-    } else {
-      glsl_ = VizShaderPrologue(&vizPrologueLines) + vizBody + VizShaderEpilogue();
-    }
-    // A viz box has no hoisted functions, so both halves of the map point at
-    // the same place.
-    glslLines_ = {vizPrologueLines, vizPrologueLines, static_cast<int>(lines.size())};
-
-    // Shading means "the host should compile this on the thread that owns the
-    // graphics context", which is the only way a box is built now.
-    state_ = State::Shading;
-    error_ = {};
-    return;
-  }
 
   // A box of nothing but function definitions is still a box worth building:
   // it defines machines, and a machine can be fed and drawn even though it
@@ -1953,7 +1765,7 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
                       importedSource_.find(types::color::kName) != std::string::npos;
   const std::string head =
       ShaderPrologue(variables, signature, algebraTypes, imports, functions, seed,
-                     functionNames_, functions_, complex, colour, &prologueLines,
+                     functionNames_, functions_, complex, colour, canvas, &prologueLines,
                      &functionsAt, &sharedAt);
   // The box's lines appear twice: hoisted above main, and again inside it.
   glslLines_ = {functionsAt, prologueLines, static_cast<int>(lines.size()), sharedAt,
@@ -2108,14 +1920,16 @@ void Program::SetValue(std::size_t index, float value, int atLine) {
   variable.value = value;
 }
 
-void Program::SetColor(std::size_t index, const float rgb[3], int atLine) {
+void Program::SetComponents(std::size_t index, const std::vector<float>& parts, int atLine) {
   if (index >= variables_.size()) return;
   Variable& variable = variables_[index];
-  if (variable.kind != Kind::Color) return;
+  if (variable.kind != Kind::Color && variable.kind != Kind::Multivector) return;
   const int which = variable.GoverningLiteral(atLine);
   if (which < 0) return;
-  variable.literals[static_cast<std::size_t>(which)].components.assign(rgb, rgb + 3);
-  variable.components.assign(rgb, rgb + 3);
+  Literal& literal = variable.literals[static_cast<std::size_t>(which)];
+  if (literal.components.size() != parts.size()) return;
+  literal.components = parts;
+  variable.components = parts;
 }
 
 void Program::TakeTrace(std::vector<float> values) { trace_ = std::move(values); }

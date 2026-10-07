@@ -15,6 +15,7 @@
 #include "carry.h"
 #include "hover.h"
 #include "theme.h"
+#include "windowname.h"
 
 namespace sb {
 namespace {
@@ -24,7 +25,9 @@ constexpr float kPlotSide = 347.0f;
 constexpr float kGap = 12.0f;
 constexpr float kTickEm = 11.0f;
 // The square of pixels round the pointer a curve has to change to be picked.
-constexpr int kPickSide = 9;
+// How near a press has to be to a curve to take hold of it, in pixels at the
+// plot's own size.
+constexpr float kPickReach = 10.0f;
 
 constexpr float kMinSpan = 1e-3f;
 constexpr float kMaxSpan = 1e6f;
@@ -405,16 +408,6 @@ void PlotPanel::ReleaseGpu() {
   haveCurveSurface_ = false;
 }
 
-void PlotPanel::SamplePick(unsigned char* rgba) const {
-  // Screen points are in window units; the framebuffer may be finer, and GL
-  // counts rows from the bottom.
-  const float sx = static_cast<float>(GetRenderWidth()) / std::max(1, GetScreenWidth());
-  const float sy = static_cast<float>(GetRenderHeight()) / std::max(1, GetScreenHeight());
-  const int   x = static_cast<int>(pickAt_.x * sx) - kPickSide / 2;
-  const int   y = GetRenderHeight() - static_cast<int>(pickAt_.y * sy) - kPickSide / 2;
-  glext::ReadPixels(x, y, kPickSide, kPickSide, rgba);
-}
-
 bool PlotPanel::PlotUnder(Vector2 point, const Viewport& viewport, FontStore& fonts,
                           std::size_t* plot, Rectangle* window, CurveRef* curve) const {
   for (std::size_t i = plots_.size(); i-- > 0;) {
@@ -435,10 +428,25 @@ bool PlotPanel::PlotUnder(Vector2 point, const Viewport& viewport, FontStore& fo
   return false;
 }
 
-void PlotPanel::AskCurveAt(std::size_t plot, Vector2 point) {
-  pick_ = Pick::Pending;
-  pickPlot_ = plot;
-  pickAt_ = point;
+void PlotPanel::AskCurveAt(std::size_t plot, Vector2 point, const Viewport& viewport,
+                           FontStore& fonts) {
+  pick_ = Pick::None;
+  if (plot >= plots_.size()) return;
+  const Plot&     on = plots_[plot];
+  const Rectangle rect = RectFor(plot, viewport, fonts);
+  const float     unit = rect.height / std::max(on.span, kMinSpan);   // pixels per unit
+  // The point in the plot's own space: output across, input up.
+  const Vector2 at = {on.centre.x + (point.x - (rect.x + rect.width * 0.5f)) / unit,
+                      on.centre.y - (point.y - (rect.y + rect.height * 0.5f)) / unit};
+  float nearest = kPickReach * rect.height / kPlotSide;
+  for (const CurveRef& ref : on.refs) {
+    if (ref.block == nullptr || Resolve(ref) == nullptr || !Shown(ref)) continue;
+    const float away = ref.block->GrabAt(ref.name, /*shape=*/1, at, 1.0f / unit);
+    if (away >= nearest) continue;
+    nearest = away;
+    pickRef_ = ref;
+    pick_ = Pick::Found;
+  }
 }
 
 PlotPanel::Pick PlotPanel::CurveAnswer(CurveRef* out) const {
@@ -482,13 +490,9 @@ bool PlotPanel::BeginPullOut(CodeBlock* block, const std::string& name, Vector2 
   return true;
 }
 
-void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts, const VizStore* vizes) const {
+void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
   const float zoom = viewport.Zoom();
   if (zoom < 0.02f) return;
-
-  // How the canvas says a function is drawn, if it says anything.
-  const Viz* curveViz =
-      (vizes == nullptr) ? nullptr : vizes->Find(types::realfunction::kName);
 
   // The curves in use this frame -- the same set that lights up its name in the
   // code and gets a wire. Those are the ones that blink.
@@ -526,6 +530,9 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts, const VizStore*
     DrawRectangleRoundedLinesEx(rect, 0.06f, 8, 1.0f, kAxisBorder);
 
     if (carried || PointOnRim(rect, hover::Pointer())) DrawRim(rect, zoom, carried);
+    if (carried || CheckCollisionPointRec(hover::Pointer(), rect) || PointOnRim(rect, hover::Pointer())) {
+      windowname::Offer(rect, "Plot");
+    }
 
     // Nothing spills out of the card, so a steep curve does not scribble over
     // the rest of the canvas.
@@ -577,53 +584,22 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts, const VizStore*
     DrawLineEx({axisX, rect.y}, {axisX, rect.y + rect.height}, std::max(1.0f, 1.2f * scale),
                kAxisLine);
 
-    // One polyline per function on these axes.
-    unsigned char pickBefore[kPickSide * kPickSide * 4];
-    bool          pickHit = false;
+    // One curve per function on these axes.
     for (std::size_t c = 0; c < plot.refs.size(); ++c) {
       const mathprogram::Variable* variable = Resolve(plot.refs[c]);
       if (variable == nullptr || !Shown(plot.refs[c])) continue;
       const Color tint =
           Blink(plot.refs[c].block->VariableColor(plot.refs[c].name), inUse(plot.refs[c]));
       const float thickness = std::max(1.4f, 2.0f * scale);
-      // Asked which curve is under a point: look at the pixels round it before
-      // this curve goes down, and again after.
-      const bool picking = pick_ == Pick::Pending && pickPlot_ == i;
-      if (picking) {
-        rlDrawRenderBatchActive();
-        SamplePick(pickBefore);
-      }
-      DrawCurve(plot, c, rect, scale, thickness, tint, curveViz);
-      if (picking) {
-        rlDrawRenderBatchActive();
-        unsigned char after[sizeof(pickBefore)];
-        SamplePick(after);
-        if (std::memcmp(pickBefore, after, sizeof(after)) != 0) {
-          pickRef_ = plot.refs[c];
-          pickHit = true;
-        }
-      }
+      DrawCurve(plot, c, rect, scale, thickness, tint);
     }
-    if (pick_ == Pick::Pending && pickPlot_ == i) pick_ = pickHit ? Pick::Found : Pick::None;
 
     EndScissorMode();
   }
 }
 
 void PlotPanel::DrawCurve(const Plot& plot, std::size_t c, Rectangle rect, float scale,
-                          float thickness, Color tint, const Viz* curveViz) const {
-  // The canvas says how a function is drawn, so it is drawn that way. Its
-  // lines ran inside the program that owns the function -- the only place
-  // one can be sampled -- so what arrives here is already this curve.
-  if (curveViz != nullptr && curveViz->Ready()) {
-    rlSetLineWidth(thickness);
-    curveViz->Draw(0.0f, rect,
-                   {plot.centre.x, plot.centre.y, plot.span * rect.width / rect.height,
-                    plot.span},
-                   scale, tint);
-    rlSetLineWidth(1.0f);
-    return;
-  }
+                          float thickness, Color tint) const {
   // A function is GLSL, so the curve is where the shader says the output
   // actually is -- evaluated per pixel rather than joined up between
   // samples. Nothing runs out of curve when the plot is zoomed, and a knob

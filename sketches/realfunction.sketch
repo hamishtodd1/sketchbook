@@ -1,0 +1,10 @@
+sketchbook 2
+view 15 132 0.8
+grid 1
+block -480 -400 26 0
+> float a;
+> float f(float x);
+> float w(float x) { return sin(x); }
+> float h(float x) { return f(x) + a * w(x); }
+val a 1.2
+end

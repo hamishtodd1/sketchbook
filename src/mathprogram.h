@@ -8,6 +8,7 @@
 // that makes it compile is injected here, never in their text.
 #pragma once
 
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -16,6 +17,7 @@
 #include "compiler.h"
 #include "types/Clifford.h"
 #include "types/RealFunction.h"
+#include "vizglsl.h"
 
 namespace sb::mathprogram {
 
@@ -49,9 +51,12 @@ struct Literal {
   // Moving its knob then writes the number back, so the text and what runs
   // never disagree.
   bool        written = false;
-  // A colour's three numbers, behind one vec3 uniform. Empty for a real, whose
-  // one number is `value`.
+  // A colour's three numbers, behind one vec3 uniform, or a multivector's, one
+  // per member, behind one float array. Empty for a real, whose one number is
+  // `value`.
   std::vector<float> components;
+  // Behind a float array rather than a vec3: a multivector.
+  bool        array = false;
 };
 
 // What a type is, *as a space*.
@@ -202,9 +207,20 @@ struct SharedValue {
   std::string    name;
   std::string    type;      // as GLSL spells it
   std::string    init;      // what it is set to where it is declared
-  std::string    uniform;   // the knob behind it, or empty for a multivector
+  std::string    uniform;   // the knob behind it
   int            width = 1; // how many numbers that knob is: 3 for a colour
+  bool           array = false;   // a float array, for a multivector
   const Program* home = nullptr;
+};
+
+// A viz of a function, as a box compiles it in: its text, renamed and
+// rewritten, and whether it says how near the pointer is.
+struct FunctionViz {
+  std::string text;
+  bool        grab = false;
+  bool operator==(const FunctionViz& other) const {
+    return text == other.text && grab == other.grab;
+  }
 };
 
 // Everything the boxes of one canvas offer each other, and the one algebra they
@@ -231,6 +247,10 @@ struct Canvas {
   // means one thing on a canvas, so it gets one colour on it -- and two things
   // in one box can no longer both be the first colour of their own box.
   std::vector<std::string> colourOrder;
+  // **How a function is drawn is a viz**, of its type in a window -- `RToR@Plot`
+  // -- and a box that defines one compiles that viz in. The canvas's own, or
+  // the built-in one.
+  std::map<std::string, FunctionViz> functionVizes;
 };
 
 // Everything the boxes offer, gathered. Boxes that offer nothing -- words, a
@@ -293,7 +313,8 @@ class Program {
   // means the end. Nothing is rebuilt; the uniform carries it.
   void SetValue(std::size_t index, float value, int atLine = -1);
   // The same for a colour, whose knob is three numbers.
-  void SetColor(std::size_t index, const float rgb[3], int atLine = -1);
+  // A colour's or a multivector's numbers, as its knob now has them.
+  void SetComponents(std::size_t index, const std::vector<float>& parts, int atLine = -1);
   // The literal a uniform of this name stands behind, or null -- this box's own,
   // or one it reads from another box.
   const Literal* FindLiteral(const std::string& uniform) const;
@@ -306,16 +327,15 @@ class Program {
 
   // --- a box that draws rather than computes -------------------------------
   //
-  // `Viz(Real);` on a line of its own says this box is a **viz**: it says how a
-  // value of that type is drawn inside a display window, rather than declaring
-  // a value of its own. So it has no variables and grows no number lines.
+  // `Viz(Tri, "Space");` on a line of its own says this box is a **viz**: how a
+  // value of that type is drawn in that window, rather than a value of its own.
+  // So it has no variables and grows no windows. Its lines are GLSL functions
+  // with standard names, and `vizglsl.*` is what turns them into the three
+  // programs that run it.
   //
-  // Two halves, one per box, paired by the type they name. The mesh half lays
-  // down a **mesh** -- calls to `vertex(x, y)`, three to a triangle, in the
-  // viz's own units. The place half is the **vertex shader** that places those
-  // vertices, given the value and the scale the window is drawn at. The half
-  // that calls `vertex` or `line` is the mesh half.
+  // `Tri@Space`: the type and the window, which is what a viz is keyed by.
   const std::string& vizType() const { return vizType_; }
+  const vizglsl::Sources& viz() const { return viz_; }
 
   const std::string& glslSource() const { return glsl_; }
   // The vertex half. Ours rather than raylib's default, because the fragment
@@ -323,12 +343,6 @@ class Program {
   // asks about one given point rather than the point being drawn, and a varying
   // cannot be shadowed by the local that chooses between them.
   const std::string& glslVertexSource() const;
-
-  // --- a viz's mesh ---------------------------------------------------------
-  //
-  // The half of a viz box that lays geometry down is a *compute* shader,
-  // writing its vertices into a buffer the drawing then reads.
-  const std::string& glslMeshSource() const { return glslMesh_; }
 
   // --- functions, and feeding them -----------------------------------------
   //
@@ -344,9 +358,9 @@ class Program {
 
   // `Samples(float, 24);` makes a box a **sampler**: it says how a type's space
   // is spread out, and how thickly, rather than declaring a value of its own.
-  // Its body lays samples down with `sample(...)`, exactly as a viz's mesh half
-  // lays vertices down with `vertex(...)`, and for the same reason -- a spread
-  // is geometry, and geometry belongs on the GPU.
+  // Its body lays samples down with `pick(...)`, exactly as a viz's `mesh` lays
+  // vertices down with `emit(...)`, and for the same reason -- a spread is
+  // geometry, and geometry belongs on the GPU.
   const std::string& samplerType() const { return samplerType_; }
   int                samplerCount() const { return samplerCount_; }
   int                samplerStride() const { return samplerStride_; }
@@ -355,8 +369,6 @@ class Program {
   // a window: past a couple of hundred they are a smear rather than a set.
   static constexpr int kMaxSamples = 256;
   static constexpr int kMaxStride = 16;
-  // How many vertices either half may lay down before it is cut off.
-  static constexpr int kVizVertexCap = 4096;
   // In the order `sbIndex` picks them.
   const std::vector<std::string>& functionNames() const { return functionNames_; }
 
@@ -399,7 +411,7 @@ class Program {
   int                      samplerCount_ = 0;
   int                      samplerStride_ = 1;
   std::string              glslSample_;
-  std::string              glslMesh_;
+  vizglsl::Sources         viz_;
   std::vector<std::pair<std::string, int>> tracedSlots_;
   int                      tracedLines_ = 0;
   std::vector<float>       trace_;

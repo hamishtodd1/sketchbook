@@ -37,6 +37,22 @@ inline constexpr unsigned int kTriangles = 0x0004;
 
 // glDrawArrays, which is GL 1.1 and therefore always there.
 void DrawArrays(unsigned int mode, int first, int count);
+// The same drawn `instances` times over, each told which it is by
+// `gl_InstanceID`: every value in a window drawn by one call rather than one
+// call each.
+void DrawArraysInstanced(unsigned int mode, int first, int count, int instances);
+
+// --- fences ------------------------------------------------------------------
+//
+// What a compute shader worked out is read back to the CPU -- where a viz is,
+// how far the pointer is from it -- and reading it the moment it is asked for
+// waits for the GPU to finish everything queued before it. A fence says when it
+// has, so the answer is read on a later frame, when it is already there, and
+// nothing waits. Null where the driver has none.
+void* Fence();
+// Whether the GPU has passed it yet. Never waits.
+bool  Passed(void* fence);
+void  DropFence(void* fence);
 
 // --- KHR_parallel_shader_compile --------------------------------------------
 //

@@ -1,0 +1,21 @@
+sketchbook 1
+view -2.37226 -22.833 1.42153
+grid 1
+block -330 -210 26 0
+> float a;
+> float b;
+> float c = (a + b) / 2;
+val a -0.778
+val b 0.5077
+end
+block -120 -30 26 0
+> float asdfa = 4.;
+end
+axis 1 0 0 0 4 0
+ref 0 a
+axis 1 0 0 0 4 0
+ref 0 b
+axis 1 0 0 0 4 0
+ref 0 c
+axis 1 0 0 0 4 1
+ref 1 asdfa

@@ -1,0 +1,344 @@
+sketchbook 3
+view 375.341 40.1241 0.494782
+aspect 1.5
+block 192.192 -461.261 34 0 1 0 0 1000 0
+> \text Vizes
+end
+block 192.192 -230.63 20 0 0 0 0 0 0
+> Viz(float, "Axis");
+> // A real is a ring on the line, where the number is. The ring is chrome
+> // rather than part of the scale, so it is measured in pixels of chrome --
+> // sbPixel -- and stays one size however the line is zoomed.
+> void mesh() {
+>   for (int i = 0; i < 24; ++i) {
+>     float s = 6.28318 * float(i) / 24.0;
+>     float e = 6.28318 * float(i + 1) / 24.0;
+>     emit(vec3(0.0), vec3(0.0, 0.0, 1.0));
+>     emit(vec3(7.0 * cos(s), 7.0 * sin(s), 0.0), vec3(0.0, 0.0, 1.0));
+>     emit(vec3(7.0 * cos(e), 7.0 * sin(e), 0.0), vec3(0.0, 0.0, 1.0));
+>   }
+> }
+> void vert(float v, inout vec3 p, inout vec3 n) {
+>   p = vec3(v, 0.0, 0.0) + p * sbPixel;
+> }
+> // The hole in it, in the colour of the row.
+> void mesh2() {
+>   for (int i = 0; i < 24; ++i) {
+>     float s = 6.28318 * float(i) / 24.0;
+>     float e = 6.28318 * float(i + 1) / 24.0;
+>     emit(vec3(0.0), vec3(0.0, 0.0, 1.0));
+>     emit(vec3(3.0 * cos(s), 3.0 * sin(s), 0.0), vec3(0.0, 0.0, 1.0));
+>     emit(vec3(3.0 * cos(e), 3.0 * sin(e), 0.0), vec3(0.0, 0.0, 1.0));
+>   }
+> }
+> void vert2(float v, inout vec3 p, inout vec3 n) {
+>   p = vec3(v, 0.0, 0.0) + p * sbPixel;
+> }
+> vec4 frag2(float v, vec3 p, vec3 n, vec2 uv) {
+>   return vec4(28.0 / 255.0, 28.0 / 255.0, 32.0 / 255.0, 1.0);
+> }
+> vec3 position(float v) {
+>   return vec3(v, 0.0, 0.0);
+> }
+> // Anywhere up or down the row counts: how far across is what matters.
+> float grab(float v) {
+>   return abs(sbScreen(position(v)).x - sbPointer.x);
+> }
+> // Wherever along the line the pointer is.
+> float drag(float v) {
+>   return sbRayOrigin.x;
+> }
+end
+block 1268.47 -230.63 20 0 0 0 0 0 0
+> Viz(RToR, "Plot");
+> // A function of reals is a curve on a plot, input up and output across. A
+> // pixel is on it by how near it is, measured square to the curve -- so a
+> // steep stretch is as thick as a flat one.
+> float gap(vec2 at) {
+>   float h = (sbVertical.y - sbVertical.x) * 0.0025;
+>   float slope = (value(at.y + h) - value(at.y - h)) / (2.0 * h);
+>   return abs(at.x - value(at.y)) / sqrt(1.0 + slope * slope);
+> }
+> // By how much of the pixel the line covers, not in or out: in or out is a
+> // staircase, and nothing but coverage smooths an edge a fragment decides.
+> vec4 frag(vec2 at) {
+>   float cover = clamp((sbThick - gap(at)) / max(fwidth(at.x), 0.000001) + 0.5, 0.0, 1.0);
+>   return vec4(sbTint.rgb, sbTint.a * cover);
+> }
+> float grab(vec2 at) {
+>   return gap(at) / sbPixel;
+> }
+end
+block 1383.78 499.699 20 0 0 0 0 0 0
+> Viz(RToR, "Axis");
+> // And a field along a number line: nothing at zero, opaque green at +1 and
+> // opaque yellow at -1, clamped beyond -- so a colour means the same number
+> // on every axis.
+> vec4 frag(vec2 at) {
+>   float v = clamp(value(at.x), -1.0, 1.0);
+>   vec3 c = vec3(109.0, 205.0, 89.0) / 255.0;
+>   if (v < 0.0) c = vec3(253.0, 231.0, 37.0) / 255.0;
+>   return vec4(c, abs(v) * sbTint.a);
+> }
+end
+block 1383.78 884.083 20 0 0 0 0 0 0
+> Viz(R2ToR3, "Picture");
+> // A function of the plane is a picture: each pixel is the answer there, and
+> // a vec3 is a colour.
+> vec4 frag(vec2 at) {
+>   return sbPaint(value(at));
+> }
+end
+block 1383.78 1153.15 20 0 0 0 0 0 0
+> Viz(R2ToC, "Picture");
+> // A complex answer is domain colouring: hue for its argument, lightness for
+> // its size.
+> vec4 frag(vec2 at) {
+>   return sbPaint(value(at));
+> }
+end
+block 1383.78 1383.78 20 0 0 0 0 0 0
+> Viz(CToC, "Picture");
+> vec4 frag(vec2 at) {
+>   return sbPaint(value(Complex(at.x, at.y)));
+> }
+end
+block 1383.78 1575.97 20 0 0 0 0 0 0
+> Viz(CToR3, "Picture");
+> vec4 frag(vec2 at) {
+>   return sbPaint(value(Complex(at.x, at.y)));
+> }
+end
+block 1383.78 1806.6 20 0 0 0 0 0 0
+> Viz(CToR, "Picture");
+> vec4 frag(vec2 at) {
+>   return sbPaint(value(Complex(at.x, at.y)));
+> }
+end
+block 2421.62 -384.384 20 0 0 0 0 0 0
+> Viz(R2ToR, "Surface");
+> // A real function of the plane is a landscape, marched from wherever the
+> // window has been turned to. sbMarch finds where a ray first meets it.
+> vec4 shade(vec2 film, float pixel, out float nearest) {
+>   vec3 o, d;
+>   sbSurfaceCamera(film, o, d);
+>   float t = sbMarch(o, d, pixel, nearest);
+>   if (t < 0.0) return vec4(0.0);
+>   vec3 hit = o + d * t;
+>   return sbPaint(value(vec2(hit.x, hit.z)));
+> }
+> // Whether a ray hits is yes or no, so an edge is a staircase. A ray that
+> // passed near an edge -- sbMarch says how near -- is marched four more times
+> // across its pixel, and they are averaged by how much each covered.
+> vec4 frag(vec2 film) {
+>   vec2 px = vec2(fwidth(film.x), fwidth(film.y));
+>   float pixel = px.x * sbHalfSpan();
+>   float nearest;
+>   vec4 c = shade(film, pixel, nearest);
+>   if (nearest >= 1.5) return c;
+>   vec4 sum = vec4(0.0);
+>   float ignored;
+>   for (int k = 0; k < 4; ++k) {
+>     vec2 j = vec2(0.375, 0.125);
+>     if (k == 1) j = vec2(-0.125, 0.375);
+>     if (k == 2) j = vec2(-0.375, -0.125);
+>     if (k == 3) j = vec2(0.125, -0.375);
+>     vec4 s = shade(film + j * px, pixel, ignored);
+>     sum += vec4(s.rgb * s.a, s.a);
+>   }
+>   if (sum.a <= 0.0) return vec4(0.0);
+>   return vec4(sum.rgb / sum.a, sum.a * 0.25);
+> }
+end
+block 2383.18 691.891 20 0 0 0 0 0 0
+> Viz(R3ToR, "Volume");
+> // A function of space is a cloud, looked through: thick where there is a lot
+> // of it, clear where there is none, accumulated front to back so what is
+> // nearer hides what is behind. sbClip is where the ray is inside the cube.
+> vec4 frag(vec2 film) {
+>   vec3 o, d;
+>   sbVolumeCamera(film, o, d);
+>   vec2 span = sbClip(o, d);
+>   if (span.y <= span.x) return vec4(0.0);
+>   float step = (span.y - span.x) / 96.0;
+>   vec4 acc = vec4(0.0);
+>   for (int i = 0; i < 96; ++i) {
+>     float v = value(o + d * (span.x + (float(i) + 0.5) * step) - sbHub());
+>     float a = 1.0 - exp(-sbThickness(v) * step * 6.0);
+>     acc.rgb += (1.0 - acc.a) * sbColourOf(v) * a;
+>     acc.a += (1.0 - acc.a) * a;
+>     if (acc.a > 0.995) break;
+>   }
+>   if (acc.a <= 0.002) return vec4(0.0);
+>   return vec4(acc.rgb / max(acc.a, 0.0001), acc.a);
+> }
+end
+block 2383.18 1422.22 20 0 0 0 0 0 0
+> Viz(R3ToC, "Volume");
+> // The same cloud, coloured by argument and thickened by size.
+> vec4 frag(vec2 film) {
+>   vec3 o, d;
+>   sbVolumeCamera(film, o, d);
+>   vec2 span = sbClip(o, d);
+>   if (span.y <= span.x) return vec4(0.0);
+>   float step = (span.y - span.x) / 96.0;
+>   vec4 acc = vec4(0.0);
+>   for (int i = 0; i < 96; ++i) {
+>     Complex v = value(o + d * (span.x + (float(i) + 0.5) * step) - sbHub());
+>     float a = 1.0 - exp(-sbThickness(v) * step * 6.0);
+>     acc.rgb += (1.0 - acc.a) * sbColourOf(v) * a;
+>     acc.a += (1.0 - acc.a) * a;
+>     if (acc.a > 0.995) break;
+>   }
+>   if (acc.a <= 0.002) return vec4(0.0);
+>   return vec4(acc.rgb / max(acc.a, 0.0001), acc.a);
+> }
+end
+block 3421.02 -1383.78 20 0 0 0 0 0 0
+> Viz(Color, "Picker");
+> // A colour on the picker's ring, at its hue. The one the triangle points at is
+> // also shown in the triangle, by the picker itself.
+> vec3 where(Color c) {
+>   float h = hsvOf(c).x * 6.28318;
+>   return vec3(0.91 * cos(h), 0.91 * sin(h), 0.0);
+> }
+> // The colour it is, a disc; and outside a gap, a ring the colour of its
+> // variable -- told apart by the texture coordinate, so the two are one piece
+> // and a nearer marker is drawn whole over a farther one.
+> void mesh() {
+>   for (int i = 0; i < 24; ++i) {
+>     float s = 6.28318 * float(i) / 24.0;
+>     float e = 6.28318 * float(i + 1) / 24.0;
+>     vec3 a = vec3(cos(s), sin(s), 0.0);
+>     vec3 b = vec3(cos(e), sin(e), 0.0);
+>     vec3 n = vec3(0.0, 0.0, 1.0);
+>     emit(vec3(0.0), n, vec2(0.0));
+>     emit(a * 7.0, n, vec2(0.0));
+>     emit(b * 7.0, n, vec2(0.0));
+>     emit(a * 9.0, n, vec2(1.0));
+>     emit(b * 9.0, n, vec2(1.0));
+>     emit(b * 11.5, n, vec2(1.0));
+>     emit(a * 9.0, n, vec2(1.0));
+>     emit(b * 11.5, n, vec2(1.0));
+>     emit(a * 11.5, n, vec2(1.0));
+>   }
+> }
+> // Facing the viewer however the window is turned, one size on screen.
+> void vert(Color v, inout vec3 p, inout vec3 n) {
+>   p = where(v) + (p.x * sbAcross() + p.y * sbUpward()) * sbPixel;
+> }
+> vec4 frag(Color v, vec3 p, vec3 n, vec2 uv) {
+>   if (uv.x > 0.5) return sbTint;
+>   return vec4(clamp(v, 0.0, 1.0), 1.0);
+> }
+> vec3 position(Color v) {
+>   return where(v);
+> }
+> float grab(Color v) {
+>   return length(sbScreen(where(v)) - sbPointer);
+> }
+> // Round the ring: the hue the pointer is at, the rest as it was.
+> Color drag(Color c) {
+>   vec3 k = hsvOf(c);
+>   return hsv(fract(atan(sbRayOrigin.y, sbRayOrigin.x) / 6.28318), k.y, k.z);
+> }
+end
+block 3421.02 153.754 20 0 0 0 0 0 0
+> Viz(Color, "Cube");
+> // A colour in the RGB cube: red, green and blue along its three edges.
+> vec3 where(Color c) {
+>   return c - vec3(0.5);
+> }
+> // The colour it is, a disc; and outside a gap, a ring the colour of its
+> // variable -- told apart by the texture coordinate, so the two are one piece
+> // and a nearer marker is drawn whole over a farther one.
+> void mesh() {
+>   for (int i = 0; i < 24; ++i) {
+>     float s = 6.28318 * float(i) / 24.0;
+>     float e = 6.28318 * float(i + 1) / 24.0;
+>     vec3 a = vec3(cos(s), sin(s), 0.0);
+>     vec3 b = vec3(cos(e), sin(e), 0.0);
+>     vec3 n = vec3(0.0, 0.0, 1.0);
+>     emit(vec3(0.0), n, vec2(0.0));
+>     emit(a * 7.0, n, vec2(0.0));
+>     emit(b * 7.0, n, vec2(0.0));
+>     emit(a * 9.0, n, vec2(1.0));
+>     emit(b * 9.0, n, vec2(1.0));
+>     emit(b * 11.5, n, vec2(1.0));
+>     emit(a * 9.0, n, vec2(1.0));
+>     emit(b * 11.5, n, vec2(1.0));
+>     emit(a * 11.5, n, vec2(1.0));
+>   }
+> }
+> // Facing the viewer however the window is turned, one size on screen.
+> void vert(Color v, inout vec3 p, inout vec3 n) {
+>   p = where(v) + (p.x * sbAcross() + p.y * sbUpward()) * sbPixel;
+> }
+> vec4 frag(Color v, vec3 p, vec3 n, vec2 uv) {
+>   if (uv.x > 0.5) return sbTint;
+>   return vec4(clamp(v, 0.0, 1.0), 1.0);
+> }
+> vec3 position(Color v) {
+>   return where(v);
+> }
+> float grab(Color v) {
+>   return length(sbScreen(where(v)) - sbPointer);
+> }
+> // In the plane through it that faces the viewer.
+> Color drag(Color c) {
+>   float t = dot(where(c) - sbRayOrigin, sbRayDir);
+>   return sbRayOrigin + sbRayDir * t + vec3(0.5);
+> }
+end
+block 3382.58 1614.41 20 0 0 0 0 0 0
+> Viz(Color, "Cylinder");
+> // A colour in the HSV cylinder: hue round it, saturation out from the middle,
+> // value up.
+> vec3 where(Color c) {
+>   vec3 k = hsvOf(c);
+>   float r = k.y * 0.5;
+>   return vec3(r * cos(k.x * 6.28318), k.z - 0.5, r * sin(k.x * 6.28318));
+> }
+> // The colour it is, a disc; and outside a gap, a ring the colour of its
+> // variable -- told apart by the texture coordinate, so the two are one piece
+> // and a nearer marker is drawn whole over a farther one.
+> void mesh() {
+>   for (int i = 0; i < 24; ++i) {
+>     float s = 6.28318 * float(i) / 24.0;
+>     float e = 6.28318 * float(i + 1) / 24.0;
+>     vec3 a = vec3(cos(s), sin(s), 0.0);
+>     vec3 b = vec3(cos(e), sin(e), 0.0);
+>     vec3 n = vec3(0.0, 0.0, 1.0);
+>     emit(vec3(0.0), n, vec2(0.0));
+>     emit(a * 7.0, n, vec2(0.0));
+>     emit(b * 7.0, n, vec2(0.0));
+>     emit(a * 9.0, n, vec2(1.0));
+>     emit(b * 9.0, n, vec2(1.0));
+>     emit(b * 11.5, n, vec2(1.0));
+>     emit(a * 9.0, n, vec2(1.0));
+>     emit(b * 11.5, n, vec2(1.0));
+>     emit(a * 11.5, n, vec2(1.0));
+>   }
+> }
+> // Facing the viewer however the window is turned, one size on screen.
+> void vert(Color v, inout vec3 p, inout vec3 n) {
+>   p = where(v) + (p.x * sbAcross() + p.y * sbUpward()) * sbPixel;
+> }
+> vec4 frag(Color v, vec3 p, vec3 n, vec2 uv) {
+>   if (uv.x > 0.5) return sbTint;
+>   return vec4(clamp(v, 0.0, 1.0), 1.0);
+> }
+> vec3 position(Color v) {
+>   return where(v);
+> }
+> float grab(Color v) {
+>   return length(sbScreen(where(v)) - sbPointer);
+> }
+> // In the plane through it that faces the viewer, read back as hue,
+> // saturation and value.
+> Color drag(Color c) {
+>   vec3 q = sbRayOrigin + sbRayDir * dot(where(c) - sbRayOrigin, sbRayDir);
+>   float h = fract(atan(q.z, q.x) / 6.28318);
+>   return hsv(h, length(vec2(q.x, q.z)) / 0.5, q.y + 0.5);
+> }
+end

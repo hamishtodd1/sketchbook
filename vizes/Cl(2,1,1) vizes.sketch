@@ -1,0 +1,68 @@
+sketchbook 3
+view 200 120 0.6
+grid 1
+aspect 1.5
+block -640 -460 34 0 1 0 0 1000 0
+> \text Vizes of Cl(2,1,1)
+end
+block -640 -380 22 0 0 0 0 1000 0
+> \text How the values of this algebra are drawn, on every canvas that works in it -- unless that canvas writes its own viz for the same type and window. Edit a box here and it is what every such canvas draws.
+end
+block -640 -200 26 0 0 0 0 0 0
+> Cl(2,1,1);
+> Tri a;
+> Tri b;
+end
+block 120 -200 20 0 0 0 0 0 0
+> Viz(Tri, "Spacetime");
+> // A point is a lit ball where the point is. A point at infinity has no
+> // position, only a direction, so it goes out at the edge of everything --
+> // bigger, since it is far off, and exempt from the walls' cut.
+> vec3 pointOf(Tri t) {
+>   vec3 d = vec3(t.e023, t.e013, t.e012);
+>   if (abs(t.e123) < 0.000001) return normalize(d + vec3(0.000001)) * 40.0;
+>   return d / t.e123;
+> }
+> void mesh() {
+>   for (int i = 0; i < 12; ++i) {
+>     float a0 = 3.14159 * float(i) / 12.0;
+>     float a1 = 3.14159 * float(i + 1) / 12.0;
+>     for (int j = 0; j < 16; ++j) {
+>       float b0 = 6.28318 * float(j) / 16.0;
+>       float b1 = 6.28318 * float(j + 1) / 16.0;
+>       vec3 p00 = vec3(sin(a0) * cos(b0), cos(a0), sin(a0) * sin(b0));
+>       vec3 p01 = vec3(sin(a0) * cos(b1), cos(a0), sin(a0) * sin(b1));
+>       vec3 p10 = vec3(sin(a1) * cos(b0), cos(a1), sin(a1) * sin(b0));
+>       vec3 p11 = vec3(sin(a1) * cos(b1), cos(a1), sin(a1) * sin(b1));
+>       emit(p00, p00);
+>       emit(p10, p10);
+>       emit(p11, p11);
+>       emit(p00, p00);
+>       emit(p11, p11);
+>       emit(p01, p01);
+>     }
+>   }
+> }
+> void vert(Tri v, inout vec3 p, inout vec3 n) {
+>   float size = 0.22;
+>   if (abs(v.e123) < 0.000001) {
+>     size = 1.32;
+>     sbUncut = true;
+>   }
+>   p = pointOf(v) + p * size;
+> }
+> vec3 position(Tri v) {
+>   return pointOf(v);
+> }
+> float grab(Tri v) {
+>   return length(sbScreen(pointOf(v)) - sbPointer);
+> }
+> // Dragged in the plane through the point that faces the camera.
+> Tri drag(Tri v) {
+>   vec3 at = pointOf(v);
+>   vec3 facing = normalize(sbEye - at);
+>   float t = dot(at - sbRayOrigin, facing) / dot(sbRayDir, facing);
+>   vec3 to = sbRayOrigin + sbRayDir * t;
+>   return Tri(to.z, to.y, to.x, 1.0);
+> }
+end

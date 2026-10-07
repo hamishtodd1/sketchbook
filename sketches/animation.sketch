@@ -1,0 +1,49 @@
+sketchbook 3
+view -40 40 0.6
+aspect 1.5
+block -1300 -760 44 0 1 0 0 1400 0
+> \text Things that move by themselves
+end
+block -1300 -640 22 0 0 0 0 720 0
+> \text Hover a knob and a play button appears under it. Press it and the value swings as sin(time) about where it was; press again to stop it there. Grabbing a playing knob takes it over, and while any box is being written in, everything playing pauses.
+end
+block -1300 -500 26 0 0 0 0 0 0
+> float a;
+> float k;
+> float w(float x) { return a * sin(k * x); }
+val a 1
+val k 2
+end
+block -1300 330 22 0 0 0 0 720 0
+> \text time is the number of seconds since the box was compiled -- edit the box and it starts again from nought. Any box that mentions it is redrawn and re-read every frame, so s moves on its own.
+end
+block -1300 470 26 0 0 0 0 0 0
+> float speed;
+> float s = sin(time);
+> vec3 ripple(vec2 p) {
+>   float r = length(p);
+>   float t = 0.5 + 0.5 * sin(8.0 * r - speed * time);
+>   return vec3(t, t * t, 1.0 - t);
+> }
+val speed 3
+end
+block 250 -640 22 0 0 0 0 640 0
+> \text rand() is a random number in [0, 1) that holds still. Each call is a new number, so the three channels of this grain are three different ones.
+end
+block 250 -500 26 0 0 0 0 0 0
+> float n;
+> vec3 grain(vec2 p) {
+>   return vec3(rand(), rand(), rand()) * n;
+> }
+val n 1
+end
+block 250 330 22 0 0 0 0 640 0
+> \text randChanging() is the same, but new every frame: the snow falls, and r never settles.
+end
+block 250 470 26 0 0 0 0 0 0
+> float r = randChanging();
+> vec3 snow(vec2 p) {
+>   float v = randChanging();
+>   return vec3(v, v, v);
+> }
+end

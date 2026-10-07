@@ -10,6 +10,7 @@
 #include "text.h"
 #include "theme.h"
 #include "types/Color.h"
+#include "windowname.h"
 
 namespace sb {
 namespace {
@@ -122,19 +123,6 @@ Vector3 PointOf(ColorShape shape, const float rgb[3]) {
     return {r * std::cos(hsv[0] * kTau), hsv[2] - 0.5f, r * std::sin(hsv[0] * kTau)};
   }
   return {rgb[0] - 0.5f, rgb[1] - 0.5f, rgb[2] - 0.5f};
-}
-
-void ColourOf(ColorShape shape, Vector3 p, float rgb[3]) {
-  if (shape == ColorShape::Cylinder) {
-    float hue = std::atan2(p.z, p.x) / kTau;
-    hue -= std::floor(hue);
-    const float hsv[3] = {hue, std::sqrt(p.x * p.x + p.z * p.z) / 0.5f, p.y + 0.5f};
-    types::color::HsvToRgb(hsv, rgb);
-    return;
-  }
-  rgb[0] = p.x + 0.5f;
-  rgb[1] = p.y + 0.5f;
-  rgb[2] = p.z + 0.5f;
 }
 
 struct Camera2 {
@@ -383,71 +371,112 @@ std::string ColorPanel::Focus(const ColorView& view) const {
   return firstFree.empty() ? first : firstFree;
 }
 
-std::vector<ColorPanel::Marker> ColorPanel::Markers(std::size_t index, Rectangle rect) const {
-  std::vector<Marker> out;
-  const ColorView&    view = views_[index];
-  if (view.block == nullptr) return out;
-  const std::string focus = Focus(view);
-  const Picker      picker = PickerFor(rect);
-  const Camera2     camera = CameraFor(view, rect);
-  std::vector<float> depths;
-
-  for (const mathprogram::Variable& variable : view.block->Variables()) {
-    if (variable.kind != mathprogram::Kind::Color || variable.components.size() != 3) continue;
-    if (!view.block->InScope(variable.name)) continue;
-    Marker marker;
-    marker.name = variable.name;
-    marker.free = variable.free;
-    std::copy(variable.components.begin(), variable.components.end(), marker.rgb);
-    float hsv[3];
-    types::color::RgbToHsv(marker.rgb, hsv);
-
-    if (view.shape == ColorShape::Picker) {
-      // Every colour sits on the ring at its hue; the one the triangle points at
-      // is also in the triangle, at its saturation and value.
-      Marker ring = marker;
-      ring.onRing = true;
-      ring.at = picker.At(hsv[0], picker.Mid());
-      out.push_back(ring);
-      depths.push_back(-1.0f);
-      if (variable.name == focus) {
-        const float hue = (hsv[1] > 1e-3f) ? hsv[0] : view.focusHue;
-        marker.at = InTriangle(picker, hue, hsv[1], hsv[2]);
-        out.push_back(marker);
-        depths.push_back(1.0f);
-      }
-      continue;
-    }
-    float depth = 0.0f;
-    marker.at = camera.Screen(PointOf(view.shape, marker.rgb), &depth);
-    out.push_back(marker);
-    depths.push_back(depth);
+bool ColorPanel::TriangleMarker(std::size_t index, Rectangle rect, Marker* out) const {
+  const ColorView& view = views_[index];
+  if (view.shape != ColorShape::Picker || view.block == nullptr) return false;
+  const std::string            focus = Focus(view);
+  const mathprogram::Variable* variable = view.block->FindVariable(focus);
+  if (variable == nullptr || variable->kind != mathprogram::Kind::Color ||
+      variable->components.size() != 3 || !view.block->InScope(focus)) {
+    return false;
   }
-
-  // Far ones first, so the near ones are drawn over them.
-  std::vector<std::size_t> order(out.size());
-  for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
-  std::stable_sort(order.begin(), order.end(),
-                   [&](std::size_t a, std::size_t b) { return depths[a] < depths[b]; });
-  std::vector<Marker> sorted;
-  sorted.reserve(out.size());
-  for (std::size_t i : order) sorted.push_back(out[i]);
-  return sorted;
+  out->name = focus;
+  out->free = variable->free;
+  std::copy(variable->components.begin(), variable->components.end(), out->rgb);
+  float hsv[3];
+  types::color::RgbToHsv(out->rgb, hsv);
+  const float hue = (hsv[1] > 1e-3f) ? hsv[0] : view.focusHue;
+  out->at = InTriangle(PickerFor(rect), hue, hsv[1], hsv[2]);
+  return true;
 }
 
-int ColorPanel::MarkerAt(const std::vector<Marker>& markers, Vector2 point, float zoom) const {
-  const float reach = std::max(8.0f, 11.0f * zoom);
-  int         best = -1;
-  float       bestDistance = reach;
-  // Nearest wins; among equals, the one drawn on top -- the last.
-  for (std::size_t i = 0; i < markers.size(); ++i) {
-    const float d = std::hypot(point.x - markers[i].at.x, point.y - markers[i].at.y);
-    if (d <= bestDistance) {
-      bestDistance = d;
-      best = static_cast<int>(i);
-    }
+namespace {
+const char* DwName(ColorShape shape) {
+  if (shape == ColorShape::Cube) return "Cube";
+  if (shape == ColorShape::Cylinder) return "Cylinder";
+  return "Picker";
+}
+}  // namespace
+
+VizPane* ColorPanel::PaneFor(std::size_t index) const {
+  if (index >= views_.size()) return nullptr;
+  const ColorView& view = views_[index];
+  if (view.id == 0) view.id = nextId_++;
+  return &panes_[view.id];
+}
+
+VizFrame ColorPanel::FrameFor(std::size_t index, Rectangle rect, Vector2 pointer,
+                              float zoom) const {
+  const ColorView& view = views_[index];
+  const float      w = std::max(rect.width, 1.0f);
+  const float      h = std::max(rect.height, 1.0f);
+  VizFrame frame;
+  frame.size = {rect.width, rect.height};
+  frame.pointer = {pointer.x - rect.x, pointer.y - rect.y};
+  frame.viewProj = Matrix{};
+  frame.viewProj.m15 = 1.0f;
+  if (view.shape == ColorShape::Picker) {
+    // The plane of the ring, its outer edge at radius one.
+    const Picker picker = PickerFor(rect);
+    frame.viewProj.m0 = 2.0f * picker.outer / w;
+    frame.viewProj.m5 = 2.0f * picker.outer / h;
+    frame.viewProj.m10 = 1.0f;
+    frame.rayOrigin = {(pointer.x - picker.centre.x) / picker.outer,
+                       -(pointer.y - picker.centre.y) / picker.outer, 1.0f};
+    frame.rayDir = {0.0f, 0.0f, -1.0f};
+    frame.eye = {0.0f, 0.0f, 10.0f};
+    frame.pixel = zoom / picker.outer;
+    return frame;
   }
-  return best;
+  // The cube or the cylinder, turned: the same turn the window draws its
+  // furniture with, as a matrix, and orthographic.
+  const Camera2 camera = CameraFor(view, rect);
+  const Vector3 across = camera.Unturn({1.0f, 0.0f, 0.0f});
+  const Vector3 up = camera.Unturn({0.0f, 1.0f, 0.0f});
+  const Vector3 toward = camera.Unturn({0.0f, 0.0f, 1.0f});
+  const float   sx = 2.0f * camera.scale / w;
+  const float   sy = 2.0f * camera.scale / h;
+  frame.viewProj.m0 = sx * across.x;
+  frame.viewProj.m4 = sx * across.y;
+  frame.viewProj.m8 = sx * across.z;
+  frame.viewProj.m1 = sy * up.x;
+  frame.viewProj.m5 = sy * up.y;
+  frame.viewProj.m9 = sy * up.z;
+  frame.viewProj.m2 = -0.5f * toward.x;
+  frame.viewProj.m6 = -0.5f * toward.y;
+  frame.viewProj.m10 = -0.5f * toward.z;
+  frame.rayOrigin = camera.Back(pointer, 2.0f);
+  frame.rayDir = {-toward.x, -toward.y, -toward.z};
+  frame.eye = {toward.x * 10.0f, toward.y * 10.0f, toward.z * 10.0f};
+  frame.pixel = zoom / camera.scale;
+  return frame;
+}
+
+Vector2 ColorPanel::ScreenOf(std::size_t index, Rectangle rect, Vector3 at) const {
+  const ColorView& view = views_[index];
+  if (view.shape == ColorShape::Picker) {
+    const Picker picker = PickerFor(rect);
+    return {picker.centre.x + at.x * picker.outer, picker.centre.y - at.y * picker.outer};
+  }
+  return CameraFor(view, rect).Screen(at);
+}
+
+int ColorPanel::ValueNear(std::size_t index, float zoom) const {
+  const VizPane* pane = PaneFor(index);
+  if (pane == nullptr) return -1;
+  return pane->Nearest(std::max(8.0f, 11.0f * zoom),
+                       [](const VizItem& one) { return one.sample < 0; });
+}
+
+bool ColorPanel::VizDrags() const {
+  if (dragView_ >= views_.size()) return false;
+  return drag_ == Drag::Hue ||
+         (drag_ == Drag::Value && views_[dragView_].shape != ColorShape::Picker);
+}
+
+void ColorPanel::ReleaseGpu() {
+  for (auto& [id, pane] : panes_) pane.Release();
+  panes_.clear();
 }
 
 // ------------------------------------------------------------------ selection
@@ -488,29 +517,67 @@ void ColorPanel::DrawSelectionRims(const Viewport& viewport, FontStore& fonts) c
   }
 }
 
+bool ColorPanel::MarkerFor(const CodeBlock* block, const std::string& name,
+                           const Viewport& viewport, FontStore& fonts, Vector2* out) const {
+  for (std::size_t i = 0; i < views_.size(); ++i) {
+    if (views_[i].block == nullptr) continue;
+    const Rectangle rect = RectFor(i, viewport, fonts);
+    const VizPane*  pane = PaneFor(i);
+    Vector3 there{};
+    const int item = (pane == nullptr) ? -1 : pane->Find(block, name);
+    if (item >= 0 && pane->Position(item, &there)) {
+      if (out != nullptr) *out = ScreenOf(i, rect, there);
+      return true;
+    }
+    // Where no viz places it, the picker's triangle may still be showing it.
+    Marker triangle;
+    if (views_[i].block == block && TriangleMarker(i, rect, &triangle) && triangle.name == name) {
+      if (out != nullptr) *out = triangle.at;
+      return true;
+    }
+  }
+  return false;
+}
+
 void ColorPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
                                  std::vector<ActiveValue>* out) const {
   if (out == nullptr) return;
   const Vector2 pointer = hover::Pointer();
+  const float   zoom = viewport.Zoom();
   for (std::size_t i = 0; i < views_.size(); ++i) {
     if (views_[i].block == nullptr) continue;
     const Rectangle rect = RectFor(i, viewport, fonts);
-    const std::vector<Marker> markers = Markers(i, rect);
+    const VizPane*  pane = PaneFor(i);
+    const auto from = [&](int item, Vector2* at) {
+      Vector3 there{};
+      if (pane == nullptr || !pane->Position(item, &there)) return false;
+      *at = ScreenOf(i, rect, there);
+      return true;
+    };
+    Marker triangle;
+    const bool hasTriangle = TriangleMarker(i, rect, &triangle);
     // The one held wins; otherwise the one under the pointer.
     if ((drag_ == Drag::Value || drag_ == Drag::Hue) && i == dragView_) {
-      for (const Marker& marker : markers) {
-        if (marker.name != dragName_) continue;
-        ActiveValue value{views_[i].block, marker.name, marker.at};
-        value.held = true;
-        out->push_back(value);
+      ActiveValue value{views_[i].block, dragName_, {}};
+      value.held = true;
+      if (!VizDrags() && hasTriangle) {
+        value.from = triangle.at;
+      } else if (pane == nullptr || !from(pane->Find(views_[i].block, dragName_), &value.from)) {
         return;
       }
+      out->push_back(value);
+      return;
     }
     if (!CheckCollisionPointRec(pointer, rect)) continue;
-    const int at = MarkerAt(markers, pointer, viewport.Zoom());
-    if (at < 0) continue;
-    out->push_back({views_[i].block, markers[static_cast<std::size_t>(at)].name,
-                    markers[static_cast<std::size_t>(at)].at});
+    if (hasTriangle && std::hypot(pointer.x - triangle.at.x, pointer.y - triangle.at.y) <=
+                           std::max(8.0f, 11.0f * zoom)) {
+      out->push_back({views_[i].block, triangle.name, triangle.at});
+      return;
+    }
+    const int at = ValueNear(i, zoom);
+    Vector2   where{};
+    if (at < 0 || !from(at, &where)) continue;
+    out->push_back({views_[i].block, pane->Items()[static_cast<std::size_t>(at)].name, where});
     return;
   }
 }
@@ -605,24 +672,26 @@ bool ColorPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
           float hsv[3];
           types::color::RgbToHsv(current, hsv);
           if (hsv[1] > 1e-3f) view.focusHue = hsv[0];
-          float next[3] = {current[0], current[1], current[2]};
-          if (view.shape == ColorShape::Picker) {
-            const Picker picker = PickerFor(rect);
-            if (drag_ == Drag::Hue) {
-              view.focusHue = picker.TurnsAt(pointer);
-              const float moved[3] = {view.focusHue, hsv[1], hsv[2]};
-              types::color::HsvToRgb(moved, next);
-            } else {
-              float s = 0.0f, v = 0.0f;
-              FromTriangle(picker, view.focusHue, pointer, &s, &v);
-              const float moved[3] = {view.focusHue, s, v};
-              types::color::HsvToRgb(moved, next);
+          if (VizDrags()) {
+            // What the viz's `drag` said the pointer is asking for, a frame
+            // after it was asked.
+            std::vector<float> parts;
+            if (VizPane* pane = PaneFor(dragView_);
+                pane != nullptr && pane->TakeDrag(&parts) && parts.size() == 3) {
+              float moved[3];
+              types::color::RgbToHsv(parts.data(), moved);
+              if (view.shape == ColorShape::Picker && moved[1] > 1e-3f) view.focusHue = moved[0];
+              view.block->SetColorValue(dragName_, parts.data());
             }
           } else {
-            const Camera2 camera = CameraFor(view, rect);
-            ColourOf(view.shape, camera.Back(pointer, dragDepth_), next);
+            // Inside the picker's triangle, which is the window's own.
+            float s = 0.0f, v = 0.0f;
+            FromTriangle(PickerFor(rect), view.focusHue, pointer, &s, &v);
+            const float moved[3] = {view.focusHue, s, v};
+            float       next[3];
+            types::color::HsvToRgb(moved, next);
+            view.block->SetColorValue(dragName_, next);
           }
-          view.block->SetColorValue(dragName_, next);
         }
         if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) drag_ = Drag::None;
         return true;
@@ -655,8 +724,6 @@ bool ColorPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
       return true;
     }
 
-    const std::vector<Marker> markers = Markers(i, rect);
-    const int                 at = MarkerAt(markers, pointer, zoom);
     const auto takeHold = [&](const std::string& name, Drag how) {
       view.block->StopPlaying(name);
       view.block->BeginValueEdit(name);
@@ -664,24 +731,29 @@ bool ColorPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
       dragView_ = i;
       dragName_ = name;
     };
-    if (at >= 0) {
-      const Marker& marker = markers[static_cast<std::size_t>(at)];
-      if (view.shape == ColorShape::Picker && marker.onRing) {
+    // The picker's triangle first: its marker is the window's own.
+    if (Marker triangle; TriangleMarker(i, rect, &triangle) &&
+                         std::hypot(pointer.x - triangle.at.x, pointer.y - triangle.at.y) <=
+                             std::max(8.0f, 11.0f * zoom)) {
+      if (triangle.free) takeHold(triangle.name, Drag::Value);
+      return true;
+    }
+    if (const int at = ValueNear(i, zoom); at >= 0) {
+      const std::string            name = PaneFor(i)->Items()[static_cast<std::size_t>(at)].name;
+      const mathprogram::Variable* variable = view.block->FindVariable(name);
+      const bool                   free = variable != nullptr && variable->free;
+      if (view.shape == ColorShape::Picker) {
         // Pointing the triangle at a colour is choosing which one it shows.
-        view.focus = marker.name;
-        float hsv[3];
-        types::color::RgbToHsv(marker.rgb, hsv);
-        if (hsv[1] > 1e-3f) view.focusHue = hsv[0];
-        if (marker.free) takeHold(marker.name, Drag::Hue);
+        view.focus = name;
+        if (variable != nullptr && variable->components.size() == 3) {
+          float hsv[3];
+          types::color::RgbToHsv(variable->components.data(), hsv);
+          if (hsv[1] > 1e-3f) view.focusHue = hsv[0];
+        }
+        if (free) takeHold(name, Drag::Hue);
         return true;
       }
-      if (!marker.free) return true;   // derived: pointed at, not moved
-      if (view.shape != ColorShape::Picker) {
-        float depth = 0.0f;
-        CameraFor(view, rect).Screen(PointOf(view.shape, marker.rgb), &depth);
-        dragDepth_ = depth;
-      }
-      takeHold(marker.name, Drag::Value);
+      if (free) takeHold(name, Drag::Value);   // derived: pointed at, not moved
       return true;
     }
     // A press on the ring, off every marker, turns the one the triangle points
@@ -728,11 +800,19 @@ void ColorPanel::DrawMenu(Rectangle window, std::size_t index, FontStore& fonts)
   }
 }
 
-void ColorPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
+void ColorPanel::Draw(const Viewport& viewport, FontStore& fonts, VizStore& vizes) const {
   const float   zoom = viewport.Zoom();
   const Vector2 pointer = hover::Pointer();
   std::vector<ActiveValue> active;
   ActiveVariables(viewport, fonts, &active);
+  // What a window that has gone was holding on the GPU goes with it.
+  for (auto it = panes_.begin(); it != panes_.end();) {
+    const bool present = std::any_of(views_.begin(), views_.end(),
+                                     [&](const ColorView& v) { return v.id == it->first; });
+    if (present) { ++it; continue; }
+    it->second.Release();
+    it = panes_.erase(it);
+  }
 
   for (std::size_t i = 0; i < views_.size(); ++i) {
     const ColorView& view = views_[i];
@@ -746,6 +826,7 @@ void ColorPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
 
     BeginScissorMode(static_cast<int>(rect.x), static_cast<int>(rect.y),
                      static_cast<int>(rect.width), static_cast<int>(rect.height));
+    Camera2 camera{};
     if (view.shape == ColorShape::Picker) {
       const std::string focus = Focus(view);
       float             hue = view.focusHue;
@@ -756,49 +837,88 @@ void ColorPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
         types::color::RgbToHsv(rgb, hsv);
         if (hsv[1] > 1e-3f) hue = hsv[0];
       }
-      const Picker picker = PickerFor(rect);
-      DrawPicker(picker, hue);
-      // A function giving a colour, fed a spread: its answers inside the ring at
-      // their hues, which is all the picker has room to say about many colours.
-      const Sampling& fed = view.block->Samples();
-      if (fed.Live() && fed.outputType == types::color::kName && fed.outStride == 3) {
-        for (int k = 0; k < fed.count; ++k) {
-          const float* rgb = &fed.outputs[static_cast<std::size_t>(k * 3)];
-          float        hsv[3];
-          types::color::RgbToHsv(rgb, hsv);
-          DrawMarker(picker.At(hsv[0], picker.inner - std::max(5.0f, 8.0f * zoom)), rgb,
-                     view.block->VariableColor(fed.name), zoom);
-        }
-      }
+      DrawPicker(PickerFor(rect), hue);
     } else {
-      const Camera2 camera = CameraFor(view, rect);
+      camera = CameraFor(view, rect);
       if (view.shape == ColorShape::Cube) {
         DrawCube(camera, zoom);
       } else {
         DrawCylinder(camera, zoom);
       }
-      // What a function giving a colour answers, for the spread it is fed: a
-      // bead at each answer, the colour it is.
+    }
+
+    // Every colour in the window, and every answer a function giving one is
+    // feeding it, handed to the view's viz and drawn by it -- far ones first, so
+    // the near ones are drawn over them. A sample is drawn exactly as a value.
+    VizPane* pane = PaneFor(i);
+    pane->Collect();
+    if (const VizGpu* viz = vizes.Find(types::color::kName, DwName(view.shape)); viz != nullptr) {
+      struct Entry {
+        VizItem     item;
+        Color       tint;
+        const float* rgb;
+        float        depth;
+      };
+      std::vector<Entry> entries;
+      const auto depthOf = [&](const float* rgb) {
+        if (view.shape == ColorShape::Picker) return 0.0f;
+        return camera.Turn(PointOf(view.shape, rgb)).z;
+      };
+      for (const mathprogram::Variable& variable : view.block->Variables()) {
+        if (variable.kind != mathprogram::Kind::Color || variable.components.size() != 3) continue;
+        if (!view.block->InScope(variable.name)) continue;
+        bool inUse = false;
+        for (const ActiveValue& value : active) {
+          inUse = inUse || (value.block == view.block && value.name == variable.name);
+        }
+        entries.push_back({{view.block, variable.name},
+                           Blink(view.block->VariableColor(variable.name), inUse),
+                           variable.components.data(), depthOf(variable.components.data())});
+      }
       const Sampling& fed = view.block->Samples();
       if (fed.Live() && fed.outputType == types::color::kName && fed.outStride == 3) {
         for (int k = 0; k < fed.count; ++k) {
           const float* rgb = &fed.outputs[static_cast<std::size_t>(k * 3)];
-          DrawMarker(camera.Screen(PointOf(view.shape, rgb)), rgb,
-                     view.block->VariableColor(fed.name), zoom);
+          entries.push_back({{view.block, fed.name, k, true}, view.block->VariableColor(fed.name),
+                             rgb, depthOf(rgb)});
         }
       }
+      std::stable_sort(entries.begin(), entries.end(),
+                       [](const Entry& a, const Entry& b) { return a.depth < b.depth; });
+      pane->Begin();
+      for (const Entry& entry : entries) pane->Add(entry.item, entry.tint, entry.rgb, 3);
+      const Vector2  aim = GetMousePosition();
+      const int      dragOne = (VizDrags() && i == dragView_)
+                                   ? pane->Find(view.block, dragName_) : -1;
+      const VizFrame frame = FrameFor(i, rect, aim, zoom);
+      pane->Settle(*viz, frame,
+                   {view.yaw, view.pitch, static_cast<float>(view.shape), rect.x, rect.y,
+                    rect.width, rect.height},
+                   CheckCollisionPointRec(aim, rect), dragOne);
+      rlDrawRenderBatchActive();
+      rlViewport(static_cast<int>(rect.x),
+                 GetRenderHeight() - static_cast<int>(rect.y + rect.height),
+                 static_cast<int>(rect.width), static_cast<int>(rect.height));
+      pane->Draw(*viz, frame);
+      rlViewport(0, 0, GetRenderWidth(), GetRenderHeight());
     }
-    for (const Marker& marker : Markers(i, rect)) {
+
+    // The picker's triangle shows the colour it points at, which is the
+    // window's own to draw.
+    if (Marker triangle; TriangleMarker(i, rect, &triangle)) {
       bool inUse = false;
       for (const ActiveValue& value : active) {
-        inUse = inUse || (value.block == view.block && value.name == marker.name);
+        inUse = inUse || (value.block == view.block && value.name == triangle.name);
       }
-      DrawMarker(marker.at, marker.rgb, Blink(view.block->VariableColor(marker.name), inUse),
-                 zoom);
+      DrawMarker(triangle.at, triangle.rgb,
+                 Blink(view.block->VariableColor(triangle.name), inUse), zoom);
     }
     EndScissorMode();
 
     if (carried || PointOnRim(rect, pointer)) DrawRim(rect, zoom, carried);
+    if (carried || CheckCollisionPointRec(pointer, rect) || PointOnRim(rect, pointer)) {
+      windowname::Offer(rect, DwName(view.shape));
+    }
   }
 }
 

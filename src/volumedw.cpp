@@ -8,6 +8,7 @@
 #include "selection.h"
 #include "hover.h"
 #include "theme.h"
+#include "windowname.h"
 
 namespace sb {
 namespace {
@@ -298,6 +299,9 @@ void VolumePanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     EndScissorMode();
     DrawRectangleLinesEx(rect, std::max(1.0f, 1.0f * zoom), Fade(kCodeFg, 0.25f));
     if (carried || PointOnRim(rect, hover::Pointer())) DrawRim(rect, zoom, carried);
+    if (carried || CheckCollisionPointRec(hover::Pointer(), rect) || PointOnRim(rect, hover::Pointer())) {
+      windowname::Offer(rect, "Volume");
+    }
   }
 }
 

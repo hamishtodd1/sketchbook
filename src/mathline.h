@@ -47,7 +47,7 @@ enum class Kind {
   Declaration,  // `float a;` or `float c = <expr>;`
   Assignment,   // `c = <expr>;`
   Algebra,      // `Cl(3,0,1);` -- which algebra the box works in
-  Viz,          // `Viz(Real);` -- this box draws that type, rather than using it
+  Viz,          // `Viz(Tri, "Space");` -- this box draws that type, rather than using it
   Samples,      // `Samples(float, 24);` -- this box spreads that type out
   Signature,    // `vec3 swirl(vec2 p) {` -- an arrow between two spaces
   Prototype,    // `vec3 swirl(vec2 p);` -- the same arrow, with no body given
@@ -61,6 +61,9 @@ struct Line {
   std::string name;            // the variable declared or assigned; the type a Viz draws
   bool        hasInitialiser = false;
   int         count = 0;       // Samples: how many of them
+  // Viz: the window was named without its quotes, `Viz(Tri, Space);`, which is
+  // a mistake to report rather than a line to compile.
+  bool        unquoted = false;
   std::string latex;           // empty unless there is a reading
 
   // Every identifier written in `latex` is wrapped in \sbref{k}{...}, and

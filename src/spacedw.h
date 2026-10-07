@@ -1,14 +1,16 @@
-// The two display windows that show points, in space and in spacetime.
+// The two display windows with a camera of their own: space and spacetime.
 //
-// A number line shows a real and a plot shows a function; these show a *point*,
-// which is what a trivector of a 4D projective algebra is. There are two of
-// them and they differ in exactly two things: the algebra whose `Tri` they
-// accept, and the sky they draw. Cl(3,0,1) is space and Cl(2,1,1) is spacetime,
-// where the third axis is time.
+// **A dw has no opinion about what goes in it.** These show every value of a
+// box whose type has a viz for them -- `Viz(Tri, "Space")` is the built-in one,
+// a point as a ball, and `Viz(Bi, "Space")` written on a canvas puts its
+// bivectors in the same window beside them. There are two of them and they
+// differ in exactly two things: the algebra a box must be in to have one, and
+// the sky they draw. Cl(3,0,1) is space and Cl(2,1,1) is spacetime, where the
+// third axis is time.
 //
-// Like the number line, **a box gets one and all of its points share it**: a
-// stack of one-point windows would say nothing about how the points compare,
-// and the points in a box are read together.
+// Like the number line, **a box gets one and all of its values share it**: a
+// stack of one-value windows would say nothing about how the values compare,
+// and the values in a box are read together.
 //
 // Everything else on this canvas is drawn in screen space. This is the one
 // window with a camera of its own, so it is rendered into a texture and the
@@ -16,8 +18,10 @@
 // 3D viewport to itself and leaves the rest of the app exactly as it was.
 #pragma once
 
+#include <map>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "blocks.h"
@@ -27,6 +31,7 @@
 #include "raylib.h"
 #include "touch.h"
 #include "viewport.h"
+#include "viz.h"
 
 namespace sb {
 
@@ -38,7 +43,7 @@ enum class SpaceKind { Space, Spacetime };
 clifford::Signature SignatureOf(SpaceKind kind);
 SpaceKind           KindOfSignature(const clifford::Signature& sig, bool* found);
 
-// One point being shown: which box it belongs to and what it is called there.
+// One value being shown: which box it belongs to and what it is called there.
 struct PointRef {
   CodeBlock*  block = nullptr;
   std::string name;
@@ -69,6 +74,15 @@ struct SpaceWindow {
 
   bool    selected = false;
   Vector2 dragFrom{};
+
+  // Which window this is for as long as the app is open, so what it has on the
+  // GPU can be found again after the list is reordered. Not saved.
+  int id = 0;
+  // Worked out by every Sync, and not saved: the types in this window that have
+  // a viz here, each drawn by its own; and whether it is showing the spread a
+  // function of its box is being fed.
+  std::vector<std::string> types;
+  bool                     feeding = false;
 };
 
 class SpacePanel : public Flanking {
@@ -87,11 +101,24 @@ class SpacePanel : public Flanking {
   // releases it first, by hand.
   void ReleaseGpu();
 
-  bool Sync(const Blocks& blocks);
+  // Which values go where. A value goes in if its type has a viz for this kind
+  // of window -- which `vizes` knows without compiling one.
+  bool Sync(const Blocks& blocks, const VizStore& vizes);
   void Forget(const CodeBlock* block);
 
   bool HandleInput(const Viewport& viewport, FontStore& fonts);
-  void Draw(const Viewport& viewport, FontStore& fonts);
+  // A point is drawn by the viz for its type in this window, from `vizes`.
+  void Draw(const Viewport& viewport, FontStore& fonts, VizStore& vizes);
+
+  // Where a named value's marker is, so that pointing at its name in the code
+  // lights it up from the other end, as AxisPanel::MarkerFor does.
+  bool MarkerFor(const CodeBlock* block, const std::string& name, const Viewport& viewport,
+                 FontStore& fonts, Vector2* out) const;
+
+  // The point under the pointer, and the one being dragged: what lights up,
+  // and where its wire leaves from -- the viz's `position`.
+  void ActiveVariables(const Viewport& viewport, FontStore& fonts,
+                       std::vector<ActiveValue>* out) const;
 
   Rectangle DockedBounds(const CodeBlock* block, const Viewport& viewport,
                          FontStore& fonts) const;
@@ -119,7 +146,8 @@ class SpacePanel : public Flanking {
   bool SampleMarker(const CodeBlock* block, int sample, bool output, const Viewport& viewport,
                     FontStore& fonts, Vector2* out) const;
 
-  bool Dragging() const { return dragging_; }
+  // Carrying a window, or dragging a point in one.
+  bool Dragging() const { return dragging_ || held_.active; }
   bool Carrying() const { return dragging_ && dragMoved_; }
 
   // --- selection ----------------------------------------------------------
@@ -150,7 +178,29 @@ class SpacePanel : public Flanking {
   bool      Project(std::size_t index, Vector3 at, const Viewport& viewport, FontStore& fonts,
                     Vector2* out) const;
   void      EnsureGpu();
-  void      DrawScene(const SpaceWindow& window, Rectangle rect);
+
+  // What each window has handed each type's viz, and heard back, by the
+  // window's id and the type. One pane per type, since one viz draws one type.
+  VizPane*       PaneFor(std::size_t index, const std::string& type);
+  const VizPane* PaneFor(std::size_t index, const std::string& type) const;
+  // One item in one of a window's panes.
+  struct Hit {
+    std::string type;
+    int         item = -1;
+  };
+  const VizItem* ItemOf(std::size_t index, const Hit& hit) const;
+  VizFrame       FrameFor(std::size_t index, Rectangle rect, Vector2 pointer) const;
+  // Hands a window's values of one type to that type's viz and asks it where
+  // they are. `lit` is the one that blinks.
+  void           Prepare(std::size_t index, Rectangle rect, const std::string& type,
+                         const VizGpu* viz, const VizItem& lit);
+  // The value, or sample, whose viz the pointer is nearest by the viz's own
+  // `grab`, within `reach` pixels, across every type in the window.
+  Hit            Nearest(std::size_t index, bool samples, float reach) const;
+  // Where a value is in a window's panes, if it is.
+  Hit            Find(std::size_t index, const CodeBlock* block, const std::string& name) const;
+  void        DrawScene(std::size_t index, Rectangle rect,
+                        const std::vector<std::pair<std::string, const VizGpu*>>& vizes);
 
   std::vector<SpaceWindow>     windows_;
   std::vector<const Flanking*> before_;
@@ -164,6 +214,19 @@ class SpacePanel : public Flanking {
   bool        orbiting_ = false;
   std::size_t orbitView_ = 0;
   Vector2     orbitFrom_{};
+
+  // A value being dragged, by its viz's `drag`.
+  struct Held {
+    bool        active = false;
+    int         window = 0;       // its window's id
+    CodeBlock*  block = nullptr;
+    std::string name;
+    std::string type;             // whose viz it is
+  };
+  Held held_;
+
+  std::map<std::pair<int, std::string>, VizPane> panes_;
+  int                           nextId_ = 1;
   // The same gesture with two fingers, which is what a tablet has instead of a
   // right button. It is tracked separately because it ends by a finger lifting
   // rather than by a button coming up.
@@ -185,7 +248,6 @@ class SpacePanel : public Flanking {
   Shader          sky_[2]{};
   Shader          solid_{};
   Model           skyBall_{};
-  Model           ball_{};
   Model           wall_{};
   int             limitsMinLoc_ = -1;
   int             limitsMaxLoc_ = -1;

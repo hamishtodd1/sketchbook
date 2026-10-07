@@ -1,0 +1,18 @@
+sketchbook 3
+view -80 -100 1
+aspect 1.5
+block -557.357 -365.165 26 0 0 0 0 0 0
+> float a;
+> float b;
+> vec3 ripple(vec2 p) {
+>   float r = length(p) * (3.0 + 10.0 * a);
+>   float t = 0.5 + 0.5 * cos(r + b);
+>   return vec3(t, t * t, 1.0 - t);
+> }
+val a 0.408935
+val b 0.805239
+end
+axis 1 0 0 0.7 0.857143 0
+ref 0 a
+ref 0 b
+shader 1 0 0 0 0 0 4

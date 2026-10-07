@@ -1,0 +1,26 @@
+sketchbook 3
+view -297.843 4.87803 0.947345
+aspect 1.5
+block -1153.15 -730.33 22 0 0 0 0 0 0
+> \text A Color is a vec3 that means a colour, so everything GLSL does to a vec3 it does to one -- .rgb, mix, clamp, pow. Its window is chosen from the dropdown beside it while the pointer is on it: a picker, the RGB cube, or the HSV cylinder. A marker's fill is its value and its rim says which variable; drag one to choose. Right-drag turns the cube and the cylinder.
+end
+block -691.891 -384.384 26 0 0 0 0 0 0
+> Color warm;
+> Color cool = Color(0.2, 0.45, 0.9);
+> Color middle = mix(warm, cool, 0.5);
+> Color sky(vec2 p) {
+>   return mix(warm, cool, clamp(p.y * 0.25 + 0.5, 0.0, 1.0));
+> }
+val warm.r 0.834798
+val warm.g 0.658837
+val warm.b 0.33298
+end
+block -691.891 422.822 26 0 0 0 0 0 0
+> Color ramp(float t) {
+>   return hsv(0.1 * t, 0.8, 0.9);
+> }
+end
+axis 1 0 0 0 11.4286 2
+colour 1 0 0 2 2 0.7 0.45
+colour 0 -1037.84 -384.384 1 0 0.940001 0.24
+shader 1 0 0 1 0 0 4

@@ -71,6 +71,7 @@ add_executable(sketchbook
   src/ui.cpp
   src/viewport.cpp
   src/viz.cpp
+  src/vizglsl.cpp
   src/tex/tex_parse.cpp
   src/tex/tex_layout.cpp
   src/tex/tex_symbols.cpp
@@ -87,7 +88,9 @@ endif()
 # Assets are found next to the executable first, then at the source tree path
 # (so the binary runs both from the build dir and from an installed copy).
 target_compile_definitions(sketchbook PRIVATE
-  SKETCHBOOK_SOURCE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
+  SKETCHBOOK_SOURCE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
+  # The built-in vizes are sketches, and they live in the repo.
+  SKETCHBOOK_VIZES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/vizes")
 
 if(MSVC)
   target_compile_options(sketchbook PRIVATE /W4 /permissive-)

@@ -1,0 +1,71 @@
+sketchbook 3
+view 740.618 984.502 1.68608
+aspect 1.5
+block 345.946 518.918 7.35982 0 0 0 0 0 0
+> Cl(2,2,0);
+> //e1e1 = e2e2 = 1
+> //e3e3 = e4e4 = -1
+> //e2 is space and e3 is time
+> 
+> Even simpleExp(Bi b) {
+>     float ip = b | b;
+>     if(abs(ip) < .001)
+>         return 1. + b + 0. * e1234;
+>     else if (ip > 0.) {
+>         float m = sqrt(ip);
+>         return cosh(m) + (b * (sinh(m) / m)) + 0. * e1234;
+>     }
+>     else {
+>         float m = sqrt(-ip);
+>         return cos(m) + (b * (sin(m) / m)) + 0. * e1234;
+>     }
+> }
+> 
+> vec3 whole(vec2 fragPos) {
+> 
+>     float numLightRays = 43.76;
+>     float l = -0.3741;
+>     float eoCurvature = 0.5177;
+>     float eInfCurvature = 0.5121;
+>     float multiplier = 0.25*6.2831853 / eInfCurvature;
+>     
+>     Una eo = eoCurvature * e1 + (1.-eoCurvature)*e4;  // perceptual infinity
+>     Una eInf = eInfCurvature * e1 + (1.-eInfCurvature)*e4;     // geometric object
+>     // float AdSMultiplier = 0.1;
+>     // float multiplier = eInf | eInf > 0. ? 0.25*6.2831853 : eInf | eInf < 0. ? AdSMultiplier : 2.;
+>     
+>     Even pixelRayTranslator = simpleExp( 0.25 * eo ^ (fragPos.x * e2 + fragPos.y * e3 ) );
+>     Bi pixelRay = pixelRayTranslator >> e23;
+> 
+>     Even boost = cosh(l) + e23 * sinh(l);
+>     Bi middleLightRayA = (e2 + e3) ^ (e1 - e4);
+>     Bi middleLightRayB = (e2 - e3) ^ (e1 - e4);
+>     Bi lightRayTranslatorAxis = eInf ^ e2;
+>     bool yes = true;
+>     for(int j = 0; j < 2; ++j)
+>     for(float i = 0.; i < numLightRays; ++i ) {
+>         float t = (i / (numLightRays - 1) - 0.5) * 2.; //ranges from -1 to 1
+>         Even lightRayTranslator = simpleExp(t * multiplier * lightRayTranslatorAxis);
+>         Bi lightRay = lightRayTranslator >> (j==0?middleLightRayA:middleLightRayB);
+>         lightRay = boost >> lightRay;
+>         float val = e1234 | (lightRay ^ pixelRay);
+>         if(val > 0) {
+>             if(yes) yes = false;
+>             else    yes = true;
+>         }
+>     }
+>     
+>     vec3 colA = vec3(143./255.,150./255.,160./255.);
+>     vec3 colB = vec3(215./255.,10./255.,62./255.);
+>     vec3 ret = yes ? colA : colB;
+>     return ret;
+> }
+end
+axis 0 826.426 1153.15 1.02861 2.83035 0
+ref 0 eInfCurvature
+ref 0 eoCurvature
+axis 0 826.426 1230.03 0 4 0
+ref 0 l
+axis 0 826.426 730.33 27.4191 62.778 0
+ref 0 numLightRays
+shader 0 845.645 807.206 0 0 0 25.647

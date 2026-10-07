@@ -177,31 +177,16 @@ bool LiteralSpan(const std::string& text, std::size_t* begin, std::size_t* end) 
 }
 
 
-// raylib reports a shader's compile errors through TraceLog and nowhere else,
-// so the log is caught here for the length of the call. Not re-entrant, and
-// does not need to be: shaders are compiled one at a time, on the main thread.
-std::string* g_shaderLog = nullptr;
-
-void CaptureTraceLog(int level, const char* text, va_list args) {
-  if (g_shaderLog == nullptr || level < LOG_WARNING) return;
-  char buffer[2048];
-  std::vsnprintf(buffer, sizeof(buffer), text, args);
-  *g_shaderLog += buffer;
-  *g_shaderLog += '\n';
-}
-
 // A null half means raylib's own, which is what supplies fragTexCoord and
 // fragColor one way and the screen-space mvp the other.
 bool CompileShaderHalf(const char* vertex, const char* fragment, Shader* shader,
                        std::string* log) {
   log->clear();
-  g_shaderLog = log;
-  SetTraceLogCallback(CaptureTraceLog);
-  const Shader compiled = LoadShaderFromMemory(vertex, fragment);
-  // Back to the filter rather than to nothing: putting nothing back would let
-  // raylib narrate freely again from the next texture onwards.
-  SetTraceLogCallback(log::Filtered);
-  g_shaderLog = nullptr;
+  Shader compiled{};
+  {
+    const log::Catch caught(log);
+    compiled = LoadShaderFromMemory(vertex, fragment);
+  }
 
   if (IsShaderValid(compiled)) {
     *shader = compiled;
@@ -309,7 +294,7 @@ CodeBlock::~CodeBlock() {
   // destroys a box has to have released it first. Say so if they did not,
   // rather than leaking in silence.
   if (haveShader_ || haveFnTarget_ || havePreviewSurface_ || haveProbeTarget_ ||
-      haveVizShader_ || samplerProgram_ != 0 || samplerBuffer_ != 0) {
+      viz_.Ready() || samplerProgram_ != 0 || samplerBuffer_ != 0) {
     TraceLog(LOG_WARNING, "BLOCKS: a box was destroyed still holding GPU memory");
   }
 }
@@ -468,6 +453,7 @@ int CodeBlock::ErrorLine() const {
 }
 
 bool CodeBlock::ReadsAsCode() const {
+  if (alwaysCode_) return true;
   if (reading_ == Reading::Code) return true;
   if (reading_ == Reading::Maths) return false;
   // Auto. Editing a box means editing all of it -- and a box that says how
@@ -495,6 +481,9 @@ bool CodeBlock::ShowsCode(int line) const {
 
 std::string CodeBlock::Injection(int line) const {
   if (line < 0 || line >= static_cast<int>(cache_.size())) return {};
+  // Always-code shows only what was written: the values the app chose live in
+  // the knobs. Asked here, so the box is not sized for what it never shows.
+  if (alwaysCode_) return {};
   const mathline::Line& parsed = cache_[static_cast<std::size_t>(line)].parsed;
 
   // A function nobody gave a body has one chosen for it, and the choice is a
@@ -826,10 +815,6 @@ void CodeBlock::InsertDeclaration(const std::string& declaration) {
   RequestCompile();
 }
 
-int CodeBlock::VizUniform(const char* name) const {
-  return haveVizShader_ ? GetShaderLocation(vizShader_, name) : -1;
-}
-
 // Which function of a given kind this box is being read inside, or the first
 // one of that kind it defines. The same rule every other window follows about
 // where the box has got to.
@@ -890,7 +875,10 @@ void CodeBlock::SetLiveUniforms() const {
     if (location < 0) continue;
     const mathprogram::Literal* literal = program_.FindLiteral(uniform);
     if (literal == nullptr) continue;
-    if (literal->components.size() == 3) {
+    if (literal->array) {
+      SetShaderValueV(shader_, location, literal->components.data(), SHADER_UNIFORM_FLOAT,
+                      static_cast<int>(literal->components.size()));
+    } else if (literal->components.size() == 3) {
       SetShaderValue(shader_, location, literal->components.data(), SHADER_UNIFORM_VEC3);
     } else {
       SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
@@ -1017,10 +1005,11 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
   now.top = topLeft.y;
   now.cache = cacheVersion_;
   // One field each, and no two sharing a bit: showSource at 0, reading at 1-2,
-  // focused at 3, justify at 4-5. Two fields overlapping here would be a box
-  // that quietly kept a stale layout in exactly one combination.
+  // focused at 3, justify at 4-5, always-code at 6. Two fields overlapping here
+  // would be a box that quietly kept a stale layout in exactly one combination.
   now.flags = (showSource_ ? 1u : 0u) | (static_cast<unsigned>(reading_) << 1) |
-              (focused_ ? 8u : 0u) | (static_cast<unsigned>(justify_) << 4);
+              (focused_ ? 8u : 0u) | (static_cast<unsigned>(justify_) << 4) |
+              (alwaysCode_ ? 64u : 0u);
   now.caret = caretLine_;
   now.hover = hoverLine_;
   now.error = ErrorLine();
@@ -1674,12 +1663,21 @@ void CodeBlock::SetColorValue(const std::string& name, const float rgb[3], bool 
   for (std::size_t i = 0; i < variables.size(); ++i) {
     if (variables[i].name != name || variables[i].kind != mathprogram::Kind::Color) continue;
     const int governing = variables[i].GoverningLiteral(ExecutedUpTo());
-    program_.SetColor(i, rgb, ExecutedUpTo());
+    program_.SetComponents(i, std::vector<float>(rgb, rgb + 3), ExecutedUpTo());
     if (intoText && governing >= 0) {
       const mathprogram::Literal& literal =
           variables[i].literals[static_cast<std::size_t>(governing)];
       if (literal.written) WriteColorLiteral(literal.line, rgb);
     }
+    return;
+  }
+}
+
+void CodeBlock::SetComponentValues(const std::string& name, const std::vector<float>& parts) {
+  const std::vector<mathprogram::Variable>& variables = program_.variables();
+  for (std::size_t i = 0; i < variables.size(); ++i) {
+    if (variables[i].name != name || variables[i].kind != mathprogram::Kind::Multivector) continue;
+    program_.SetComponents(i, parts, ExecutedUpTo());
     return;
   }
 }
@@ -1696,6 +1694,13 @@ std::vector<std::pair<std::string, float>> CodeBlock::KnobValues() const {
       out.emplace_back(variable.name + ".r", rgb[0]);
       out.emplace_back(variable.name + ".g", rgb[1]);
       out.emplace_back(variable.name + ".b", rgb[2]);
+    } else if (variable.kind == mathprogram::Kind::Multivector && !variable.literals.empty() &&
+               variable.literals.front().array) {
+      const std::vector<float>&       parts = variable.literals.front().components;
+      const std::vector<std::string> members = clifford::MemberNames(variable.type, Algebra());
+      for (std::size_t i = 0; i < parts.size() && i < members.size(); ++i) {
+        out.emplace_back(variable.name + "." + members[i], parts[i]);
+      }
     }
   }
   return out;
@@ -2300,6 +2305,7 @@ bool CodeBlock::HandleChrome(const Viewport& viewport, FontStore& fonts) {
     return false;
   }
 
+  if (alwaysCode_) return false;   // no toggle is offered
   if (!CheckCollisionPointRec(pointer, chrome.toggle)) return false;
   // Pressing it settles the question the other way, and it stays settled.
   if (pressed) reading_ = ReadsAsCode() ? Reading::Maths : Reading::Code;
@@ -2320,14 +2326,8 @@ void CodeBlock::ReleaseGpu() {
     UnloadShader(shader_);
     haveShader_ = false;
   }
-  if (haveVizShader_) {
-    UnloadShader(vizShader_);
-    haveVizShader_ = false;
-  }
-  if (haveShader_) {
-    UnloadShader(shader_);
-    haveShader_ = false;
-  }
+  viz_.Release();
+  functionVizOk_ = false;
   if (traceBuffer_ != 0) {
     rlUnloadShaderBuffer(traceBuffer_);
     traceBuffer_ = 0;
@@ -2338,13 +2338,6 @@ void CodeBlock::ReleaseGpu() {
   if (haveFnTarget_) { UnloadRenderTexture(fnTarget_); haveFnTarget_ = false; }
   if (samplerProgram_ != 0) { rlUnloadShaderProgram(samplerProgram_); samplerProgram_ = 0; }
   if (samplerBuffer_ != 0) { rlUnloadShaderBuffer(samplerBuffer_); samplerBuffer_ = 0; }
-  if (vizMeshProgram_ != 0) {
-    rlUnloadShaderProgram(vizMeshProgram_);
-    vizMeshProgram_ = 0;
-  }
-  if (vizTriBuffer_ != 0) { rlUnloadShaderBuffer(vizTriBuffer_); vizTriBuffer_ = 0; }
-  if (vizLineBuffer_ != 0) { rlUnloadShaderBuffer(vizLineBuffer_); vizLineBuffer_ = 0; }
-  vizMeshRun_ = false;
   if (haveProbeTarget_) {
     UnloadRenderTexture(probeTarget_);
     haveProbeTarget_ = false;
@@ -2356,43 +2349,6 @@ void CodeBlock::ReleaseGpu() {
   uniforms_.clear();
   uniforms_.clear();
   probeSignature_.clear();
-}
-
-void CodeBlock::RunVizMesh(float value) const {
-  if (vizMeshProgram_ == 0 || vizTriBuffer_ == 0 || vizLineBuffer_ == 0) return;
-  // The geometry only changes when the value does, so neither does the work.
-  if (vizMeshRun_ && value == vizMeshValue_) return;
-  vizMeshValue_ = value;
-  vizMeshRun_ = true;
-
-  // The counters lead each buffer, and start again every time.
-  const unsigned int zero = 0;
-  rlUpdateShaderBuffer(vizTriBuffer_, &zero, sizeof(zero), 0);
-  rlUpdateShaderBuffer(vizLineBuffer_, &zero, sizeof(zero), 0);
-
-  rlEnableShader(vizMeshProgram_);
-  if (vizMeshValueLoc_ >= 0) {
-    rlSetUniform(vizMeshValueLoc_, &value, RL_SHADER_UNIFORM_FLOAT, 1);
-  }
-  rlBindShaderBuffer(vizTriBuffer_, 1);
-  rlBindShaderBuffer(vizLineBuffer_, 2);
-  rlComputeShaderDispatch(1, 1, 1);
-  rlDisableShader();
-
-  // What compute wrote is not visible to the vertex fetch that reads it until
-  // this says so. Without it the only way to wait was to copy the whole mesh
-  // back to the CPU, which is the stall the buffer existed to avoid.
-  glext::Barrier(glext::kShaderStorage | glext::kVertexAttribArray | glext::kBufferUpdate);
-
-  // Only the counts come back -- four bytes each, and only when the value has
-  // moved. A draw call has to be told how many vertices there are, and short of
-  // an indirect draw there is nowhere else for that number to come from.
-  unsigned int counts[2] = {0, 0};
-  rlReadShaderBuffer(vizTriBuffer_, &counts[0], sizeof(unsigned int), 0);
-  rlReadShaderBuffer(vizLineBuffer_, &counts[1], sizeof(unsigned int), 0);
-  const int cap = mathprogram::Program::kVizVertexCap;
-  vizTriCount_ = std::min<int>(static_cast<int>(counts[0]), cap);
-  vizLineCount_ = std::min<int>(static_cast<int>(counts[1]), cap);
 }
 
 const std::vector<float>& CodeBlock::SamplerRun() const {
@@ -2606,45 +2562,26 @@ void CodeBlock::CompileShader() {
 
   std::string log;
 
-  // A viz box's GLSL is the *vertex* shader -- the one that decides where the
-  // mesh ends up. Nothing else about it is different: it is assembled from the
-  // same lines, compiled on the same thread, and its errors come back the same
-  // way.
+  // A viz box is three programs, and running its `mesh` once is part of
+  // building it. Its errors come back the way any box's do.
+  // A viz of a function is compiled into the boxes that define one. Here it is
+  // only checked, standing alone, so its mistakes are reported on its own lines
+  // -- and only one that passes is handed to them.
+  if (!program_.vizType().empty() && program_.viz().function) {
+    Shader test{};
+    functionVizOk_ = CompileShaderHalf(program_.glslVertexSource().c_str(),
+                                       program_.viz().standalone.c_str(), &test, &log);
+    if (functionVizOk_) UnloadShader(test);
+    program_.ShaderCompiled(functionVizOk_, log);
+    return;
+  }
   if (!program_.vizType().empty()) {
-    if (haveVizShader_) {
-      UnloadShader(vizShader_);
-      haveVizShader_ = false;
-    }
-
-    // The half that lays geometry down is a compute program, and it needs
-    // somewhere to lay it: two buffers, one for triangles and one for the
-    // segments of a path, each with its count in front of it.
-    if (!program_.glslMeshSource().empty()) {
-      if (vizMeshProgram_ != 0) { rlUnloadShaderProgram(vizMeshProgram_); vizMeshProgram_ = 0; }
-      const unsigned int compiled =
-          rlCompileShader(program_.glslMeshSource().c_str(), RL_COMPUTE_SHADER);
-      if (compiled != 0) vizMeshProgram_ = rlLoadComputeShaderProgram(compiled);
-      if (vizMeshProgram_ != 0) {
-        vizMeshValueLoc_ = rlGetLocationUniform(vizMeshProgram_, "value");
-        const unsigned int bytes = static_cast<unsigned int>(
-            sizeof(unsigned int) +
-            static_cast<std::size_t>(mathprogram::Program::kVizVertexCap) * 2u * sizeof(float));
-        if (vizTriBuffer_ == 0) vizTriBuffer_ = rlLoadShaderBuffer(bytes, nullptr, RL_DYNAMIC_COPY);
-        if (vizLineBuffer_ == 0) vizLineBuffer_ = rlLoadShaderBuffer(bytes, nullptr, RL_DYNAMIC_COPY);
-        vizMeshRun_ = false;
-      }
-      program_.ShaderCompiled(vizMeshProgram_ != 0,
-                              vizMeshProgram_ != 0 ? std::string() : "compute shader failed");
-      return;
-    }
-
-    haveVizShader_ =
-        CompileShaderHalf(program_.glslSource().c_str(), nullptr, &vizShader_, &log);
-    program_.ShaderCompiled(haveVizShader_, log);
+    const bool ok = viz_.Build(program_.viz(), &log);
+    program_.ShaderCompiled(ok, log);
     return;
   }
 
-  // A sampler box lays a spread of points down, so like a viz's mesh half it is
+  // A sampler box lays a spread of points down, so like a viz's `mesh` it is
   // a compute program writing into a buffer through an atomic counter.
   if (!program_.samplerType().empty()) {
     if (samplerProgram_ != 0) { rlUnloadShaderProgram(samplerProgram_); samplerProgram_ = 0; }
@@ -2673,7 +2610,8 @@ void CodeBlock::CompileShader() {
     // every frame: each one is a round trip to the driver.
     for (const mathprogram::Variable& variable : program_.variables()) {
       if (!variable.free) continue;
-      if (variable.kind != mathprogram::Kind::Real && variable.kind != mathprogram::Kind::Color) {
+      if (variable.kind != mathprogram::Kind::Real && variable.kind != mathprogram::Kind::Color &&
+          variable.kind != mathprogram::Kind::Multivector) {
         continue;
       }
       for (const mathprogram::Literal& literal : variable.literals) {
@@ -2715,6 +2653,8 @@ void CodeBlock::CompileShader() {
     thickLoc_ = GetShaderLocation(shader_, "sbThick");
     orbitLoc_ = GetShaderLocation(shader_, "sbOrbit");
     liftLoc_ = GetShaderLocation(shader_, "sbLift");
+    atLoc_ = GetShaderLocation(shader_, "sbAt");
+    pixelLoc_ = GetShaderLocation(shader_, "sbPixel");
 
     // And the slots for feeding a function, plus the two buffers and the strip
     // of fragments that does it -- one fragment per sample.
@@ -2769,10 +2709,12 @@ bool CodeBlock::BeginField(const std::string& name, int mode, Vector2 range, Vec
                            float halfWidth) const {
   if (!haveShader_) return false;
 
-  const std::vector<std::string>& names = program_.functionNames();
+  // Its place among the box's functions, which is what every drawing of one
+  // is dispatched by.
+  const std::vector<mathprogram::Function>& fns = program_.functions();
   int index = -1;
-  for (std::size_t i = 0; i < names.size(); ++i) {
-    if (names[i] == name) { index = static_cast<int>(i); break; }
+  for (std::size_t i = 0; i < fns.size(); ++i) {
+    if (fns[i].name == name) { index = static_cast<int>(i); break; }
   }
   if (index < 0) return false;
 
@@ -2794,6 +2736,45 @@ bool CodeBlock::BeginField(const std::string& name, int mode, Vector2 range, Vec
 }
 
 void CodeBlock::EndField() const { EndShaderMode(); }
+
+float CodeBlock::GrabAt(const std::string& name, int shape, Vector2 at, float pixel) const {
+  constexpr float kNowhere = 1.0e9f;
+  if (!haveShader_ || !haveFnTarget_ || !havePreviewSurface_ || fnOutBuffer_ == 0) return kNowhere;
+  const std::vector<mathprogram::Function>& fns = program_.functions();
+  int index = -1;
+  for (std::size_t i = 0; i < fns.size(); ++i) {
+    if (fns[i].name == name) { index = static_cast<int>(i); break; }
+  }
+  if (index < 0) return kNowhere;
+
+  // One fragment, in the mode that asks the viz's `grab`, its answer written
+  // where a fed function's first answer would go.
+  SetLiveUniforms();
+  const int   grabMode = 5;
+  const float where[2] = {at.x, at.y};
+  if (modeLoc_ >= 0) SetShaderValue(shader_, modeLoc_, &grabMode, SHADER_UNIFORM_INT);
+  if (shapeLoc_ >= 0) SetShaderValue(shader_, shapeLoc_, &shape, SHADER_UNIFORM_INT);
+  if (indexLoc_ >= 0) SetShaderValue(shader_, indexLoc_, &index, SHADER_UNIFORM_INT);
+  if (atLoc_ >= 0) SetShaderValue(shader_, atLoc_, where, SHADER_UNIFORM_VEC2);
+  if (pixelLoc_ >= 0) SetShaderValue(shader_, pixelLoc_, &pixel, SHADER_UNIFORM_FLOAT);
+  const float nowhere = kNowhere;
+  rlUpdateShaderBuffer(fnOutBuffer_, &nowhere, sizeof(nowhere), 0);
+  rlBindShaderBuffer(fnOutBuffer_, 4);
+
+  BeginTextureMode(fnTarget_);
+  rlDisableColorBlend();
+  BeginShaderMode(shader_);
+  DrawTexturePro(previewSurface_, {0.0f, 0.0f, 1.0f, 1.0f}, {0.0f, 0.0f, 1.0f, 1.0f},
+                 {0.0f, 0.0f}, 0.0f, WHITE);
+  EndShaderMode();
+  rlEnableColorBlend();
+  EndTextureMode();
+
+  glext::Barrier(glext::kShaderStorage | glext::kBufferUpdate);
+  float answer = kNowhere;
+  rlReadShaderBuffer(fnOutBuffer_, &answer, sizeof(answer), 0);
+  return answer;
+}
 
 void CodeBlock::StartPlaying(const std::string& name, float amplitude) {
   const mathprogram::Variable* variable = FindVariable(name);
@@ -2853,7 +2834,8 @@ void CodeBlock::Poll() {
   // A box edited into something that no longer compiles should stop drawing the
   // picture it used to be. While a rebuild is in flight the old one stays up,
   // the way the knobs keep their old values.
-  if ((haveShader_ || haveVizShader_) && state != mathprogram::State::ShaderReady &&
+  if ((haveShader_ || viz_.Ready() || functionVizOk_) &&
+      state != mathprogram::State::ShaderReady &&
       state != mathprogram::State::Shading) {
     ReleaseGpu();
   }
@@ -3083,7 +3065,7 @@ void CodeBlock::DrawChrome(const Viewport& viewport, FontStore& fonts) const {
                            kChromeText);
         }
       }
-    } else if (focused_) {
+    } else if (focused_ && !alwaysCode_) {
       const bool overToggle = CheckCollisionPointRec(pointer, chrome.toggle);
       DrawRectangleRounded(chrome.toggle, 0.35f, 8, overToggle ? kChromeHover : kChromeBg);
       // The label names what you will get, not what you have.

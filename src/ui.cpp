@@ -33,6 +33,7 @@ struct MenuLayout {
   Rectangle load;
   Rectangle insert;
   Rectangle slide;
+  Rectangle alwaysCode;
   Rectangle fullscreen;
 };
 
@@ -90,6 +91,10 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   // Slides come from here, and only from here.
   m.slide = {inset, y, inner, kButtonHeight};
   y += kButtonHeight + 8.0f;
+  // How boxes read. A tickbox rather than a button, since it is a state that
+  // stays put while the menu is up, and the tick is what says which it is in.
+  m.alwaysCode = {inset, y, inner, kRowHeight};
+  y += kRowHeight + 8.0f;
   // The whole screen, title bar and all. It is a thing done to the window
   // rather than to the canvas, so it comes last.
   m.fullscreen = {inset, y, inner, kButtonHeight};
@@ -115,6 +120,7 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   place(&m.load);
   place(&m.insert);
   place(&m.slide);
+  place(&m.alwaysCode);
   place(&m.fullscreen);
   m.recentLabelTop += at.y;
   return m;
@@ -146,6 +152,28 @@ void DrawChevron(Vector2 centre, bool open, Color tint) {
     DrawLineEx({centre.x + kArm * 0.5f, centre.y}, {centre.x - kArm * 0.5f, centre.y + kArm}, 2.4f,
                tint);
   }
+}
+
+// A tickbox, the tick drawn rather than set in a font for the same reason as
+// the chevron.
+void DrawTickbox(FontStore& fonts, Rectangle row, const char* label, bool ticked, bool hovered) {
+  if (hovered) DrawRectangleRounded(row, 0.25f, 8, Fade(kAccent, 0.08f));
+  constexpr float kSide = 20.0f;
+  const Rectangle box = {row.x + 8.0f, row.y + (row.height - kSide) * 0.5f, kSide, kSide};
+  DrawRectangleRounded(box, 0.25f, 6, ticked ? kAccent : kBoxIdle);
+  DrawRectangleRoundedLines(box, 0.25f, 6, ticked ? kAccent : kBoxBorder);
+  if (ticked) {
+    const Vector2 a = {box.x + kSide * 0.24f, box.y + kSide * 0.52f};
+    const Vector2 b = {box.x + kSide * 0.43f, box.y + kSide * 0.72f};
+    const Vector2 c = {box.x + kSide * 0.78f, box.y + kSide * 0.30f};
+    DrawLineEx(a, b, 2.6f, RAYWHITE);
+    DrawLineEx(b, c, 2.6f, RAYWHITE);
+  }
+  const float baseline = row.y + (row.height - text::LineHeight(fonts, Face::MainRegular, kLabelEm)) *
+                                     0.5f +
+                         text::Ascent(fonts, Face::MainRegular, kLabelEm);
+  text::Draw(fonts, Face::MainRegular, label, {box.x + kSide + 12.0f, baseline}, kLabelEm,
+             kPanelText);
 }
 
 const char* AspectName(float aspect) {
@@ -217,6 +245,7 @@ MenuAction OptionsMenu::Update(Options* options) {
   if (CheckCollisionPointRec(mouse, m.load)) return MenuAction::Load;
   if (CheckCollisionPointRec(mouse, m.insert)) return MenuAction::Insert;
   if (CheckCollisionPointRec(mouse, m.slide)) return MenuAction::NewSlide;
+  if (CheckCollisionPointRec(mouse, m.alwaysCode)) return MenuAction::AlwaysCode;
   if (CheckCollisionPointRec(mouse, m.fullscreen)) return MenuAction::Fullscreen;
   return MenuAction::None;
 }
@@ -303,6 +332,8 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
   DrawButton(fonts, m.insert, "Insert picture or video",
              CheckCollisionPointRec(mouse, m.insert));
   DrawButton(fonts, m.slide, "New slide", CheckCollisionPointRec(mouse, m.slide));
+  DrawTickbox(fonts, m.alwaysCode, "Always show code", options.alwaysCode,
+              CheckCollisionPointRec(mouse, m.alwaysCode));
   // Says what pressing it would give you, like every other toggle here.
   DrawButton(fonts, m.fullscreen,
              options.fullscreen ? "Leave fullscreen" : "Fullscreen",

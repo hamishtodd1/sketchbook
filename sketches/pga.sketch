@@ -1,0 +1,11 @@
+sketchbook 3
+view 0 0 1
+grid 1
+aspect 1.5
+block -420 -220 26 0 0 0 0 0 0
+> Cl(3,0,1);
+> Tri P;
+> float k;
+> Tri Q = k * P;
+> float m = Q | Q;
+end

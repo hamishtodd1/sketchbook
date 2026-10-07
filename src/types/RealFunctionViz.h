@@ -48,15 +48,15 @@ struct Plot {
 class PlotPanel {
  public:
   // Which curve is under a screen point. A curve is drawn by the GPU and nothing
-  // on this side knows where one is, so the question is put to the frame:
-  // `AskCurveAt` has the next Draw watch the pixels round the point while each
-  // curve goes down, and the last curve to change them is the one on top.
+  // on this side knows where one is, so each curve's viz is asked, by its
+  // `grab`, how near the point is to it, and the nearest within reach is the
+  // one. A read back from the GPU for each curve, once, when the press lands.
   enum class Pick { Idle, Pending, Found, None };
   // The plot under a point, not its rim. With one curve on it the answer is
   // already known and `curve` is filled; with more it has to be asked.
   bool PlotUnder(Vector2 point, const Viewport& viewport, FontStore& fonts, std::size_t* plot,
                  Rectangle* window, CurveRef* curve) const;
-  void AskCurveAt(std::size_t plot, Vector2 point);
+  void AskCurveAt(std::size_t plot, Vector2 point, const Viewport& viewport, FontStore& fonts);
   Pick CurveAnswer(CurveRef* out) const;
   void ForgetPick() { pick_ = Pick::Idle; }
   // Takes a curve off its plot and starts carrying it as a plot of its own, from
@@ -79,10 +79,7 @@ class PlotPanel {
   void Forget(const CodeBlock* block);
 
   bool HandleInput(const Viewport& viewport, FontStore& fonts);
-  // `vizes` is how the canvas says a function should be drawn, if it says
-  // anything.
-  void Draw(const Viewport& viewport, FontStore& fonts,
-            const VizStore* vizes = nullptr) const;
+  void Draw(const Viewport& viewport, FontStore& fonts) const;
 
   Rectangle DockedBounds(const CodeBlock* block, const Viewport& viewport,
                          FontStore& fonts) const;
@@ -143,14 +140,10 @@ class PlotPanel {
   const mathprogram::Variable* Resolve(const CurveRef& ref) const;
   // One curve of a plot, however the canvas says curves are drawn.
   void DrawCurve(const Plot& plot, std::size_t c, Rectangle rect, float scale, float thickness,
-                 Color tint, const Viz* curveViz) const;
-  // The pixels round the point a pick is asking about.
-  void SamplePick(unsigned char* rgba) const;
+                 Color tint) const;
 
   std::vector<Plot> plots_;
   mutable Pick        pick_ = Pick::Idle;
-  std::size_t         pickPlot_ = 0;
-  Vector2             pickAt_{};
   mutable CurveRef    pickRef_;
   const AxisPanel*  axes_ = nullptr;
 

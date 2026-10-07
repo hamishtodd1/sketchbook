@@ -1,0 +1,36 @@
+sketchbook 3
+view -654.185 -218.617 0.499313
+aspect 1.5
+block -1153.15 -730.33 22 0 0 0 0 0 0
+> \text Anything defined in one box can be used in any other. k and bump live in the box on the left; the other three use them without saying where they come from. Drag k and all four move -- nothing is compiled, because k is a uniform in every one of them. Point at k anywhere and every mention of it lights up.
+end
+block -1153.15 -422.822 26 0 0 0 0 0 0
+> float k;
+> float bump(float x) { return exp(-x * x * k); }
+val k 1.63414
+end
+block 153.754 -422.822 26 0 0 0 0 0 0
+> float wave(float x) { return bump(x) * cos(6.0 * x); }
+end
+block -1153.15 384.384 26 0 0 0 0 0 0
+> vec3 ring(vec2 p) {
+>   float r = bump(length(p) - 1.0);
+>   return vec3(r, r * r, 1.0 - r);
+> }
+end
+block 153.754 384.384 26 0 0 0 0 0 0
+> float width = 1.0 / sqrt(k);
+end
+axis 1 0 0 1.2 4 1
+ref 1 k
+axis 1 0 0 0.912871 4 4
+ref 4 width
+axis 1 0 0 0 4 1
+field 1 bump
+axis 1 0 0 0 4 2
+field 2 wave
+shader 1 0 0 3 0 0 4
+plot 1 0 0 0 0 6 1
+curve 1 bump
+plot 1 0 0 0 0 6 2
+curve 2 wave

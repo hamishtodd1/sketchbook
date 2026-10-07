@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
   const Args args = ParseArgs(argc, argv);
 
   // Nothing graphical either: read a file as a box's lines and print what it
-  // assembles to -- the shader, the sampler, or the viz's two halves.
+  // assembles to -- the shader, the sampler, or a viz's three programs.
   if (!args.assemble.empty()) {
     std::ifstream file(args.assemble, std::ios::binary);
     if (!file) {
@@ -126,8 +126,13 @@ int main(int argc, char** argv) {
     }
     if (!program.glslSampleSource().empty()) {
       std::printf("%s", program.glslSampleSource().c_str());
-    } else if (!program.glslMeshSource().empty()) {
-      std::printf("%s", program.glslMeshSource().c_str());
+    } else if (!program.vizType().empty()) {
+      if (program.error().present) {
+        std::printf("// line %d: %s\n", program.error().line, program.error().message.c_str());
+      }
+      std::printf("// --- compute\n%s// --- vertex\n%s// --- fragment\n%s",
+                  program.viz().compute.c_str(), program.viz().vertex.c_str(),
+                  program.viz().fragment.c_str());
     } else {
       std::printf("%s", program.glslSource().c_str());
     }

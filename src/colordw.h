@@ -21,11 +21,18 @@
 // is, a ring outside a gap. A colour outside 0..1 is drawn where it is, outside
 // the solid.
 //
+// **A colour's marker is a viz**, one per view -- `Viz(Color, "Picker")`,
+// `Viz(Color, "Cube")`, `Viz(Color, "Cylinder")` -- so where one goes, how it looks,
+// how near the pointer is and where a drag takes it are the viz's to say. What
+// stays the window's own is its furniture, and the picker's triangle: the colour
+// the triangle points at is shown in it, and moved in it, by the window.
+//
 // The dropdown is where other choices about this window will go too.
 #pragma once
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -34,6 +41,7 @@
 #include "fontstore.h"
 #include "raylib.h"
 #include "viewport.h"
+#include "viz.h"
 
 namespace sb {
 
@@ -54,6 +62,9 @@ struct ColorView {
   float       focusHue = 0.0f;
   bool        selected = false;
   Vector2     dragFrom{};
+  // Which window this is while the app is open, so what it handed its viz can be
+  // found again. Not saved.
+  mutable int id = 0;
 };
 
 class ColorPanel : public Flanking {
@@ -71,13 +82,20 @@ class ColorPanel : public Flanking {
   // outside its window -- over a neighbouring box, as often as not -- and a
   // control that the thing under it answers instead is not a control.
   bool HandleMenus(const Viewport& viewport, FontStore& fonts);
-  void Draw(const Viewport& viewport, FontStore& fonts) const;
+  void Draw(const Viewport& viewport, FontStore& fonts, VizStore& vizes) const;
+  // What the windows handed their vizes, on the GPU. By hand.
+  void ReleaseGpu();
   // The dropdowns, after every window, since one stands outside its own window
   // and must not be drawn over by a neighbour.
   void DrawChrome(const Viewport& viewport, FontStore& fonts) const;
 
   Rectangle DockedBounds(const CodeBlock* block, const Viewport& viewport,
                          FontStore& fonts) const;
+
+  // Where a named value's marker is, so that pointing at its name in the code
+  // lights it up from the other end, as AxisPanel::MarkerFor does.
+  bool MarkerFor(const CodeBlock* block, const std::string& name, const Viewport& viewport,
+                 FontStore& fonts, Vector2* out) const;
 
   // The marker under the pointer, or the one being held: the same set that
   // lights its name in the code and gets a wire.
@@ -111,22 +129,33 @@ class ColorPanel : public Flanking {
  private:
   enum class Drag { None, Move, Orbit, Value, Hue };
 
+  // The picker's own marker: the colour its triangle points at, in the triangle.
   struct Marker {
     std::string name;
     Vector2     at{};
     float       rgb[3] = {0.0f, 0.0f, 0.0f};
     bool        free = false;
-    bool        onRing = false;   // the picker's hue marker, not its triangle one
   };
 
-  Rectangle           RectFor(std::size_t index, const Viewport& viewport,
-                              FontStore& fonts) const;
-  Rectangle           MenuRect(Rectangle window) const;
-  std::vector<Marker> Markers(std::size_t index, Rectangle rect) const;
-  std::string         Focus(const ColorView& view) const;
-  // The marker a press at `point` would take hold of, or -1.
-  int                 MarkerAt(const std::vector<Marker>& markers, Vector2 point,
-                               float zoom) const;
+  Rectangle   RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
+  Rectangle   MenuRect(Rectangle window) const;
+  std::string Focus(const ColorView& view) const;
+  bool        TriangleMarker(std::size_t index, Rectangle rect, Marker* out) const;
+
+  // --- what each window hands its viz ------------------------------------------
+  mutable std::unordered_map<int, VizPane> panes_;
+  mutable int                              nextId_ = 1;
+  VizPane*    PaneFor(std::size_t index) const;
+  // The view's own space -- the plane of the picker's ring, the RGB cube, the
+  // HSV cylinder -- to the window.
+  VizFrame    FrameFor(std::size_t index, Rectangle rect, Vector2 pointer, float zoom) const;
+  Vector2     ScreenOf(std::size_t index, Rectangle rect, Vector3 at) const;
+  // The colour whose marker the pointer is on, by its viz's `grab`: the item, or
+  // -1. Only values: a sample is pointed at, never taken hold of.
+  int         ValueNear(std::size_t index, float zoom) const;
+  // Whether the drag in flight is the viz's to answer: anything but the picker's
+  // triangle, which is the window's own.
+  bool        VizDrags() const;
   bool                HandleMenu(Rectangle window, std::size_t index);
   void                DrawMenu(Rectangle window, std::size_t index, FontStore& fonts) const;
 
@@ -139,7 +168,6 @@ class ColorPanel : public Flanking {
   Vector2     dragScreenPos_{};
   bool        dragMoved_ = false;
   std::string dragName_;
-  float       dragDepth_ = 0.0f;
   // Which window's dropdown is open, or -1.
   int         menuOpen_ = -1;
 };

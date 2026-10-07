@@ -20,6 +20,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -60,6 +61,9 @@ struct NumberLine {
   CodeBlock*           dock = nullptr;
   bool                 selected = false;
   Vector2              dragFrom{};   // where it was when a selection drag began
+  // Which line this is for as long as the app is open, so what it handed its
+  // viz can be found again after the list is reordered. Not saved.
+  mutable int          id = 0;
 };
 
 class AxisPanel {
@@ -81,10 +85,9 @@ class AxisPanel {
   // Returns true if it took the pointer or the wheel, so the canvas can stay
   // put while an axis is being used.
   bool HandleInput(const Viewport& viewport, FontStore& fonts, const Blocks& blocks);
-  // `vizes` is how the canvas says a real should be drawn, if it says anything.
-  // Null, or silent about `float`, and the marker below is what you get -- the
-  // one the app was born with.
-  void Draw(const Viewport& viewport, FontStore& fonts, const VizStore* vizes = nullptr) const;
+  // A value's marker, and a sample's, is drawn by the viz for a real on a
+  // number line, from `vizes`.
+  void Draw(const Viewport& viewport, FontStore& fonts, VizStore& vizes) const;
 
   // The variables in use: the one whose handle is being dragged, everything on
   // a row being carried, and -- while merely hovering -- the single handle a
@@ -210,6 +213,25 @@ class AxisPanel {
 
   mutable bool    haveField_ = false;
   mutable Texture fieldSamples_{};
+
+  // --- what each line hands its viz ------------------------------------------
+  //
+  // A cache of the drawing, like the field above, so it is mutable: drawing is
+  // const. By the line's id, since lines are merged and reordered.
+  mutable std::unordered_map<int, VizPane> panes_;
+  mutable int                              nextId_ = 1;
+  VizPane*  PaneFor(std::size_t index) const;
+  // What the viz is told about a line: its own space is the value along it, and
+  // the same units upward from it, and it is drawn in the row's rectangle.
+  VizFrame  FrameFor(std::size_t index, const Viewport& viewport, FontStore& fonts,
+                     Vector2 pointer) const;
+  // Where a point of that space lands on screen.
+  Vector2   ScreenOf(std::size_t index, Vector3 at, const Viewport& viewport,
+                     FontStore& fonts) const;
+  // The marker nearest a point, by the viz's own `grab` where the point is the
+  // pointer it was asked about, and by where the viz says each one is otherwise.
+  const AxisRef* NearestAt(std::size_t index, Vector2 point, bool freeOnly,
+                           const Viewport& viewport, FontStore& fonts) const;
   // Whether a value still has anything to say. A box being read a line at a
   // time only talks about the variables written on that line, and the windows
   // for the rest of it stand down -- not drawn, and taking no pointer. Their
@@ -252,8 +274,8 @@ class AxisPanel {
                            FontStore& fonts);
   const mathprogram::Variable* Resolve(const AxisRef& ref) const;
   // Where one sample of a fed function sits on a row, and whether it is there
-  // at all -- the input spread and the answers are drawn on the same axis when
-  // both are reals, one above the line and one below.
+  // at all: where the row's viz says it is, since a sample is drawn exactly as
+  // a value is.
   bool SampleAt(std::size_t index, const CodeBlock* block, int sample, bool output,
                 const Viewport& viewport, FontStore& fonts, Vector2* out) const;
   // Where a variable's marker is drawn on its row: the dot that *is* the

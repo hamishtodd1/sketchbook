@@ -1,0 +1,27 @@
+sketchbook 3
+view 40 230 0.85
+grid 1
+aspect 1.5
+block -620 -420 30 0 1 0 0 1000 0
+> \text A function is drawn by being fed
+end
+block -620 -350 20 0 0 0 0 700 0
+> \text A value has a place to be; a function does not. So a spread of samples of its input is drawn on a row of its own, every one of them is put through the function, and the answers are drawn wherever that type goes -- here, a space window. Point at either end and the pair lights up.
+end
+block -620 -180 24 0 0 0 0 0 0
+> Cl(3,0,1);
+> float k;
+> Tri p(float t) {
+>   float s = t * (1.0 + k);
+>   return Tri(cos(s), sin(s), 0.5 * t, 1.0);
+> }
+val k 0.35
+end
+block -620 280 22 0 0 0 0 0 0
+> Samples(float, 40);
+> for (int i = 0; i < sbCount; ++i)
+>   pick(10.0 * (sbRand(i) - 0.5));
+end
+block -620 420 20 0 0 0 0 700 0
+> \text The spread comes from the box above: Samples(float, 40) says how the reals are laid out and how thickly, and pick() lays one down. Delete that box and the spread the app was born with takes over -- 24 of them, evenly spaced.
+end

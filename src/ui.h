@@ -23,6 +23,10 @@ struct Options {
   // canvas, so it is not saved; it is here so the menu can say which way its
   // button goes.
   bool fullscreen = false;
+  // Whether every code box reads as code and never as mathematics, with only
+  // its author's text and none of the values the app chose. A choice about how
+  // this canvas is read, so it is saved with it.
+  bool alwaysCode = false;
 };
 
 // The shapes the menu offers. A deck is made for one of them, not for an
@@ -33,7 +37,8 @@ inline constexpr float kAspects[kAspectCount] = {kDefaultSlideAspect, 16.0f / 9.
 inline constexpr const char* kAspectNames[kAspectCount] = {"3:2", "16:9", "4:3", "1:1"};
 
 // What the menu is asking the app to do this frame.
-enum class MenuAction { None, NewCanvas, Save, Load, Insert, NewSlide, OpenRecent, Fullscreen };
+enum class MenuAction { None, NewCanvas, Save, Load, Insert, NewSlide, OpenRecent, Fullscreen,
+                        AlwaysCode };
 
 // The Escape menu. Drawn in screen space at a fixed pixel size, so it does not
 // take part in the canvas zoom.

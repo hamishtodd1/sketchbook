@@ -85,7 +85,15 @@ const std::vector<std::string>& DefaultTypes();
 // The GLSL for an algebra: a struct for every type in `wanted`, every type the
 // products between them turn out to need, and every product between all of
 // them. Nothing is written for a type nobody asked for.
-std::string GlslPrologue(const Signature& sig, const std::vector<std::string>& wanted);
+// Only the structs of exactly these types, and their basis: no products, no
+// sums, nothing a type does. A few hundred bytes where the whole algebra is a
+// hundred kilobytes, for code that reads a value's parts and nothing more.
+std::string GlslStructs(const Signature& sig, const std::vector<std::string>& wanted);
+
+// `defaults` adds the types every ordinary box gets whether it names them or
+// not; a viz window, which names what it draws, goes without.
+std::string GlslPrologue(const Signature& sig, const std::vector<std::string>& wanted,
+                         bool defaults = true);
 
 // The names of every type mentioned in a piece of source, so that a box gets
 // the products it uses and no others.
@@ -109,6 +117,9 @@ std::vector<std::string> MemberNames(std::string_view type, const Signature& sig
 // the variable's name, like every other example generator here.
 std::string ExampleValue(std::string_view type, std::string_view name,
                          const Signature& sig);
+// The same example as its numbers, one per member, which is what a knob holds.
+std::vector<float> ExampleComponents(std::string_view type, std::string_view name,
+                                     const Signature& sig);
 
 // --- the algebra itself, exposed because the tests check it -----------------
 

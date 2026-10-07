@@ -261,7 +261,19 @@ class Generator {
     }
   }
 
+  // Adds a type and nothing else: no closure.
+  void Only(Grades grades) {
+    if (grades == 0 || grades == 1u || types_.count(grades) != 0) return;
+    Type type;
+    type.grades = grades;
+    type.name = NameOfGrades(grades, sig_);
+    type.blades = BladesOf(grades, sig_);
+    types_.emplace(grades, std::move(type));
+  }
+
   std::string Emit() const;
+  // The structs and the basis, and none of the operations.
+  std::string EmitStructs() const;
 
  private:
   // The grades a product between two grade-sets can produce, worked out by
@@ -675,6 +687,23 @@ void Generator::EmitScalar(std::ostringstream& out, const Type& type) const {
   }
 }
 
+std::string Generator::EmitStructs() const {
+  std::ostringstream out;
+  for (const auto& [grades, type] : types_) EmitStruct(out, type);
+  for (int blade = 1; blade < sig_.blades(); ++blade) {
+    const Grades grades = 1u << Grade(blade);
+    if (types_.count(grades) == 0) continue;
+    const std::string name = NameOfGrades(grades, sig_);
+    out << "const " << name << " " << BladeName(sig_, blade) << " = " << name << "(";
+    const std::vector<int> blades = BladesOf(grades, sig_);
+    for (std::size_t i = 0; i < blades.size(); ++i) {
+      out << (i == 0 ? "" : ", ") << (blades[i] == blade ? One() : Zero());
+    }
+    out << ");\n";
+  }
+  return out.str();
+}
+
 std::string Generator::Emit() const {
   std::ostringstream out;
   out << "// Cl(" << sig_.p << "," << sig_.q << "," << sig_.r
@@ -815,9 +844,18 @@ std::vector<std::string> TypesMentioned(std::string_view source, const Signature
   return found;
 }
 
-std::string GlslPrologue(const Signature& sig, const std::vector<std::string>& wanted) {
+std::string GlslStructs(const Signature& sig, const std::vector<std::string>& wanted) {
   Generator generator(sig);
-  for (const std::string& name : DefaultTypes()) generator.Want(GradesOfName(name, sig));
+  for (const std::string& name : wanted) generator.Only(GradesOfName(name, sig));
+  return generator.EmitStructs();
+}
+
+std::string GlslPrologue(const Signature& sig, const std::vector<std::string>& wanted,
+                         bool defaults) {
+  Generator generator(sig);
+  if (defaults) {
+    for (const std::string& name : DefaultTypes()) generator.Want(GradesOfName(name, sig));
+  }
   for (const std::string& name : wanted) generator.Want(GradesOfName(name, sig));
   return generator.Emit();
 }
@@ -886,7 +924,8 @@ std::vector<std::string> MemberNames(std::string_view type, const Signature& sig
   return out;
 }
 
-std::string ExampleValue(std::string_view type, std::string_view name, const Signature& sig) {
+std::vector<float> ExampleComponents(std::string_view type, std::string_view name,
+                                     const Signature& sig) {
   // Deterministic in the name, like every other example generator here: the
   // same variable gets the same value every time the box is built.
   std::uint32_t seed = 2166136261u;
@@ -897,18 +936,28 @@ std::string ExampleValue(std::string_view type, std::string_view name, const Sig
 
   const Grades     grades = GradesOfName(type, sig);
   std::vector<int> blades = BladesOf(grades, sig);
-  if (blades.empty()) return "0.0";
+  std::vector<float> out;
+  out.reserve(blades.size());
+  for (std::size_t i = 0; i < blades.size(); ++i) {
+    seed = seed * 1664525u + 1013904223u;
+    out.push_back(
+        std::round((static_cast<float>((seed >> 8) % 2001u) / 1000.0f - 1.0f) * 100.0f) / 100.0f);
+  }
+  return out;
+}
+
+std::string ExampleValue(std::string_view type, std::string_view name, const Signature& sig) {
+  const std::vector<float> parts = ExampleComponents(type, name, sig);
+  if (parts.empty()) return "0.0";
 
   // Written as the constructor that takes every component at once, which GLSL
   // gives a struct for free.
   std::string out(type);
   out += "(";
-  for (std::size_t i = 0; i < blades.size(); ++i) {
-    seed = seed * 1664525u + 1013904223u;
-    const float value =
-        std::round((static_cast<float>((seed >> 8) % 2001u) / 1000.0f - 1.0f) * 100.0f) / 100.0f;
+  for (std::size_t i = 0; i < parts.size(); ++i) {
     char term[32];
-    std::snprintf(term, sizeof(term), "%s%.2f", i == 0 ? "" : ", ", static_cast<double>(value));
+    std::snprintf(term, sizeof(term), "%s%.2f", i == 0 ? "" : ", ",
+                  static_cast<double>(parts[i]));
     out += term;
   }
   out += ")";

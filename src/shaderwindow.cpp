@@ -9,6 +9,7 @@
 #include "selection.h"
 #include "hover.h"
 #include "theme.h"
+#include "windowname.h"
 
 namespace sb {
 namespace {
@@ -228,6 +229,9 @@ void ShaderPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     view.block->DrawPictureInto(rect, view.centre, view.span);
     DrawRectangleLinesEx(rect, std::max(1.0f, 1.0f * zoom), Fade(kCodeFg, 0.25f));
     if (carried || PointOnRim(rect, hover::Pointer())) DrawRim(rect, zoom, carried);
+    if (carried || CheckCollisionPointRec(hover::Pointer(), rect) || PointOnRim(rect, hover::Pointer())) {
+      windowname::Offer(rect, "Picture");
+    }
   }
 }
 
