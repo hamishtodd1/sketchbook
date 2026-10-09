@@ -56,6 +56,8 @@ struct Args {
   // `menu`, `rewind:N`, `rewind-canvas:N`, `say:words` -- and, at the end of a
   // capture, write the canvas out, which a capture otherwise never does.
   std::string devChat;
+  std::string devBox;
+  std::string devKeys;
   std::string saveTo;
   // Dev only: at the end of a capture, print the canvas as Claude is shown it --
   // which is also the quickest way to see what the compiler made of a box.
@@ -83,6 +85,8 @@ Args ParseArgs(int argc, char** argv) {
     else if (flag == "--effort" && hasValue) args.effort = argv[++i];
     else if (flag == "--converse" && hasValue) args.converse = argv[++i];
     else if (flag == "--dev-chat" && hasValue) args.devChat = argv[++i];
+    else if (flag == "--dev-box" && hasValue) args.devBox = argv[++i];
+    else if (flag == "--dev-keys" && hasValue) args.devKeys = argv[++i];
     else if (flag == "--save-to" && hasValue) args.saveTo = argv[++i];
     else if (flag == "--describe") args.describe = true;
     else if (flag[0] != '-') args.open = flag;   // a file dropped on the exe
@@ -326,6 +330,7 @@ int main(int argc, char** argv) {
     if (frame == 60) {
       if (!args.converse.empty()) app.Converse(args.converse, args.effort);
       if (!args.devChat.empty()) app.DevChat(args.devChat);
+      if (!args.devBox.empty()) app.DevKeys(args.devBox, args.devKeys);
     }
     app.Update();
 

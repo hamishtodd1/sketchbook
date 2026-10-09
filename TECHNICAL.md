@@ -720,6 +720,21 @@ shown. The canvas file records each window's points.
   so text goes in as bytes and a newline splits the line. Windows stay on our own.
 - **Pasted text** is inserted without the carried indentation (`InsertCodepoint`
   carries it for typed Enter only).
+- **Several carets** (`others_` in `CodeBlock`): the box's own caret is always
+  the newest, so everything that knows one caret still works, and the others are
+  a list beside it. `ForEachCaret(op)` runs an edit at each in turn, top to
+  bottom, by putting it in the box's own caret: the ones not yet done are held as
+  distances from the *end* of the text, which no edit above them changes, and
+  the ones done as distances from the start, which no edit below changes -- so
+  no edit has to know how to move the others. Carets that meet become one. Undo
+  snapshots past the first of a keystroke are dropped, so it is one step, and
+  undo restores one caret. Anything that sets the lines from outside (a knob
+  writing its number, Claude) leaves the others where they were, clamped.
+- **Dev**: `--dev-box "line|line" --dev-keys "caret:0,7 ctrl+d type:xy"` makes a
+  box, puts the caret in it and plays named keys through the calls `HandleInput`
+  makes (`CodeBlock::DevKeys`), then logs its lines as `DEVKEYS:` -- the way to
+  test editing without sending keystrokes to the desktop. `paste:a|b` pastes
+  without touching the clipboard.
 
 ---
 

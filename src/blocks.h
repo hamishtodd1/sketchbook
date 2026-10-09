@@ -7,6 +7,7 @@
 #pragma once
 
 #include <future>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -256,6 +257,22 @@ class CodeBlock {
   std::string Text() const;
   // What the highlight covers, as it is written -- newlines and all.
   std::string SelectedText() const;
+
+  // --- several carets ------------------------------------------------------
+  //
+  // Ctrl+D highlights the name the caret is on, and after that each next place
+  // the highlighted text is written, with a caret of its own; Ctrl+Shift+D
+  // skips the newest for the one after it. Every edit then happens at every
+  // caret. Escape goes back to one (DropOtherCarets, true if there were others).
+  void AddNextOccurrence(bool skip);
+  bool DropOtherCarets();
+  // Alt+D over several carets: the first highlight's number or letter, counted
+  // on at each caret after it -- 4 4 4 into 4 5 6, a a a into a b c.
+  void IncrementSelections();
+  // Dev: named keys, space-separated, done as HandleInput does them --
+  // `caret:L,C` `anchor:L,C` `ctrl+d` `ctrl+shift+d` `alt+d` `type:abc` `backspace` `left`
+  // `end` `esc` `paste:a|b` (`|` a newline; the clipboard is not touched).
+  void DevKeys(const std::string& keys);
 
   // --- cut, copy and paste, in the text ------------------------------------
   //
@@ -757,6 +774,25 @@ class CodeBlock {
   // "is anything selected" is one comparison and needs no extra flag.
   int    anchorLine_ = 0;
   int    anchorCol_ = 0;
+  // The carets besides the box's own, which Ctrl+D makes. The box's own caret is
+  // always the newest one, so everything that knows only one caret still works.
+  struct OtherCaret {
+    int line, col, anchorLine, anchorCol;
+  };
+  std::vector<OtherCaret> others_;
+  // Whether Ctrl+D is matching whole names, decided by the first highlight: a
+  // whole name finds only that name, part of one finds it inside others too.
+  bool wholeWord_ = false;
+  // Does `op` at every caret, top to bottom, with each one in turn put in the
+  // box's own caret; `op` is told which, counting from the top. One undo step.
+  void ForEachCaret(const std::function<void(int)>& op);
+  int  OffsetOf(int line, int col) const;
+  void PositionOf(int offset, int* line, int* col) const;
+  bool CaretRangeInRow(const OtherCaret& caret, const Row& row, std::size_t* from,
+                       std::size_t* to) const;
+  bool SelectWordAtCaret();
+  void PasteString(const std::string& text);
+  void PasteAll(const std::string& text);
   // Whether the caret has ever been put somewhere on purpose. Until it has,
   // "where the caret was left" means the end of the box.
   bool   caretUsed_ = false;

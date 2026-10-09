@@ -63,6 +63,10 @@ it, then use the arrow keys.
 | `Ctrl`+`Y` or `Ctrl`+`Shift`+`Z` | Redo -- the box's own with a caret, the canvas's without |
 | `Ctrl`+`A` | Select all of the box |
 | `Tab` / `Shift`+`Tab`, `Ctrl`+`/` | Indent, outdent, comment the highlighted lines |
+| `Ctrl`+`D` | Highlight the name at the caret; again, add the next place it is written, with a caret of its own |
+| `Ctrl`+`Shift`+`D` | Skip: let go of the newest highlight and take the next one instead |
+| `Alt`+`D` | With several carets: count on from the first highlight (4 4 4 to 4 5 6, a a a to a b c) |
+| `Escape` | With several carets, back to the first one |
 | `Home` with no caret | Frame everything on screen |
 | Click a slide's rim | Go to that slide |
 | `left` / `right`, or a two-finger swipe, on a slide | Previous / next slide |

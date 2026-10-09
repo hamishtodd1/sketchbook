@@ -52,6 +52,9 @@ class App {
   // those ChatPanel::Dev knows, `discard` (thrown away, as an undo step) and
   // `undo`.
   void DevChat(const std::string& actions);
+  // Dev: a box of these lines (`|` between them) with the caret in it, and the
+  // keys (CodeBlock::DevKeys) done in it; its lines are logged afterwards.
+  void DevKeys(const std::string& box, const std::string& keys);
   // Dev: the canvas as Claude is shown it.
   std::string Describe() { return DescribeCanvas(); }
   // Dev: writes the canvas to a file, as Ctrl+S to a new name would.

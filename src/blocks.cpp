@@ -1382,6 +1382,7 @@ std::size_t CodeBlock::RowColAt(const Row& row, float x) const {
 }
 
 void CodeBlock::PlaceCaret(Vector2 point, const Viewport& viewport, FontStore& fonts) {
+  others_.clear();
   const Geometry& g = Measure(viewport, fonts);
   if (g.rows.empty()) return;
   const int found = RowAt(point, viewport, fonts);
@@ -1430,9 +1431,18 @@ void CodeBlock::SelectionRange(int* fromLine, int* fromCol, int* toLine, int* to
 }
 
 bool CodeBlock::SelectionInRow(const Row& row, std::size_t* from, std::size_t* to) const {
-  if (!HasSelection()) return false;
-  int fromLine = 0, fromCol = 0, toLine = 0, toCol = 0;
-  SelectionRange(&fromLine, &fromCol, &toLine, &toCol);
+  return CaretRangeInRow({caretLine_, caretCol_, anchorLine_, anchorCol_}, row, from, to);
+}
+
+bool CodeBlock::CaretRangeInRow(const OtherCaret& caret, const Row& row, std::size_t* from,
+                                std::size_t* to) const {
+  if (caret.line == caret.anchorLine && caret.col == caret.anchorCol) return false;
+  const bool forwards = (caret.anchorLine < caret.line) ||
+                        (caret.anchorLine == caret.line && caret.anchorCol <= caret.col);
+  const int fromLine = forwards ? caret.anchorLine : caret.line;
+  const int fromCol = forwards ? caret.anchorCol : caret.col;
+  const int toLine = forwards ? caret.line : caret.anchorLine;
+  const int toCol = forwards ? caret.col : caret.anchorCol;
   if (row.line < fromLine || row.line > toLine) return false;
 
   const std::size_t begin =
@@ -1548,6 +1558,7 @@ bool CodeBlock::EraseSelection() {
 
 void CodeBlock::SetFocused(bool focused) {
   focused_ = focused;
+  others_.clear();
   blinkAnchor_ = GetTime();
   lastEdit_ = EditKind::None;   // a fresh visit starts a fresh undo step
   if (focused) ClampCaret();
@@ -1583,18 +1594,43 @@ std::string CodeBlock::SelectedText() const {
 }
 
 void CodeBlock::CopyText(bool cut) {
-  const std::string taken = SelectedText();
-  if (taken.empty()) return;   // nothing highlighted is nothing to take
+  // With several carets, each one's highlight is a line, top to bottom -- which
+  // is what a paste at as many carets hands back out, one each.
+  std::string taken;
+  bool        any = false;
+  ForEachCaret([&](int k) {
+    if (k > 0) taken += '\n';
+    taken += SelectedText();
+    any = any || HasSelection();
+  });
+  if (!any) return;   // nothing highlighted is nothing to take
   SetClipboardText(taken.c_str());
   if (!cut) return;
-  PushUndo(EditKind::Structural);
-  EraseSelection();
+  ForEachCaret([&](int) { EraseSelection(); });
 }
 
 void CodeBlock::PasteText() {
   const char* text = GetClipboardText();
   if (text == nullptr || *text == '\0') return;
+  std::string all;
+  for (const char* c = text; *c != '\0'; ++c) {
+    if (*c != '\r') all += *c;
+  }
+  PasteAll(all);
+}
 
+void CodeBlock::PasteAll(const std::string& all) {
+  // As many lines as carets: one line each. Otherwise all of it at each.
+  std::vector<std::string> parts(1);
+  for (char c : all) {
+    if (c == '\n') parts.emplace_back();
+    else parts.back() += c;
+  }
+  const bool spread = !others_.empty() && parts.size() == others_.size() + 1;
+  ForEachCaret([&](int k) { PasteString(spread ? parts[static_cast<std::size_t>(k)] : all); });
+}
+
+void CodeBlock::PasteString(const std::string& text) {
   PushUndo(EditKind::Structural);
   // Pasting over a highlight replaces it, which is what a highlight is for.
   EraseSelection();
@@ -1602,7 +1638,7 @@ void CodeBlock::PasteText() {
   // Inserted as bytes rather than codepoint by codepoint: the caret is a byte
   // offset and what arrives is UTF-8, so whole sequences go in as they are.
   std::string chunk;
-  for (const char* c = text;; ++c) {
+  for (const char* c = text.c_str();; ++c) {
     if (*c != '\0' && *c != '\n') {
       if (*c != '\r') chunk += *c;
       continue;
@@ -1623,6 +1659,253 @@ void CodeBlock::PasteText() {
   }
   ClampCaret();
   TouchEdit();
+}
+
+// ------------------------------------------------------------ several carets
+
+int CodeBlock::OffsetOf(int line, int col) const {
+  line = std::clamp(line, 0, static_cast<int>(lines_.size()) - 1);
+  int offset = 0;
+  for (int i = 0; i < line; ++i) offset += static_cast<int>(lines_[static_cast<std::size_t>(i)].size()) + 1;
+  return offset + std::clamp(col, 0, static_cast<int>(lines_[static_cast<std::size_t>(line)].size()));
+}
+
+void CodeBlock::PositionOf(int offset, int* line, int* col) const {
+  offset = std::max(offset, 0);
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    const int size = static_cast<int>(lines_[i].size());
+    if (offset <= size || i + 1 == lines_.size()) {
+      *line = static_cast<int>(i);
+      *col = std::min(offset, size);
+      return;
+    }
+    offset -= size + 1;
+  }
+}
+
+void CodeBlock::ForEachCaret(const std::function<void(int)>& op) {
+  if (others_.empty()) {
+    op(0);
+    return;
+  }
+  // Each caret as offsets into the text. One not yet edited is kept as its
+  // distance from the *end*, which no edit above it changes; one already
+  // edited as its distance from the start, which no edit below it changes. So
+  // going top to bottom, every caret is always where its text is.
+  struct Mark {
+    int  caret, anchor;
+    bool own;
+  };
+  std::vector<Mark> marks;
+  for (const OtherCaret& other : others_) {
+    marks.push_back({OffsetOf(other.line, other.col), OffsetOf(other.anchorLine, other.anchorCol), false});
+  }
+  marks.push_back({OffsetOf(caretLine_, caretCol_), OffsetOf(anchorLine_, anchorCol_), true});
+  std::sort(marks.begin(), marks.end(), [](const Mark& a, const Mark& b) {
+    return std::min(a.caret, a.anchor) < std::min(b.caret, b.anchor);
+  });
+  const int length = OffsetOf(static_cast<int>(lines_.size()) - 1, 1 << 30);
+  for (Mark& mark : marks) {
+    mark.caret = length - mark.caret;
+    mark.anchor = length - mark.anchor;
+  }
+
+  // However many carets, one keystroke is one undo step: the first snapshot is
+  // the text before any of them.
+  const std::size_t undoMark = undo_.size();
+  for (std::size_t k = 0; k < marks.size(); ++k) {
+    const int now = OffsetOf(static_cast<int>(lines_.size()) - 1, 1 << 30);
+    PositionOf(now - marks[k].caret, &caretLine_, &caretCol_);
+    PositionOf(now - marks[k].anchor, &anchorLine_, &anchorCol_);
+    ClampCaret();
+    op(static_cast<int>(k));
+    marks[k].caret = OffsetOf(caretLine_, caretCol_);
+    marks[k].anchor = OffsetOf(anchorLine_, anchorCol_);
+  }
+  if (undo_.size() > undoMark + 1) undo_.resize(undoMark + 1);
+
+  // Back to lines and columns. Carets that have run into each other are one.
+  others_.clear();
+  std::vector<int> kept;
+  const auto at = [&](const Mark& mark, OtherCaret* out) {
+    PositionOf(mark.caret, &out->line, &out->col);
+    PositionOf(mark.anchor, &out->anchorLine, &out->anchorCol);
+  };
+  for (const Mark& mark : marks) {
+    if (!mark.own) continue;
+    OtherCaret own{};
+    at(mark, &own);
+    caretLine_ = own.line;
+    caretCol_ = own.col;
+    anchorLine_ = own.anchorLine;
+    anchorCol_ = own.anchorCol;
+    kept.push_back(mark.caret);
+  }
+  for (const Mark& mark : marks) {
+    if (mark.own || std::find(kept.begin(), kept.end(), mark.caret) != kept.end()) continue;
+    OtherCaret other{};
+    at(mark, &other);
+    others_.push_back(other);
+    kept.push_back(mark.caret);
+  }
+}
+
+bool CodeBlock::DropOtherCarets() {
+  if (others_.empty()) return false;
+  // Back to the one it started from, as VS Code does, highlight and all.
+  const OtherCaret first = others_.front();
+  others_.clear();
+  caretLine_ = first.line;
+  caretCol_ = first.col;
+  anchorLine_ = first.anchorLine;
+  anchorCol_ = first.anchorCol;
+  ClampCaret();
+  blinkAnchor_ = GetTime();
+  return true;
+}
+
+bool CodeBlock::SelectWordAtCaret() {
+  const std::string& line = lines_[static_cast<std::size_t>(caretLine_)];
+  int begin = caretCol_;
+  int end = caretCol_;
+  while (begin > FloorCol(caretLine_) && IsWordChar(line[static_cast<std::size_t>(begin - 1)])) --begin;
+  while (end < static_cast<int>(line.size()) && IsWordChar(line[static_cast<std::size_t>(end)])) ++end;
+  if (begin == end) return false;
+  anchorLine_ = caretLine_;
+  anchorCol_ = begin;
+  caretCol_ = end;
+  return true;
+}
+
+void CodeBlock::AddNextOccurrence(bool skip) {
+  caretUsed_ = true;
+  blinkAnchor_ = GetTime();
+  // Nothing highlighted: the name the caret is on, or next to, at every caret.
+  if (!HasSelection()) {
+    if (skip) return;
+    ForEachCaret([&](int) { SelectWordAtCaret(); });
+    wholeWord_ = true;
+    return;
+  }
+
+  const std::string text = Text();
+  const std::string needle = SelectedText();
+  int fromLine = 0, fromCol = 0, toLine = 0, toCol = 0;
+  SelectionRange(&fromLine, &fromCol, &toLine, &toCol);
+  const int         start = OffsetOf(fromLine, fromCol);
+  const int         n = static_cast<int>(needle.size());
+  // Whole names only, or anywhere: settled by the first highlight. A highlight
+  // that is all of a name -- nothing name-like either side of it -- means that
+  // name, and not the same letters inside another one.
+  const auto whole = [&](int at) {
+    const bool before = at > 0 && IsWordChar(text[static_cast<std::size_t>(at - 1)]);
+    const bool after = at + n < static_cast<int>(text.size()) &&
+                       IsWordChar(text[static_cast<std::size_t>(at + n)]);
+    return !before && !after;
+  };
+  if (others_.empty()) wholeWord_ = whole(start);
+
+  std::vector<int> taken = {start};
+  for (const OtherCaret& other : others_) {
+    taken.push_back(std::min(OffsetOf(other.line, other.col), OffsetOf(other.anchorLine, other.anchorCol)));
+  }
+  // The next one after the newest, round to the top again if need be.
+  int  found = -1;
+  bool wrapped = false;
+  for (std::size_t at = text.find(needle, static_cast<std::size_t>(start + n));;
+       at = text.find(needle, at + 1)) {
+    if (at == std::string::npos) {
+      if (wrapped) break;
+      wrapped = true;
+      at = text.find(needle);
+      if (at == std::string::npos) break;
+    }
+    if (wrapped && static_cast<int>(at) >= start) break;
+    if (wholeWord_ && !whole(static_cast<int>(at))) continue;
+    if (std::find(taken.begin(), taken.end(), static_cast<int>(at)) != taken.end()) continue;
+    found = static_cast<int>(at);
+    break;
+  }
+  if (found < 0) return;
+  // Skipping lets go of the newest; adding keeps it.
+  if (!skip) others_.push_back({caretLine_, caretCol_, anchorLine_, anchorCol_});
+  PositionOf(found, &anchorLine_, &anchorCol_);
+  PositionOf(found + n, &caretLine_, &caretCol_);
+}
+
+void CodeBlock::IncrementSelections() {
+  if (others_.empty()) return;
+  std::string first;
+  ForEachCaret([&](int k) {
+    if (k == 0) first = SelectedText();
+  });
+  // A whole number counts on; so does a single letter, round from z to a.
+  // Carets with nothing highlighted get 0, 1, 2 put in.
+  bool      number = first.empty();
+  long long start = 0;
+  if (!first.empty()) {
+    const std::size_t digits = first[0] == '-' ? 1 : 0;
+    number = first.size() > digits &&
+             first.find_first_not_of("0123456789", digits) == std::string::npos;
+    if (number) start = std::stoll(first);
+  }
+  const bool letter = !number && first.size() == 1 &&
+                      std::isalpha(static_cast<unsigned char>(first[0])) != 0;
+  if (!number && !letter) return;
+  ForEachCaret([&](int k) {
+    std::string next;
+    if (number) {
+      next = std::to_string(start + k);
+    } else {
+      const char base = std::isupper(static_cast<unsigned char>(first[0])) != 0 ? 'A' : 'a';
+      next = std::string(1, static_cast<char>(base + (first[0] - base + k) % 26));
+    }
+    PasteString(next);
+    // Left highlighted, so it can be counted again or typed over.
+    anchorLine_ = caretLine_;
+    anchorCol_ = caretCol_ - static_cast<int>(next.size());
+  });
+}
+
+void CodeBlock::DevKeys(const std::string& keys) {
+  std::size_t from = 0;
+  while (from < keys.size()) {
+    std::size_t space = keys.find(' ', from);
+    if (space == std::string::npos) space = keys.size();
+    const std::string key = keys.substr(from, space - from);
+    from = space + 1;
+    if (key.rfind("caret:", 0) == 0) {
+      others_.clear();
+      std::sscanf(key.c_str() + 6, "%d,%d", &caretLine_, &caretCol_);
+      ClampCaret();
+      SelectNone();
+    } else if (key.rfind("anchor:", 0) == 0) {
+      std::sscanf(key.c_str() + 7, "%d,%d", &anchorLine_, &anchorCol_);
+    } else if (key == "ctrl+d") {
+      AddNextOccurrence(false);
+    } else if (key == "ctrl+shift+d") {
+      AddNextOccurrence(true);
+    } else if (key == "alt+d") {
+      IncrementSelections();
+    } else if (key.rfind("type:", 0) == 0) {
+      for (char c : key.substr(5)) ForEachCaret([&](int) { InsertCodepoint(c); });
+    } else if (key == "backspace") {
+      ForEachCaret([&](int) { DeleteBefore(); });
+    } else if (key == "left") {
+      ForEachCaret([&](int) { MoveCaret(0, -1); });
+    } else if (key == "end") {
+      ForEachCaret([&](int) {
+        caretCol_ = static_cast<int>(lines_[static_cast<std::size_t>(caretLine_)].size());
+        SelectNone();
+      });
+    } else if (key == "esc") {
+      DropOtherCarets();
+    } else if (key.rfind("paste:", 0) == 0) {
+      std::string text = key.substr(6);
+      std::replace(text.begin(), text.end(), '|', '\n');
+      PasteAll(text);
+    }
+  }
 }
 
 std::string CodeBlock::Text() const {
@@ -1770,6 +2053,7 @@ void CodeBlock::Redo() {
 }
 
 void CodeBlock::Restore(const Snapshot& snapshot) {
+  others_.clear();
   lines_ = snapshot.lines;
   caretLine_ = snapshot.caretLine;
   caretCol_ = snapshot.caretCol;
@@ -1858,6 +2142,7 @@ int LeadingSpaces(const std::string& line, int from) {
 }
 
 void CodeBlock::SelectAll() {
+  others_.clear();
   if (lines_.empty()) return;
   anchorLine_ = 0;
   anchorCol_ = FloorCol(0);
@@ -1907,6 +2192,7 @@ void CodeBlock::EditKeepingSelection(int anchorLine, int anchorCol) {
 }
 
 void CodeBlock::ShiftIndent(bool out) {
+  others_.clear();
   const int keptLine = anchorLine_;
   const int keptCol = anchorCol_;
   int first = 0;
@@ -1935,6 +2221,7 @@ void CodeBlock::ShiftIndent(bool out) {
 }
 
 void CodeBlock::DeleteLines() {
+  others_.clear();
   int first = 0;
   int last = 0;
   LineRange(&first, &last);
@@ -1993,6 +2280,7 @@ void CodeBlock::WriteColorLiteral(int line, const float rgb[3]) {
 }
 
 void CodeBlock::ToggleComment() {
+  others_.clear();
   const int keptLine = anchorLine_;
   const int keptCol = anchorCol_;
   int first = 0;
@@ -2232,28 +2520,44 @@ void CodeBlock::HandleInput() {
     ToggleComment();
     return;
   }
-
-  for (int codepoint = GetCharPressed(); codepoint > 0; codepoint = GetCharPressed()) {
-    if (codepoint >= 32 && !ctrl) InsertCodepoint(codepoint);
+  // Ctrl+D, as in VS Code: the name at the caret, then the next place it is
+  // written with a caret of its own; with Shift, skip the newest for the next.
+  if (ctrl && Triggered(KEY_D)) {
+    AddNextOccurrence(/*skip=*/ShiftDown());
+    return;
+  }
+  if (AltDown() && Triggered(KEY_D)) {
+    IncrementSelections();
+    return;
   }
 
-  if (ctrl && Triggered(KEY_LEFT)) { MoveCaretByWord(-1); return; }
-  if (ctrl && Triggered(KEY_RIGHT)) { MoveCaretByWord(+1); return; }
+  // Everything from here is done at every caret.
+  for (int codepoint = GetCharPressed(); codepoint > 0; codepoint = GetCharPressed()) {
+    if (codepoint >= 32 && !ctrl && !AltDown()) {
+      ForEachCaret([&](int) { InsertCodepoint(codepoint); });
+    }
+  }
+
+  if (ctrl && Triggered(KEY_LEFT)) { ForEachCaret([&](int) { MoveCaretByWord(-1); }); return; }
+  if (ctrl && Triggered(KEY_RIGHT)) { ForEachCaret([&](int) { MoveCaretByWord(+1); }); return; }
 
   // Ctrl+Enter is the compile shortcut, so it must not also insert a newline.
-  if (Triggered(KEY_ENTER) && !ctrl) InsertNewline();
-  if (Triggered(KEY_KP_ENTER) && !ctrl) InsertNewline();
-  if (Triggered(KEY_BACKSPACE)) ctrl ? DeleteWordBefore() : DeleteBefore();
+  if ((Triggered(KEY_ENTER) || Triggered(KEY_KP_ENTER)) && !ctrl) {
+    ForEachCaret([&](int) { InsertNewline(); });
+  }
+  if (Triggered(KEY_BACKSPACE)) {
+    ForEachCaret([&](int) { ctrl ? DeleteWordBefore() : DeleteBefore(); });
+  }
   // Alt+Delete is the whole line, the way Ctrl+Delete is the whole word.
   if (AltDown() && Triggered(KEY_DELETE)) {
     DeleteLines();
   } else if (Triggered(KEY_DELETE)) {
-    ctrl ? DeleteWordAfter() : DeleteAt();
+    ForEachCaret([&](int) { ctrl ? DeleteWordAfter() : DeleteAt(); });
   }
-  if (Triggered(KEY_LEFT)) MoveCaret(0, -1);
-  if (Triggered(KEY_RIGHT)) MoveCaret(0, +1);
-  if (Triggered(KEY_UP)) MoveCaret(-1, 0);
-  if (Triggered(KEY_DOWN)) MoveCaret(+1, 0);
+  if (Triggered(KEY_LEFT)) ForEachCaret([&](int) { MoveCaret(0, -1); });
+  if (Triggered(KEY_RIGHT)) ForEachCaret([&](int) { MoveCaret(0, +1); });
+  if (Triggered(KEY_UP)) ForEachCaret([&](int) { MoveCaret(-1, 0); });
+  if (Triggered(KEY_DOWN)) ForEachCaret([&](int) { MoveCaret(+1, 0); });
   // Tab over a highlight is about *lines*: it moves every line the highlight
   // touches, in or out, and Shift is which. With nothing highlighted there is
   // no block to move, so it is the ordinary step of indentation at the caret.
@@ -2261,10 +2565,12 @@ void CodeBlock::HandleInput() {
     if (HasSelection() || ShiftDown()) {
       ShiftIndent(/*out=*/ShiftDown());
     } else {
-      for (int i = 0; i < kIndentWidth; ++i) InsertCodepoint(' ');
+      ForEachCaret([&](int) {
+        for (int i = 0; i < kIndentWidth; ++i) InsertCodepoint(' ');
+      });
     }
   }
-  if (IsKeyPressed(KEY_HOME)) {
+  const auto home = [&](int) {
     caretCol_ = 0;
     // The start of the line is the start of what you are *writing*, which in a
     // text box is past the sigil. Every other way of moving the caret went
@@ -2275,14 +2581,16 @@ void CodeBlock::HandleInput() {
     if (!ShiftDown()) SelectNone();
     caretUsed_ = true;
     blinkAnchor_ = GetTime();
-  }
-  if (IsKeyPressed(KEY_END)) {
+  };
+  const auto end = [&](int) {
     caretCol_ = static_cast<int>(lines_[static_cast<std::size_t>(caretLine_)].size());
     ClampCaret();
     if (!ShiftDown()) SelectNone();
     caretUsed_ = true;
     blinkAnchor_ = GetTime();
-  }
+  };
+  if (IsKeyPressed(KEY_HOME)) ForEachCaret(home);
+  if (IsKeyPressed(KEY_END)) ForEachCaret(end);
 }
 
 bool CodeBlock::HandleChrome(const Viewport& viewport, FontStore& fonts) {
@@ -2930,10 +3238,10 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
     }
 
     // What is selected, behind the letters.
-    if (focused_) {
+    const auto shade = [&](const OtherCaret& caret) {
       std::size_t from = 0;
       std::size_t to = 0;
-      if (SelectionInRow(row, &from, &to)) {
+      if (CaretRangeInRow(caret, row, &from, &to)) {
         const std::string& source = lines_[i];
         const Face  face = row.asLatex ? ProseFace() : Face::Mono;
         const float left =
@@ -2945,6 +3253,10 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
         DrawRectangleRec({left, row.y + row.height * 0.06f, width, row.height * 0.88f},
                          Fade(kAccent, asWords ? 0.22f : 0.34f));
       }
+    };
+    if (focused_) {
+      shade({caretLine_, caretCol_, anchorLine_, anchorCol_});
+      for (const OtherCaret& other : others_) shade(other);
     }
 
     if (row.asLatex) {
@@ -2984,21 +3296,11 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
   // Caret. While this box is being edited, and solid while typing so it never
   // distracts mid-edit -- and also while a number line is offering to put a
   // value in, since then the caret is what says where that value would land.
-  int markLine = -1;
-  int markCol = 0;
-  if (focused_) {
-    markLine = caretLine_;
-    markCol = caretCol_;
-  } else if (insertCaret_) {
-    markLine = InsertLine();
-    markCol = caretUsed_
-                  ? caretCol_
-                  : static_cast<int>(lines_[static_cast<std::size_t>(markLine)].size());
-  }
-  const int caretRow = markLine < 0 ? -1 : RowOf(g, markLine, markCol);
-  if (caretRow >= 0) {
-    const double phase = std::fmod(GetTime() - blinkAnchor_, 1.06);
-    if (phase < 0.62) {
+  const auto mark = [&](int markLine, int markCol) {
+    if (markLine < 0 || markLine >= static_cast<int>(lines_.size())) return;
+    const int caretRow = RowOf(g, markLine, markCol);
+    if (caretRow < 0) return;
+    {
       const Row& row = g.rows[static_cast<std::size_t>(caretRow)];
       // A row reading as mathematics has no columns to sit between: the caret
       // goes after the whole statement, which is where a new line would go.
@@ -3014,6 +3316,16 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
       DrawRectangleRec({x, row.y + row.height * 0.08f, std::max(1.0f, g.emPx * 0.07f),
                         row.height * 0.86f},
                        asWords ? kSlideInk : kCaret);
+    }
+  };
+  if (std::fmod(GetTime() - blinkAnchor_, 1.06) < 0.62) {
+    if (focused_) {
+      mark(caretLine_, caretCol_);
+      for (const OtherCaret& other : others_) mark(other.line, other.col);
+    } else if (insertCaret_) {
+      const int line = InsertLine();
+      mark(line, caretUsed_ ? caretCol_
+                            : static_cast<int>(lines_[static_cast<std::size_t>(line)].size()));
     }
   }
 

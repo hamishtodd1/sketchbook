@@ -258,6 +258,20 @@ The readings themselves:
   highlight touches) -- and taking the first line of a text box keeps its sigil.
 - **Ctrl+Backspace and Ctrl+Delete take a word**, by the same reckoning of words as
   Ctrl+left/right.
+- **Ctrl+D is VS Code's.** With nothing highlighted it highlights the name the
+  caret is on or beside; with a highlight, it adds the next place that text is
+  written, after the newest and round to the top, with a caret of its own, and
+  then typing, deleting, moving, cutting and pasting happen at every caret.
+  **A whole name finds only that name**; a highlight that is part of a name finds
+  those letters inside other names too -- which is decided by the first
+  highlight. **Ctrl+Shift+D skips**: the newest highlight is let go and the next
+  one taken. Escape goes back to the first caret. Copying from several carets
+  gives a line each, and pasting as many lines as there are carets gives one
+  each. **Alt+D counts** (VS Code's *Increment Selection*): the first highlight,
+  top to bottom, is a whole number or a letter, and each one after it is the
+  next -- `4,4,4,4` becomes `4,5,6,7`, `aaa` becomes `abc`, z wraps to a; carets
+  with nothing highlighted get `0, 1, 2...`. Whole-box gestures (Ctrl+A, Ctrl+/,
+  Tab over a highlight, Alt+Delete) and a click go back to one caret.
 - **Pasted text keeps its own indentation**, rather than having this line's
   indentation added to every line of it.
 - **Dragging across text highlights it**, and so does Shift with any caret

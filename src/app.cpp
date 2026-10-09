@@ -838,6 +838,19 @@ void App::ConverseNext() {
   }
 }
 
+void App::DevKeys(const std::string& box, const std::string& keys) {
+  std::vector<std::string> lines(1);
+  for (char c : box) {
+    if (c == '|') lines.emplace_back();
+    else lines.back() += c;
+  }
+  CodeBlock* block = NewBlockAtCentre();
+  block->RestoreLines(lines);
+  SetFocus(block);
+  block->DevKeys(keys);
+  for (const std::string& line : block->Lines()) TraceLog(LOG_INFO, "DEVKEYS: %s", line.c_str());
+}
+
 void App::DevChat(const std::string& actions) {
   std::size_t from = 0;
   while (from <= actions.size()) {
@@ -1825,7 +1838,9 @@ void App::Update() {
 
   // Escape belongs to whatever is being typed into first: cancelling an edit is
   // not a request for the canvas menu.
-  if (IsKeyPressed(KEY_ESCAPE) && chats_.Editing()) {
+  if (IsKeyPressed(KEY_ESCAPE) && focus_ != nullptr && focus_->DropOtherCarets()) {
+    // Back to one caret, as in VS Code; a second Escape is the menu.
+  } else if (IsKeyPressed(KEY_ESCAPE) && chats_.Editing()) {
     // Out of the conversation, the way Escape is out of anything being typed.
     chats_.Blur();
   } else if (IsKeyPressed(KEY_ESCAPE) && !media_.Editing()) {
