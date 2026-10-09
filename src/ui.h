@@ -27,6 +27,11 @@ struct Options {
   // its author's text and none of the values the app chose. A choice about how
   // this canvas is read, so it is saved with it.
   bool alwaysCode = false;
+  // The end of the Claude API key, so the menu can say one is set and which,
+  // without ever showing the key. Empty when there is none. And what the last
+  // press of the key button found, when that was not a key.
+  std::string apiKeyTail;
+  std::string apiKeyNote;
 };
 
 // The shapes the menu offers. A deck is made for one of them, not for an
@@ -38,7 +43,7 @@ inline constexpr const char* kAspectNames[kAspectCount] = {"3:2", "16:9", "4:3",
 
 // What the menu is asking the app to do this frame.
 enum class MenuAction { None, NewCanvas, Save, Load, Insert, NewSlide, OpenRecent, Fullscreen,
-                        AlwaysCode };
+                        AlwaysCode, PasteApiKey, AskClaude };
 
 // The Escape menu. Drawn in screen space at a fixed pixel size, so it does not
 // take part in the canvas zoom.

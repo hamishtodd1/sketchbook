@@ -8,6 +8,7 @@
 #pragma once
 
 #include <filesystem>
+#include <string>
 
 namespace sb::settings {
 
@@ -19,5 +20,11 @@ std::filesystem::path Folder();
 // changes rather than at exit, so a crash does not forget it.
 bool Fullscreen();
 void RememberFullscreen(bool on);
+
+// The Claude API key, sealed to this Windows account (secret.h). Empty if none
+// has been given, or if it was sealed somewhere else. Remembering an empty one
+// forgets it.
+std::string ApiKey();
+void        RememberApiKey(const std::string& key);
 
 }  // namespace sb::settings

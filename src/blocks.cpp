@@ -196,6 +196,8 @@ bool CompileShaderHalf(const char* vertex, const char* fragment, Shader* shader,
   return false;
 }
 
+}  // namespace
+
 void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float borderWidth) {
   const float radius = kRadius * zoom;
   const float minSide = std::max(1.0f, std::min(rect.width, rect.height));
@@ -216,6 +218,8 @@ void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float border
   DrawRectangleRounded(rect, roundness, segments, fill);
   DrawRectangleRoundedLinesEx(rect, roundness, segments, borderWidth, border);
 }
+
+namespace {
 
 // Breaks a run of prose to a width, as byte ranges that **partition** it. The
 // pieces meet exactly -- a trailing space stays with the piece it ends -- so
@@ -286,6 +290,8 @@ float DrawSpans(FontStore& fonts, std::string_view line,
 CodeBlock::CodeBlock(Vector2 worldTopLeft, float worldEm, std::vector<std::string> lines)
     : origin_(worldTopLeft), em_(worldEm), lines_(std::move(lines)) {
   if (lines_.empty()) lines_.emplace_back();
+  static int next = 1;
+  id_ = next++;
 }
 
 CodeBlock::~CodeBlock() {
@@ -1742,12 +1748,28 @@ void CodeBlock::PushUndo(EditKind kind) {
 
   undo_.push_back({lines_, caretLine_, caretCol_});
   if (undo_.size() > 200) undo_.erase(undo_.begin());
+  redo_.clear();
 }
 
 void CodeBlock::Undo() {
   if (undo_.empty()) return;
   const Snapshot snapshot = undo_.back();
   undo_.pop_back();
+  redo_.push_back({lines_, caretLine_, caretCol_});
+  if (redo_.size() > 200) redo_.erase(redo_.begin());
+  Restore(snapshot);
+}
+
+void CodeBlock::Redo() {
+  if (redo_.empty()) return;
+  const Snapshot snapshot = redo_.back();
+  redo_.pop_back();
+  undo_.push_back({lines_, caretLine_, caretCol_});
+  if (undo_.size() > 200) undo_.erase(undo_.begin());
+  Restore(snapshot);
+}
+
+void CodeBlock::Restore(const Snapshot& snapshot) {
   lines_ = snapshot.lines;
   caretLine_ = snapshot.caretLine;
   caretCol_ = snapshot.caretCol;
@@ -2174,6 +2196,12 @@ void CodeBlock::DeleteWordAfter() {
 void CodeBlock::HandleInput() {
   const bool ctrl = CtrlDown();
 
+  // Inside a box these are the box's own, as they are the canvas's outside one:
+  // Ctrl+Z back, and Ctrl+Y or Ctrl+Shift+Z forward again.
+  if (ctrl && (Triggered(KEY_Y) || (ShiftDown() && Triggered(KEY_Z)))) {
+    Redo();
+    return;
+  }
   if (ctrl && Triggered(KEY_Z)) {
     Undo();
     return;
@@ -2493,7 +2521,11 @@ void CodeBlock::ProbeIfNeeded() {
 
   // Nothing has moved, so the answer is the one already on screen.
   std::vector<float> signature;
-  signature.reserve(uniforms_.size() + 1);
+  signature.reserve(uniforms_.size() + 2);
+  // Never empty: a box with no knobs at all has nothing else in here, and an
+  // empty signature would match the cleared one a rebuild leaves -- so its values
+  // were never read at all.
+  signature.push_back(1.0f);
   for (const auto& [uniform, location] : uniforms_) {
     const mathprogram::Literal* literal = program_.FindLiteral(uniform);
     signature.push_back(literal == nullptr ? 0.0f : literal->value);

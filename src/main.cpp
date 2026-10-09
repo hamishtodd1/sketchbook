@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -6,9 +7,12 @@
 #include <fstream>
 #include <sstream>
 
+#include <thread>
 #include <vector>
 
 #include "app.h"
+#include "claude.h"
+#include "crash.h"
 #include "recent.h"
 #include "settings.h"
 #include "logging.h"
@@ -40,6 +44,22 @@ struct Args {
   // raylib says a great deal about what it is doing and almost none of it is
   // worth reading. This turns the filter off when it is.
   bool verbose = false;
+  // Dev only: ask Claude one question and print the answer as it streams, with
+  // what it used and cost -- the whole connection, with no window in the way.
+  std::string ask;
+  std::string model = sb::claude::kDefaultModel;
+  std::string effort;       // empty is the model's own default
+  // Dev only: open a conversation on the canvas and say this in it, so the
+  // whole loop -- Claude, its tools, the canvas -- runs with nobody at the keys.
+  std::string converse;
+  // Dev only: do something to the first conversation on the canvas --
+  // `menu`, `rewind:N`, `rewind-canvas:N`, `say:words` -- and, at the end of a
+  // capture, write the canvas out, which a capture otherwise never does.
+  std::string devChat;
+  std::string saveTo;
+  // Dev only: at the end of a capture, print the canvas as Claude is shown it --
+  // which is also the quickest way to see what the compiler made of a box.
+  bool        describe = false;
   int         frames = 0;   // 0 means run until the window is closed
   std::string open;         // a .sketch canvas to load at startup
 };
@@ -58,6 +78,13 @@ Args ParseArgs(int argc, char** argv) {
     else if (flag == "--overloads") args.rewrite = "-";
     else if (flag == "--assemble" && hasValue) args.assemble = argv[++i];
     else if (flag == "--verbose") args.verbose = true;
+    else if (flag == "--ask" && hasValue) args.ask = argv[++i];
+    else if (flag == "--model" && hasValue) args.model = argv[++i];
+    else if (flag == "--effort" && hasValue) args.effort = argv[++i];
+    else if (flag == "--converse" && hasValue) args.converse = argv[++i];
+    else if (flag == "--dev-chat" && hasValue) args.devChat = argv[++i];
+    else if (flag == "--save-to" && hasValue) args.saveTo = argv[++i];
+    else if (flag == "--describe") args.describe = true;
     else if (flag[0] != '-') args.open = flag;   // a file dropped on the exe
   }
   if (!args.screenshot.empty() && args.frames <= 0) args.frames = 6;
@@ -102,7 +129,68 @@ std::string ResolveAssetDir() {
 }  // namespace
 
 int main(int argc, char** argv) {
+  sb::crash::Install();
   const Args args = ParseArgs(argc, argv);
+
+  // Nothing graphical: ask Claude something, and print the answer as it comes.
+  if (!args.ask.empty()) {
+    std::string key = sb::settings::ApiKey();
+    if (key.empty()) {
+      if (const char* env = std::getenv("ANTHROPIC_API_KEY")) key = env;
+    }
+    if (key.empty()) {
+      std::fprintf(stderr, "sketchbook: no API key -- paste one from the Escape menu, or set "
+                           "ANTHROPIC_API_KEY\n");
+      return 1;
+    }
+    const sb::claude::Model* model = sb::claude::FindModel(args.model);
+    sb::json::Value request = sb::json::Value::Object();
+    request.Set("model", args.model);
+    request.Set("max_tokens", 32000);
+    if (!args.effort.empty()) {
+      sb::json::Value config = sb::json::Value::Object();
+      config.Set("effort", args.effort);
+      request.Set("output_config", std::move(config));
+    }
+    // Automatic prompt caching: whatever was sent before is read back cheaply.
+    sb::json::Value cache = sb::json::Value::Object();
+    cache.Set("type", "ephemeral");
+    request.Set("cache_control", std::move(cache));
+    sb::json::Value message = sb::json::Value::Object();
+    message.Set("role", "user");
+    message.Set("content", args.ask);
+    sb::json::Value messages = sb::json::Value::Array();
+    messages.Push(std::move(message));
+    request.Set("messages", std::move(messages));
+
+    sb::claude::Call call(key, std::move(request));
+    bool thinking = false;
+    while (!call.Done()) {
+      const bool now = call.Thinking();
+      if (now && !thinking) std::fprintf(stderr, "[thinking]\n");
+      thinking = now;
+      const std::string text = call.TakeText();
+      if (!text.empty()) {
+        std::fwrite(text.data(), 1, text.size(), stdout);
+        std::fflush(stdout);
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    const std::string rest = call.TakeText();
+    std::fwrite(rest.data(), 1, rest.size(), stdout);
+    std::printf("\n");
+    if (call.Failed()) {
+      std::fprintf(stderr, "sketchbook: %s\n", call.Error().c_str());
+      return 1;
+    }
+    const sb::claude::Usage usage = call.GetUsage();
+    std::fprintf(stderr, "[%s, stopped: %s] in %ld (+%ld cache write, %ld cache read), out %ld",
+                 args.model.c_str(), call.StopReason().c_str(), usage.input, usage.cacheWrite,
+                 usage.cacheRead, usage.output);
+    if (model != nullptr) std::fprintf(stderr, " -- $%.4f", usage.Dollars(model->price));
+    std::fprintf(stderr, "\n");
+    return 0;
+  }
 
   // Nothing graphical either: read a file as a box's lines and print what it
   // assembles to -- the shader, the sampler, or a viz's three programs.
@@ -231,9 +319,14 @@ int main(int argc, char** argv) {
     const std::vector<std::string> recent = sb::recent::List();
     if (!recent.empty()) app.OpenCanvas(recent.front());
   }
-
   int frame = 0;
   while (!WindowShouldClose()) {
+    // The dev conversations wait half a second, until the canvas has built and
+    // grown its windows, so they meet it as somebody pressing a button would.
+    if (frame == 60) {
+      if (!args.converse.empty()) app.Converse(args.converse, args.effort);
+      if (!args.devChat.empty()) app.DevChat(args.devChat);
+    }
     app.Update();
 
     BeginDrawing();
@@ -245,6 +338,10 @@ int main(int argc, char** argv) {
     if (args.frames > 0 && frame >= args.frames) break;
   }
 
+  if (args.describe) std::printf("%s", app.Describe().c_str());
+  if (!args.saveTo.empty() && !app.SaveTo(args.saveTo)) {
+    std::fprintf(stderr, "sketchbook: could not save %s\n", args.saveTo.c_str());
+  }
   app.Shutdown();
   sb::touch::Shutdown();
   CloseWindow();

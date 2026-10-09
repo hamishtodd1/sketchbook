@@ -38,19 +38,29 @@ operator overloads.
 - Hamish usually has his own `build/sketchbook.exe` open. Never kill it -- only
   the test instances launched with test flags.
 - A launch without `--open` opens his most recent canvas, so every interactive
-  test opens a **scratch copy**, never a file in `C:\sketches` directly.
+  test opens a **scratch copy**, never a file in `sketches/` directly.
 - Back up `%APPDATA%\sketchbook\recent.txt` before `--open` runs and restore it
   after, or the scratch copies leak into his recent list. Delete any untitled
   files a test creates.
 - Tests pass `--width`/`--height`, so they never go fullscreen or touch
   `settings.txt`.
-- Synthetic input (`SetForegroundWindow`, `mouse_event`, `keybd_event`) only
-  works when the driver is run through the PowerShell tool, not from Bash; check
-  that the window really got the foreground.
+- **Drive the app from inside, and capture only its own frame.** `--screenshot`
+  reads sketchbook's framebuffer; a copy of the desktop (PowerShell's
+  `CopyFromScreen`) captures whatever is on top, and once caught Hamish's other
+  windows when the test window lost focus. Synthetic input (`keybd_event`,
+  SendKeys) has the same flaw: it goes to whatever has focus. So behaviour is
+  driven by dev flags -- `--converse "..."` opens a conversation and says that in
+  it -- and read back from the log (`CLAUDE:` lines name every tool used and the
+  reply). If desktop input is ever unavoidable, ask first.
 - A capture does not auto-save (see *Saving*), so screenshot runs cannot damage a
   canvas.
-- A sweep of every sketch in `C:\sketches` with `--verbose`, grepping for errors,
+- A sweep of every sketch in `sketches/` with `--verbose`, grepping for errors,
   is the quickest whole-app check; `demo.sketch` has one of everything.
+- **A crash prints where it was** (`crash_win32.cpp`): the fault code and the
+  faulting thread's stack, unwound from the fault, as offsets into the exe.
+  `nm -C build/sketchbook.exe | sort` turns an offset (plus 0x140000000) into
+  the function it is in -- no debug build needed. The log flushes every line, so
+  the last thing said before a crash is never lost.
 
 ---
 
@@ -426,6 +436,16 @@ helper visible to that window's own functions.
 | `float grab(T v)` | pixels from the pointer |
 | `T drag(T v)` | the value the pointer asks for |
 
+**A model piece**: a `meshN` whose whole body is `model("file.obj");`
+(`vizglsl::Assemble` finds it by regex) names `Sources::model[k]`; its lines are
+blanked before the operator rewrite, which cannot read a string, and the compute
+program never calls it. `VizGpu::Build` reads the file (`obj::Load`,
+`objfile.*`, raylib-free: faces fanned, smooth normals where there are none,
+centred and scaled to the unit sphere) into a buffer the size of the model, in the
+layout `mesh` writes, so a model is not held to `kMeshCap`. The file is looked for
+in the vizes folder, then the canvas's (`SetCanvasFolder`, set with the canvas
+path).
+
 Pieces: `mesh2`/`vert2`/`frag2`/`position2` … up to 4; a fifth is an error on its
 line. `grab` and `drag` are one per viz.
 
@@ -647,6 +667,14 @@ shown. The canvas file records each window's points.
 - **Where a window goes first** (`dock.h`): flanking slots alternate right/left
   down two columns, one height for all; the order is set once where the panels are
   chained (`App::Init`, `SetBefore`), so a new kind is one line.
+- **Where a new window goes** (`App::FindGap`): every window's rectangle in world
+  units (`WindowRects`, from each panel's `Rects`), then outward from the centred
+  spot ring by ring on the grid (the drawn lattice, or the base grid where that is
+  finer), keeping the nearest place that clears every window by two base dots,
+  and stopping once a ring is further out than the best so far. `CentreOn` glides
+  the camera (0.45 s) unless the window is already within 2 px of the middle. Used
+  by `NewBlockAtCentre`, Ask Claude, and Insert from the menu (which places the
+  media, reads its loaded size, then moves it).
 - **Placement**: `kDotsPerLine` from the font at startup; `kGridMinPx/MaxPx`
   (halved when the dots doubled); `SnapStep` uses an in-between dot only once it
   has faded at least halfway in; `SnapToGrid` in `grid.*`; every box placement
@@ -744,6 +772,144 @@ handles sit inside the rim's grab band and clear of the transport.
 
 ---
 
+## Talking to Claude (`claude.*`, `json.*`, `secret.*`)
+
+- **One request is a `claude::Call`**: a Messages API body posted with `stream`
+  on a thread of its own, read as server-sent events and assembled block by block
+  into the reply the API would have returned whole -- thinking (with its
+  signature), text, tool calls (their arguments arrive as pieces of JSON text and
+  are parsed at the block's end), citations -- plus the stop reason and usage. The
+  drawing thread polls it (`TakeText`, `Thinking`, `Done`); nothing waits on the
+  network. Destroying a call interrupts it and joins the thread.
+- **The transport is WinHTTP** (`claude_win32.cpp`), synchronous on that thread.
+  It is stopped from outside by closing the request handle (`Interrupt`), which
+  makes the blocked read return; whoever closes it first nulls it under the
+  `Abort` mutex so it is closed once. Not `curl`: a child process would have put
+  the key on a command line. Receive timeout five minutes, since a reply thinking
+  hard is quiet between pings.
+- **Errors come back in words** (`ErrorWords`): a non-200 reply is one JSON object,
+  not a stream; an `error` event can also arrive mid-stream.
+- **Prompt caching is always on**, by the top-level `cache_control`.
+- **Effort** is `output_config.effort`: low, medium, high, xhigh, max. Opus 5.5
+  always thinks and defaults to medium. Changing effort mid-conversation keeps
+  the cache on the models that support a per-message `output_config`.
+- **The models and their prices** are a table in `claude.cpp` (`Models`), since a
+  conversation's cost has to be worked out here; `Usage::Dollars` does it.
+- **The key** is pasted from the clipboard (Escape menu), sealed with DPAPI
+  (`secret_win32.cpp`, crypt32) and kept in `settings.txt` as hex under
+  `apikey`; the menu shows only its last four characters.
+- **A conversation** is `claude::Conversation` (`conversation.*`, raylib-free):
+  its turns, each assistant turn's content blocks kept to be sent back exactly
+  (thinking and signatures included), the call in flight, the context and the
+  running cost. A failed or stopped reply is shown with its note and not sent
+  back. Effort goes as `output_config.effort` only to models that take one
+  (`Model::effort`; Haiku 4.5 does not). `max_tokens` is 32k, 64k at xhigh/max.
+- **The window** is `ChatPanel` (`chat.*`). Each turn is laid out once in world
+  units at `kEm` -- prose in MainRegular/MainBold, `$...$` and `$$...$$` measured
+  with `tex::Render`, `code` and fences in Mono, list bullets as drawn dots (the
+  roman face has no bullet) -- and again only when its text, the window's width,
+  or its being still in flight changes. Drawing scales the layout by the zoom and
+  typesets only the formulas in view, at the current size, from a bounded cache.
+  While a reply streams, a formula whose closing `$` has not arrived is held back.
+- **Wiring**: the panel is asked for the pointer before the wheel-resize and
+  every other window, since it is drawn over them; `hover::SetCovered` makes
+  `hover::Pointer()` nowhere for everything else while the pointer is on one, and
+  the panel itself reads `hover::TopPointer()`. With the caret in one it takes
+  the keys (`HandleKeys`) instead of `HandleTyping`. The wheel over one does not
+  bring up the grid. Loading a canvas clears conversations (stopping each reply
+  and joining its thread) and adopts the file's; an undo step leaves them be.
+- **Saved as one line each**, `chat {...}`: the window (place, size, where its next
+  box goes) and `Conversation::Save` -- model, effort, cost, context, the turns
+  (each of yours with the message it starts at and the canvas snapshot taken when
+  it was sent) and the API messages, pictures replaced by a note
+  (`DropPictures`). Only in the file (`WriteCanvas` with `withView`). An undo
+  snapshot has them **by reference**: a `chats` line, then `chatref id x y w h
+  madeBelow` for each open window. Thrown away, a conversation is set aside
+  (`ChatPanel::setAside_`, its reply stopped, the oldest of 20 dropped), and
+  `ChatPanel::Restore` brings back exactly the ids a step names, setting the rest
+  aside. A snapshot with no `chats` line leaves conversations alone: the canvas a
+  rewind restores is written without them (`withChats` false), so rewinding never
+  closes a conversation opened since. Ids are a counter, not saved; a canvas
+  loaded from its file gives its conversations new ones and forgets what was set
+  aside. Since snapshots cannot see them, `ChatPanel::TakeChanged`
+  schedules the autosave: a message, a finished reply, a window moved or resized,
+  a model or effort chosen, a rewind. `Load` closes off a conversation saved
+  mid-tools by answering the owed calls as interrupted.
+- **Rewind** (`Conversation::Rewind`) truncates the turns and the messages to just
+  before one of your turns and hands back its words and canvas snapshot; the
+  canvas goes back through `App::RestoreCanvas`, which pushes the current canvas
+  onto the undo stack first. The offer is drawn with the bubbles and pressed on the
+  next frame (`RewindOffer`).
+- **Switching model** (`SetModel`) strips thinking blocks from earlier assistant
+  messages, since they are signed by the model that wrote them; a reply left empty
+  by that gets a placeholder. `Model::context` is what the context bar is a
+  fraction of (1M; Haiku 4.5 200k).
+- **Dev**: `--dev-chat menu|rewind:N|rewind-canvas:N|say:words|discard|undo`,
+  comma-separated and in order, acts on the first conversation; `--save-to <file>` writes the canvas at the end of a capture,
+  which otherwise saves nothing.
+- **The system prompt is `prompt/system.md`** (`SKETCHBOOK_PROMPT_FILE`), read
+  afresh for every message; `prompt.cpp` keeps a short fallback for when the file
+  cannot be read, and the tool definitions, whose shapes the code answers to. The
+  prompt states facts about the language -- the parts of each type and their
+  order, which windows a function's type gets, the plot's vertical input -- so it
+  has to change when they do. Check a claim before putting it there:
+  `--describe` prints the canvas as Claude is shown it, compile errors included.
+- **A multivector's values are shown by part name** (`e012 0.5`,
+  `clifford::MemberNames`), and a colour's as `r g b`.
+- **Claude's tools** (`prompt.*` defines them; `app_tools.cpp` carries them out):
+  read_canvas, make_box, edit_box, replace_box, delete_box, set_value, look,
+  read_builtin_vizes, and the server's web_search. A reply that stops for tools
+  hands its calls out (`TakeToolCalls`); `App::ServeTools` runs each on the
+  drawing thread and answers it (`Answer`); when a round is all answered the
+  conversation sends the results and carries on by itself, at most
+  `kMaxRounds` (40) rounds a message. `pause_turn` (a server search wanting
+  another turn) just carries on. Stopping while tools are owed answers them all
+  with an error, so the message list stays one the API accepts.
+- **A change waits until it has settled**: making, editing or setting a value
+  answers once the box has compiled and its values have been read back
+  (`Settled`), so Claude sees its own errors and numbers. A box with the caret in
+  it is refused. Each change is its own canvas undo step (`BeforeToolChange`
+  commits Hamish's pending step and folds in anything nobody did;
+  `AfterToolChange` marks this one as done by somebody).
+- **Boxes have ids** (`CodeBlock::Id`, `b7`), from a counter, not saved; a box an
+  undo step rebuilds is a new box.
+- **Every message carries the canvas, as a diff** -- a text block before the
+  words. `App::ViewCanvas` makes a `claude::CanvasView`: the algebra, each box
+  described (`DescribeBox`: numbered lines, compile state and errors, values,
+  functions) and a status (caret box and line, selection, the window pointed at).
+  `Conversation::Context` decides what of it is sent: the whole first time, then
+  only boxes whose description differs from the one in `seen_`, the ids deleted,
+  the ids unchanged, and the status. **A box's description holds nothing that
+  changes without the box changing** -- the caret went to the status for that --
+  or every box would count as changed. A tool that reports a box (`Saw`) or the
+  whole canvas (read_canvas, `SawAll`) updates `seen_`. Rewinding clears it, and
+  so does loading (it is not saved): the next message sends everything again. On a
+  100-line canvas a later message's copy went from ~4000 characters to ~200.
+- **A look is of the window the pointer was on at Send** (`App::DwUnder`, every
+  panel's `Rects` last-drawn first, nothing under a conversation), kept in the
+  `ChatWindow` (`lookWorld`, `lookKind`) and named in the status; with none, look
+  answers with an error telling Claude to ask. The tool takes no input.
+- **A look draws the canvas twice in one frame** (`TakeLooks`, at the start of
+  `Draw`): once unseen, with the camera framed on that window, with hover held and no chrome, conversations or
+  wires (`DrawCanvas(true)`); it is read back (`rlReadScreenPixels`), cropped,
+  shrunk to at most 1200 px, sent as a PNG -- then the real frame is drawn over
+  it. One a frame, and never mid-glide. **Crop in whole pixels**: raylib's
+  `ImageCrop` with a fractional edge copies one row more than it allocates, and
+  that wrote off the end of the buffer -- an intermittent crash.
+- **`--describe`** prints the canvas as Claude is shown it at the end of a capture.
+- **Dev actions wait 60 frames** (`--converse`, `--dev-chat`), so they meet a canvas
+  whose windows have grown, as a press of a button would. `--dev-chat` also takes
+  `new` (a conversation, as the menu makes one) and `box:text` (a box, as typing
+  makes one).
+- **`--converse "..." [--effort level]`** opens a conversation on the canvas and
+  says that in it: the whole loop with nobody at the keys. ` || ` splits it into
+  messages, each said once the last reply is done and the camera has stopped;
+  `box:text` makes a box between them, and `point:x,y` stands in for the pointer
+  (screen pixels) when a look is tested, since the real one is Hamish's.
+- **`--ask "..." [--model id] [--effort level]`** streams one answer to the
+  terminal and prints its usage and cost -- the whole connection with no window.
+  It takes the stored key, or `ANTHROPIC_API_KEY`.
+
 ## Key files
 
 | file | what it holds |
@@ -774,3 +940,8 @@ handles sit inside the rim's grab band and clear of the transport.
 | `busy.*`, `logging.h` | the busy cursor; the log filter and `log::Catch` |
 | `touch.*`, `touch_win32.*`, `viewport.*` | multi-touch; the pan/zoom camera |
 | `filedialog_win32.*`, `process.*` | open/save dialogs; running a child process |
+| `claude.*`, `json.*`, `secret.*` | talking to the Claude API; JSON; keeping the key |
+| `conversation.*`, `chat.*` | a conversation with Claude; its window |
+| `prompt.*`, `app_tools.cpp` | what Claude is told and the tools it has; the tools carried out |
+| `crash_win32.cpp` | where a crash happened, on stderr |
+| `objfile.*` | reading a model a viz names |

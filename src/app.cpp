@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -25,10 +26,15 @@
 namespace sb {
 namespace {
 
+// The last four characters of a key: enough to say which one is set, and no
+// use to anyone who reads them over your shoulder.
+std::string KeyTail(const std::string& key) {
+  return key.size() < 12 ? std::string() : key.substr(key.size() - 4);
+}
+
 // A press that moves less than this is a click, not a drag.
 constexpr float kClickSlop = 6.0f;
 
-constexpr float kDefaultBlockEm = 26.0f;
 
 // Bumped whenever the on-disk shape changes.
 constexpr int kFileVersion = 3;
@@ -37,6 +43,19 @@ constexpr int kFileVersion = 3;
 
 bool App::Init(const std::string& assetDir, std::string* error) {
   if (!fonts_.Load(assetDir + "/fonts", error)) return false;
+  options_.apiKeyTail = KeyTail(settings::ApiKey());
+  // Every message to Claude carries the canvas as it is when it is sent.
+  chats_.SetCanvasViewer([this]() { return ViewCanvas(); });
+  chats_.SetPointedWindow([this](Rectangle* world, std::string* kind) {
+    return DwUnder(devPointed_ ? devPointer_ : GetMousePosition(), world, kind);
+  });
+  // Without the conversations: rewinding a canvas is about the canvas, and must
+  // not close a conversation opened since.
+  chats_.SetCanvasSnapshotter([this]() {
+    std::ostringstream out;
+    WriteCanvas(out, currentPath_, /*withView=*/false, /*withChats=*/false);
+    return out.str();
+  });
 
   // One dot to a line of type. The grid is ruled paper rather than an arbitrary
   // lattice, so it is measured from the font rather than guessed at.
@@ -73,6 +92,8 @@ void App::Shutdown() {
   // process behind it. Both have to go while there is still a context to hand
   // them back to.
   media_.ReleaseGpu();
+  // Every reply in flight stopped, and its thread joined.
+  chats_.Clear();
   // And the shared render target, shaders and meshes behind the space windows.
   spaces_.ReleaseGpu();
   colours_.ReleaseGpu();
@@ -295,18 +316,96 @@ void App::SetFocus(CodeBlock* block) {
 }
 
 CodeBlock* App::NewBlockAtCentre() {
-  const Vector2 centre = {static_cast<float>(GetScreenWidth()) * 0.5f,
-                          static_cast<float>(GetScreenHeight()) * 0.5f};
-  // Nudge up and left so the box grows around the middle of the screen rather
-  // than hanging off to one side of it.
-  const Vector2 world = viewport_.ToWorld({centre.x - 120.0f, centre.y - 30.0f});
+  // A new box is empty and grows as it is typed into, so it claims room for the
+  // first few lines of what is about to be written -- otherwise the gap would be
+  // the size of an empty box and the first line typed would run into a
+  // neighbour. It starts at that room's top-left, and the room is what is
+  // centred.
+  const float  em = kDefaultBlockEm;
+  const Vector2 room = {text::Measure(fonts_, Face::Mono, "M", em) * 24.0f + em,
+                        text::LineHeight(fonts_, Face::Mono, em) * 3.0f + em};
+  const Vector2 at = FindGap(room, WindowRects());
   codeBlocks_.push_back(
-      std::make_unique<CodeBlock>(world, kDefaultBlockEm, std::vector<std::string>{}));
+      std::make_unique<CodeBlock>(at, kDefaultBlockEm, std::vector<std::string>{}));
   CodeBlock* block = codeBlocks_.back().get();
-  // The middle of the screen may well be occupied; the new box goes to the
-  // nearest free dot instead of opening on top of what is there.
-  PlaceBlock(block, world);
+  PlaceBlock(block, at);
+  CentreOn({at.x, at.y, room.x, room.y});
   return block;
+}
+
+std::vector<Rectangle> App::WindowRects() {
+  std::vector<Rectangle> screen;
+  axes_.Rects(viewport_, fonts_, &screen);
+  plots_.Rects(viewport_, fonts_, &screen);
+  shaders_.Rects(viewport_, fonts_, &screen);
+  colours_.Rects(viewport_, fonts_, &screen);
+  surfaces_.Rects(viewport_, fonts_, &screen);
+  volumes_.Rects(viewport_, fonts_, &screen);
+  spaces_.Rects(viewport_, fonts_, &screen);
+  media_.Rects(viewport_, &screen);
+  chats_.Rects(viewport_, &screen);
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    if (!block->Absorbed() && !block->Empty()) screen.push_back(block->Measure(viewport_, fonts_).rect);
+  }
+  std::vector<Rectangle> world;
+  for (const Rectangle& r : screen) {
+    if (r.width <= 0.0f || r.height <= 0.0f) continue;
+    const Vector2 a = viewport_.ToWorld({r.x, r.y});
+    const Vector2 b = viewport_.ToWorld({r.x + r.width, r.y + r.height});
+    world.push_back({a.x, a.y, b.x - a.x, b.y - a.y});
+  }
+  return world;
+}
+
+Vector2 App::FindGap(Vector2 size, const std::vector<Rectangle>& taken) {
+  const float   zoom = viewport_.Zoom();
+  const Vector2 middle = viewport_.ToWorld(
+      {static_cast<float>(GetScreenWidth()) * 0.5f, static_cast<float>(GetScreenHeight()) * 0.5f});
+  const Vector2 ideal = SnapToGrid({middle.x - size.x * 0.5f, middle.y - size.y * 0.5f}, zoom);
+  // Room round it: a line's height, so two windows never read as one.
+  const float room = 2.0f * GridBaseStep();
+  const auto  fits = [&](Vector2 at) {
+    const Rectangle wanted = {at.x - room, at.y - room, size.x + 2.0f * room, size.y + 2.0f * room};
+    for (const Rectangle& t : taken) {
+      if (CheckCollisionRecs(wanted, t)) return false;
+    }
+    return true;
+  };
+  if (fits(ideal)) return ideal;
+
+  // Outward from the middle, ring by ring, keeping the nearest place that fits
+  // and stopping once a ring is further out than it. The lattice is the grid
+  // as drawn, or a dot of the base grid where that is finer, which keeps the
+  // search to a few thousand tries however far in the camera is.
+  const float step = std::max(SnapStep(zoom), GridBaseStep());
+  Vector2     best = ideal;
+  float       bestDistance = -1.0f;
+  constexpr int kRings = 160;
+  for (int ring = 1; ring <= kRings; ++ring) {
+    if (bestDistance >= 0.0f && static_cast<float>(ring - 1) * step > bestDistance) break;
+    for (int i = -ring; i <= ring; ++i) {
+      for (int j = -ring; j <= ring; ++j) {
+        if (std::max(std::abs(i), std::abs(j)) != ring) continue;
+        const Vector2 at = SnapToGrid(
+            {ideal.x + static_cast<float>(i) * step, ideal.y + static_cast<float>(j) * step}, zoom);
+        const float distance = std::hypot(at.x - ideal.x, at.y - ideal.y);
+        if (bestDistance >= 0.0f && distance >= bestDistance) continue;
+        if (!fits(at)) continue;
+        best = at;
+        bestDistance = distance;
+      }
+    }
+  }
+  return best;
+}
+
+void App::CentreOn(Rectangle world) {
+  const Vector2 centre = {world.x + world.width * 0.5f, world.y + world.height * 0.5f};
+  const Vector2 middle = viewport_.ToWorld(
+      {static_cast<float>(GetScreenWidth()) * 0.5f, static_cast<float>(GetScreenHeight()) * 0.5f});
+  // Already there, to within a couple of pixels: nothing to do.
+  if (std::hypot(centre.x - middle.x, centre.y - middle.y) * viewport_.Zoom() < 2.0f) return;
+  viewport_.GlideTo(centre, viewport_.Zoom(), 0.45f);
 }
 
 // ------------------------------------------------------------------ selection
@@ -321,6 +420,7 @@ void App::ClearSelection() {
   volumes_.ClearSelection();
   spaces_.ClearSelection();
   media_.ClearSelection();
+  chats_.ClearSelection();
 }
 
 bool App::AnySelected() const {
@@ -330,7 +430,7 @@ bool App::AnySelected() const {
   return axes_.AnySelected() || plots_.AnySelected() || shaders_.AnySelected() ||
          colours_.AnySelected() ||
          surfaces_.AnySelected() || volumes_.AnySelected() ||
-         spaces_.AnySelected() || media_.AnySelected();
+         spaces_.AnySelected() || media_.AnySelected() || chats_.AnySelected();
 }
 
 bool App::SelectedRimAt(Vector2 point) {
@@ -344,7 +444,7 @@ bool App::SelectedRimAt(Vector2 point) {
          surfaces_.SelectedRimAt(point, viewport_, fonts_) ||
          volumes_.SelectedRimAt(point, viewport_, fonts_) ||
          spaces_.SelectedRimAt(point, viewport_, fonts_) ||
-         media_.SelectedRimAt(point, viewport_);
+         media_.SelectedRimAt(point, viewport_) || chats_.SelectedRimAt(point, viewport_);
 }
 
 void App::DeleteSelection() {
@@ -356,6 +456,7 @@ void App::DeleteSelection() {
   volumes_.DeleteSelection();
   spaces_.DeleteSelection();
   media_.DeleteSelection();
+  chats_.DeleteSelection();
 
   // Boxes last: removing one takes its windows with it, and the panels have
   // already had their say about the ones that were selected in their own right.
@@ -446,6 +547,7 @@ void App::HandleSelection() {
       if (!absorbing) block->SetWorldPosition({from.x + delta.x, from.y + delta.y});
     }
     media_.SetSelectionAbsorbed(absorbing);
+    chats_.SetSelectionAbsorbed(absorbing);
     if (!absorbing) {
       axes_.MoveSelection(delta);
       plots_.MoveSelection(delta);
@@ -455,6 +557,7 @@ void App::HandleSelection() {
       volumes_.MoveSelection(delta);
       spaces_.MoveSelection(delta);
       media_.MoveSelection(delta);
+      chats_.MoveSelection(delta);
     }
 
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
@@ -490,6 +593,7 @@ void App::HandleSelection() {
     volumes_.BeginSelectionDrag();
     spaces_.BeginSelectionDrag();
     media_.BeginSelectionDrag();
+    chats_.BeginSelectionDrag();
     return;
   }
 
@@ -528,6 +632,7 @@ void App::HandleSelection() {
         volumes_.SelectWithin(loop, viewport_, fonts_);
         spaces_.SelectWithin(loop, viewport_, fonts_);
         media_.SelectWithin(loop, viewport_);
+        chats_.SelectWithin(loop, viewport_);
         for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
           block->SetSelected(LassoCatches(loop, block->Measure(viewport_, fonts_).rect));
         }
@@ -696,6 +801,70 @@ void App::ComposeInto(const std::string& op) {
   };
   composeBlock_->InsertDeclaration("float " + name + "(float " + param + ") { return " +
                                    term(left) + " " + op + " " + term(right) + "; }");
+}
+
+void App::Converse(const std::string& text, const std::string& effort) {
+  const Vector2 size = ChatPanel::DefaultSize();
+  const Vector2 at = FindGap(size, WindowRects());
+  chats_.New({at.x + size.x * 0.5f, at.y + size.y * 0.5f}, viewport_.Zoom());
+  CentreOn({at.x, at.y, size.x, size.y});
+  converseEffort_ = effort;
+  std::size_t from = 0;
+  while (from <= text.size()) {
+    std::size_t split = text.find(" || ", from);
+    if (split == std::string::npos) split = text.size();
+    converseQueue_.push_back(text.substr(from, split - from));
+    from = split + 4;
+  }
+  ConverseNext();
+}
+
+void App::ConverseNext() {
+  while (!converseQueue_.empty()) {
+    if (chats_.Windows().empty() || chats_.Windows().back()->conversation->Busy()) return;
+    if (viewport_.Gliding()) return;   // what is pointed at is where it ends up
+    const std::string next = converseQueue_.front();
+    converseQueue_.erase(converseQueue_.begin());
+    if (next.rfind("point:", 0) == 0) {
+      devPointed_ = std::sscanf(next.c_str() + 6, "%f,%f", &devPointer_.x, &devPointer_.y) == 2;
+      continue;
+    }
+    if (next.rfind("box:", 0) == 0) {
+      NewBlockAtCentre()->RestoreLines({next.substr(4)});
+      continue;
+    }
+    chats_.Say(next, converseEffort_);
+    return;
+  }
+}
+
+void App::DevChat(const std::string& actions) {
+  std::size_t from = 0;
+  while (from <= actions.size()) {
+    std::size_t comma = actions.find(',', from);
+    if (comma == std::string::npos) comma = actions.size();
+    const std::string action = actions.substr(from, comma - from);
+    if (action == "discard") {
+      undoPending_ = true;
+      chats_.Dev(action);
+      CommitUndo();
+    } else if (action == "undo") {
+      StepUndo(/*redo=*/false);
+    } else if (action == "new") {
+      // A conversation, as the menu makes one.
+      const Vector2 size = ChatPanel::DefaultSize();
+      const Vector2 at = FindGap(size, WindowRects());
+      chats_.New({at.x + size.x * 0.5f, at.y + size.y * 0.5f}, viewport_.Zoom());
+      CentreOn({at.x, at.y, size.x, size.y});
+    } else if (action.rfind("box:", 0) == 0) {
+      // A box, as typing on the bare canvas makes one.
+      CodeBlock* block = NewBlockAtCentre();
+      block->RestoreLines({action.substr(4)});
+    } else if (!action.empty()) {
+      chats_.Dev(action);
+    }
+    from = comma + 1;
+  }
 }
 
 void App::SetAlwaysCode(bool on) {
@@ -1392,6 +1561,7 @@ void App::FrameOnScreen() {
   volumes_.Rects(viewport_, fonts_, &rects);
   spaces_.Rects(viewport_, fonts_, &rects);
   media_.Rects(viewport_, &rects);
+  chats_.Rects(viewport_, &rects);
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     if (!block->Absorbed()) rects.push_back(block->Measure(viewport_, fonts_).rect);
   }
@@ -1503,6 +1673,7 @@ void App::SelectWithinWorld(Rectangle worldRect) {
   volumes_.SelectWithin(loop, viewport_, fonts_);
   spaces_.SelectWithin(loop, viewport_, fonts_);
   media_.SelectWithin(loop, viewport_);
+  chats_.SelectWithin(loop, viewport_);
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     block->SetSelected(LassoCatches(loop, block->Measure(viewport_, fonts_).rect));
   }
@@ -1535,6 +1706,7 @@ void App::ThrowAwaySlide(Rectangle bounds, float shift) {
     volumes_.BeginSelectionDrag();
     spaces_.BeginSelectionDrag();
     media_.BeginSelectionDrag();
+    chats_.BeginSelectionDrag();
     axes_.MoveSelection({-shift, 0.0f});
     plots_.MoveSelection({-shift, 0.0f});
     shaders_.MoveSelection({-shift, 0.0f});
@@ -1543,6 +1715,7 @@ void App::ThrowAwaySlide(Rectangle bounds, float shift) {
     volumes_.MoveSelection({-shift, 0.0f});
     spaces_.MoveSelection({-shift, 0.0f});
     media_.MoveSelection({-shift, 0.0f});
+    chats_.MoveSelection({-shift, 0.0f});
   }
   ClearSelection();
   SettleBlocks();
@@ -1637,7 +1810,8 @@ void App::Update() {
   }
   // Undo and redo for the canvas. Inside a box the keys are the box's own, and
   // mid-gesture there is nothing settled to go back to.
-  if (ctrl && focus_ == nullptr && !media_.Editing() && !hover::Held() && !menu_.Visible()) {
+  if (ctrl && focus_ == nullptr && !media_.Editing() && !chats_.Editing() && !hover::Held() &&
+      !menu_.Visible()) {
     const bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     if (IsKeyPressed(KEY_Z)) StepUndo(/*redo=*/shift);
     if (IsKeyPressed(KEY_Y)) StepUndo(/*redo=*/true);
@@ -1651,8 +1825,13 @@ void App::Update() {
 
   // Escape belongs to whatever is being typed into first: cancelling an edit is
   // not a request for the canvas menu.
-  if (IsKeyPressed(KEY_ESCAPE) && !media_.Editing()) {
+  if (IsKeyPressed(KEY_ESCAPE) && chats_.Editing()) {
+    // Out of the conversation, the way Escape is out of anything being typed.
+    chats_.Blur();
+  } else if (IsKeyPressed(KEY_ESCAPE) && !media_.Editing()) {
     menu_.Toggle();
+    chats_.Blur();
+    options_.apiKeyNote.clear();
     // Opening the menu ends editing, so no caret is left blinking behind it.
     if (menu_.Visible()) SetFocus(nullptr);
   }
@@ -1678,6 +1857,24 @@ void App::Update() {
       // The menu stays, so the tick can be seen to have changed.
       SetAlwaysCode(!options_.alwaysCode);
       break;
+    case MenuAction::PasteApiKey: {
+      // Whatever is on the clipboard, if it is a key. The menu stays, so the
+      // button can say which key is now set.
+      const char* clip = GetClipboardText();
+      std::string key = clip == nullptr ? std::string() : std::string(clip);
+      while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back()))) key.pop_back();
+      std::size_t lead = 0;
+      while (lead < key.size() && std::isspace(static_cast<unsigned char>(key[lead]))) ++lead;
+      key.erase(0, lead);
+      if (key.rfind("sk-ant-", 0) == 0 && key.find_first_of(" \t\r\n") == std::string::npos) {
+        settings::RememberApiKey(key);
+        options_.apiKeyTail = KeyTail(settings::ApiKey());
+        options_.apiKeyNote = options_.apiKeyTail.empty() ? "Could not keep the key" : "";
+      } else {
+        options_.apiKeyNote = "No API key on the clipboard";
+      }
+      break;
+    }
     case MenuAction::Save: {
       const std::string path = filedialog::Save("canvas.sketch");
       if (!path.empty() && !SaveCanvas(path)) {
@@ -1691,6 +1888,15 @@ void App::Update() {
         if (LoadCanvas(path)) menu_.Close();
         else TraceLog(LOG_WARNING, "CANVAS: could not load %s", path.c_str());
       }
+      break;
+    }
+    case MenuAction::AskClaude: {
+      SetFocus(nullptr);
+      const Vector2 size = ChatPanel::DefaultSize();
+      const Vector2 at = FindGap(size, WindowRects());
+      chats_.New({at.x + size.x * 0.5f, at.y + size.y * 0.5f}, viewport_.Zoom());
+      CentreOn({at.x, at.y, size.x, size.y});
+      menu_.Close();
       break;
     }
     case MenuAction::NewSlide: {
@@ -1713,10 +1919,17 @@ void App::Update() {
     case MenuAction::Insert: {
       const std::string path = filedialog::OpenMedia();
       if (!path.empty()) {
-        // Into the middle of the view, which is where you are looking.
+        // Into the nearest gap to the middle of the view. Its size is only known
+        // once it has loaded, so it is put down and then moved there.
+        const std::vector<Rectangle> taken = WindowRects();
         const Vector2 middle = viewport_.ToWorld({static_cast<float>(GetScreenWidth()) * 0.5f,
                                                   static_cast<float>(GetScreenHeight()) * 0.5f});
         if (media_.Add(path, sb::SnapToGrid(middle, viewport_.Zoom()))) {
+          const int       index = static_cast<int>(media_.Items().size()) - 1;
+          const Rectangle bounds = media_.WorldBounds(index);
+          const Vector2   at = FindGap({bounds.width, bounds.height}, taken);
+          media_.Items().back()->worldPos = at;
+          CentreOn({at.x, at.y, bounds.width, bounds.height});
           menu_.Close();
         } else {
           TraceLog(LOG_WARNING, "MEDIA: nothing here can show %s", path.c_str());
@@ -1792,6 +2005,14 @@ void App::Update() {
     consumed = spaces_.HandleInput(viewport_, fonts_);
   }
 
+  // A conversation is drawn over everything else, so it is asked first -- its
+  // own gestures, and the wheel, which scrolls it rather than resizing whatever
+  // is underneath. Taking the caret into one takes it out of any box.
+  if (canvasActive && !consumed) {
+    consumed = chats_.HandleInput(viewport_, fonts_);
+    if (chats_.Editing() && focus_ != nullptr) SetFocus(nullptr);
+  }
+
   // The wheel resizes whatever it is over. It is asked early, before the rims
   // start claiming the pointer, because a wheel event is never ambiguous: no
   // drag can be in flight while one arrives.
@@ -1839,8 +2060,8 @@ void App::Update() {
   // the very boxes these would destroy.
   // Nor while a viz is being pulled out: Ctrl is already down, so Ctrl+X is a
   // keystroke away from freeing the box the pull is pointing into.
-  const bool keysActOnSelection =
-      canvasActive && focus_ == nullptr && !selectionDrag_ && pull_.from == PullFrom::None;
+  const bool keysActOnSelection = canvasActive && focus_ == nullptr && !chats_.Editing() &&
+                                  !selectionDrag_ && pull_.from == PullFrom::None;
   if (keysActOnSelection && AnySelected() && IsKeyPressed(KEY_DELETE)) {
     DeleteSelection();
   }
@@ -1854,7 +2075,7 @@ void App::Update() {
   // presenting is navigating, so the keys that turn a page move the camera.
   // Only while nothing is being typed into, since there the arrows are the
   // caret's, and only from a slide: elsewhere they mean nothing yet.
-  if (canvasActive && focus_ == nullptr && !ctrl) {
+  if (canvasActive && focus_ == nullptr && !chats_.Editing() && !ctrl) {
     if (IsKeyPressed(KEY_RIGHT)) slides_.Step(+1, &viewport_, options_.slideAspect);
     if (IsKeyPressed(KEY_LEFT)) slides_.Step(-1, &viewport_, options_.slideAspect);
   }
@@ -1862,7 +2083,8 @@ void App::Update() {
   // Home frames what you are looking at. Not a character, so it cannot start a
   // box the way a letter typed onto the canvas does; and not while a caret is
   // anywhere, where Home is the start of the line.
-  if (canvasActive && focus_ == nullptr && !media_.Editing() && IsKeyPressed(KEY_HOME)) {
+  if (canvasActive && focus_ == nullptr && !media_.Editing() && !chats_.Editing() &&
+      IsKeyPressed(KEY_HOME)) {
     FrameOnScreen();
   }
 
@@ -1875,6 +2097,11 @@ void App::Update() {
     ThrowAwaySlide(gone.bounds, gone.shift);
   }
   media_.Advance(GetFrameTime());
+  chats_.Update();
+  ServeTools();
+  ConverseNext();
+  if (chats_.TakeChanged()) ScheduleAutosave();
+  if (std::string canvas; chats_.TakeCanvasRewind(&canvas)) RestoreCanvas(canvas);
   // What each function being read is fed with, before the boxes are polled --
   // polling is where a box puts its spread through its function.
   FeedFunctions();
@@ -1910,7 +2137,11 @@ void App::Update() {
   //
   // The one thing that does take the keys is a video's trim time being typed
   // into, because that is a caret too, and there cannot be two.
-  if (canvasActive && !lassoActive_ && !selectionDrag_ && !media_.Editing()) HandleTyping();
+  if (canvasActive && chats_.Editing()) {
+    chats_.HandleKeys(fonts_);
+  } else if (canvasActive && !lassoActive_ && !selectionDrag_ && !media_.Editing()) {
+    HandleTyping();
+  }
 
   // A window being hovered or dragged lights up the variable it stands for,
   // wherever that variable is written. Recomputed every frame: it is a property
@@ -1925,7 +2156,8 @@ void App::Update() {
   bool held = lassoActive_ || selectionDrag_ || compose_ != Compose::None ||
               pull_.from != PullFrom::None || fingerCarry_ ||
               textDrag_ != TextDrag::None || dragBlock_ != nullptr ||
-              (media_.Busy() && !media_.Editing()) || axes_.Dragging() || plots_.Dragging() ||
+              (media_.Busy() && !media_.Editing()) || chats_.Busy() || axes_.Dragging() ||
+              plots_.Dragging() ||
               shaders_.Dragging() || colours_.Dragging() || surfaces_.Dragging() ||
               surfaces_.Orbiting() ||
               volumes_.Dragging() || volumes_.Orbiting() || spaces_.Dragging() ||
@@ -1938,6 +2170,7 @@ void App::Update() {
   // under the scrim is the canvas answering a question nobody asked.
   held = held || menu_.Visible();
   hover::SetHeld(held);
+  hover::SetCovered(!held && canvasActive && chats_.ItemAt(GetMousePosition(), viewport_) >= 0);
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     block->SetPlayPaused(focus_ != nullptr);
   }
@@ -2072,8 +2305,11 @@ void App::Update() {
                         plots_.Carrying() || shaders_.Carrying() || colours_.Carrying() ||
                         surfaces_.Carrying() ||
                         volumes_.Carrying() || spaces_.Carrying() ||
-                        media_.Carrying();
-  const bool scaling = GetMouseWheelMoveV().y != 0.0f || touch::Count() >= 2;
+                        media_.Carrying() || chats_.Carrying();
+  // The wheel over a conversation scrolls it, which places nothing.
+  const bool scrolling = chats_.ItemAt(GetMousePosition(), viewport_) >= 0;
+  const bool scaling =
+      (GetMouseWheelMoveV().y != 0.0f && !scrolling) || touch::Count() >= 2;
   if (canvasActive && (carrying || scaling)) gridUntil_ = GetTime() + kGridLinger;
   const float wanted = GetTime() < gridUntil_ ? 1.0f : 0.0f;
   const float rate = std::max(GetFrameTime(), 0.0f) / kGridFadeSeconds;
@@ -2096,13 +2332,50 @@ void App::Update() {
 }
 
 void App::Draw() {
-  ClearBackground(kCanvasBg);
   // Everything the rest of this function asks for is off limits to the atlas
   // evictor until the next frame, so nothing can drop a texture another window
   // is still drawing from.
   fonts_.BeginFrame();
 
-  DrawDotGrid(viewport_, gridShow_);
+  // A look Claude asked for is drawn first, unseen, and read back; the frame
+  // proper is then drawn over it.
+  TakeLooks();
+  DrawCanvas(/*look=*/false);
+
+  // Selected windows wear their rim whether or not they are being pointed at.
+  axes_.DrawSelectionRims(viewport_, fonts_);
+  plots_.DrawSelectionRims(viewport_, fonts_);
+  shaders_.DrawSelectionRims(viewport_, fonts_);
+  colours_.DrawSelectionRims(viewport_, fonts_);
+  colours_.DrawChrome(viewport_, fonts_);
+  surfaces_.DrawSelectionRims(viewport_, fonts_);
+  volumes_.DrawSelectionRims(viewport_, fonts_);
+  spaces_.DrawSelectionRims(viewport_, fonts_);
+  media_.DrawSelectionRims(viewport_);
+  chats_.DrawSelectionRims(viewport_);
+
+  // The name of the window being pointed at, over every window so none covers it.
+  windowname::Draw(fonts_);
+
+  if (lassoActive_) DrawLasso(lasso_);
+
+  // Carrying a window brings up the one place it can be thrown away.
+  if (dragBlockMoved_ || selectionMoved_ || axes_.Carrying() || plots_.Carrying() ||
+      shaders_.Carrying() || colours_.Carrying() || surfaces_.Carrying() ||
+      volumes_.Carrying() ||
+      spaces_.Carrying() || media_.Carrying() || chats_.Carrying()) {
+    DrawDropTarget(OverDropTarget(carry::Position()));
+  }
+
+  menu_.Draw(fonts_, options_);
+
+  // Over everything, the menu included: it is the pointer.
+  if (cursorHidden_) DrawGrabCursor(GetMousePosition());
+}
+
+void App::DrawCanvas(bool look) {
+  ClearBackground(kCanvasBg);
+  if (!look) DrawDotGrid(viewport_, gridShow_);
   // Under everything else: a slide is a region of the canvas, and whatever is
   // on it stands on top of it.
   slides_.Draw(viewport_, fonts_, options_.slideAspect);
@@ -2119,11 +2392,21 @@ void App::Draw() {
   spaces_.Draw(viewport_, fonts_, vizes_);
   media_.Draw(viewport_, fonts_);
 
+  // A look is of the canvas itself: no controls, no conversations, and no wires
+  // drawn from where the pointer was on the screen everyone else is seeing.
+  if (look) {
+    for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+      block->DrawOverlay(viewport_, fonts_);
+    }
+    return;
+  }
+
   // Every box's controls, after every box: a strip half under the card next to
   // it is a strip you cannot press.
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     block->DrawChrome(viewport_, fonts_);
   }
+  chats_.Draw(viewport_, fonts_);
 
   // Two values held together, and the choice of what to make of them.
   DrawCompose();
@@ -2141,35 +2424,6 @@ void App::Draw() {
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     block->DrawOverlay(viewport_, fonts_);
   }
-
-  // Selected windows wear their rim whether or not they are being pointed at.
-  axes_.DrawSelectionRims(viewport_, fonts_);
-  plots_.DrawSelectionRims(viewport_, fonts_);
-  shaders_.DrawSelectionRims(viewport_, fonts_);
-  colours_.DrawSelectionRims(viewport_, fonts_);
-  colours_.DrawChrome(viewport_, fonts_);
-  surfaces_.DrawSelectionRims(viewport_, fonts_);
-  volumes_.DrawSelectionRims(viewport_, fonts_);
-  spaces_.DrawSelectionRims(viewport_, fonts_);
-  media_.DrawSelectionRims(viewport_);
-
-  // The name of the window being pointed at, over every window so none covers it.
-  windowname::Draw(fonts_);
-
-  if (lassoActive_) DrawLasso(lasso_);
-
-  // Carrying a window brings up the one place it can be thrown away.
-  if (dragBlockMoved_ || selectionMoved_ || axes_.Carrying() || plots_.Carrying() ||
-      shaders_.Carrying() || colours_.Carrying() || surfaces_.Carrying() ||
-      volumes_.Carrying() ||
-      spaces_.Carrying() || media_.Carrying()) {
-    DrawDropTarget(OverDropTarget(carry::Position()));
-  }
-
-  menu_.Draw(fonts_, options_);
-
-  // Over everything, the menu included: it is the pointer.
-  if (cursorHidden_) DrawGrabCursor(GetMousePosition());
 }
 
 // ---------------------------------------------------------------- persistence
@@ -2263,6 +2517,7 @@ bool App::SaveCanvas(const std::string& path) {
   const bool        wasUntitled = untitled_;
   if (!WriteCanvasFile(path)) return false;
   currentPath_ = path;
+  SetCanvasFolder(std::filesystem::path(path).parent_path().string());
   untitled_ = false;
   autosaveDue_ = 0.0;
   recent::Remember(path);
@@ -2275,7 +2530,8 @@ bool App::SaveCanvas(const std::string& path) {
   return true;
 }
 
-void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView) {
+void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView,
+                      bool withChats) {
   file << "sketchbook " << kFileVersion << "\n";
   if (withView) {
     const Vector2 centre = viewport_.Centre();
@@ -2391,6 +2647,20 @@ void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView
       file << "curve " << indexOf(ref.block) << " " << ref.name << "\n";
     }
   }
+
+  // Conversations, one a line, in the file but not in an undo step: a long one
+  // would make every step large, and an undo is about the canvas, not about
+  // what was said.
+  if (withView) {
+    for (const json::Value& chat : chats_.Save()) file << "chat " << json::Write(chat) << "\n";
+  } else if (withChats) {
+    // Which conversations are open, and where: what an undo step brings back.
+    file << "chats\n";
+    for (const ChatPanel::Ref& ref : chats_.Refs()) {
+      file << "chatref " << ref.id << " " << ref.worldPos.x << " " << ref.worldPos.y << " "
+           << ref.width << " " << ref.height << " " << ref.madeBelow << "\n";
+    }
+  }
 }
 
 bool App::LoadCanvas(const std::string& path) {
@@ -2400,6 +2670,7 @@ bool App::LoadCanvas(const std::string& path) {
   FlushAutosave();
   if (!ReadCanvas(file, path, /*restoring=*/false)) return false;
   currentPath_ = path;
+  SetCanvasFolder(std::filesystem::path(path).parent_path().string());
   untitled_ = false;
   autosaveDue_ = 0.0;
   recent::Remember(path);
@@ -2523,11 +2794,31 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   int     alwaysCode = 0;
   std::vector<Slide> slides;
 
+  std::vector<json::Value> chats;
+  bool                     haveChatRefs = false;
+  std::vector<ChatPanel::Ref> chatRefs;
   std::string raw;
   while (std::getline(file, raw)) {
     if (!raw.empty() && raw.back() == '\r') raw.pop_back();
     if (raw.empty()) continue;
 
+    if (raw == "chats") {
+      haveChatRefs = true;
+      continue;
+    }
+    if (raw.rfind("chatref ", 0) == 0) {
+      std::istringstream ref(raw.substr(8));
+      ChatPanel::Ref one;
+      ref >> one.id >> one.worldPos.x >> one.worldPos.y >> one.width >> one.height >> one.madeBelow;
+      chatRefs.push_back(one);
+      continue;
+    }
+    // A conversation is one JSON object taking the rest of the line.
+    if (raw.rfind("chat ", 0) == 0) {
+      json::Value chat;
+      if (json::Parse(std::string_view(raw).substr(5), &chat)) chats.push_back(std::move(chat));
+      continue;
+    }
     // Source lines are taken verbatim, so they must be tested before anything
     // is tokenised.
     if (inBlock && raw.rfind("> ", 0) == 0) {
@@ -2714,6 +3005,17 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   // Every picture's texture and every video's decoder, by hand and while the
   // graphics context is still here.
   media_.Clear();
+  // Conversations are not in the file yet, so an undo step leaves them be; a
+  // different canvas does not, and its replies in flight are stopped.
+  if (!restoring) {
+    chats_.Clear();
+    toolJobs_.clear();
+    chats_.Adopt(chats);
+  } else if (haveChatRefs) {
+    // An undo step: the conversations it had, as they were placed. One thrown
+    // away comes back with all it said.
+    chats_.Restore(chatRefs);
+  }
   // Restoring an undo step keeps every box whose text is exactly what the step
   // says, so only the boxes that were actually edited are built again. Whatever
   // is left over afterwards is thrown away, by hand.
@@ -3082,6 +3384,21 @@ void App::TrackUndo(bool held) {
   // axis framed itself. That is where things are now, not a step.
   std::string current = Snapshot();
   if (current != undoBase_) undoBase_ = std::move(current);
+}
+
+void App::RestoreCanvas(const std::string& snapshot) {
+  // An undo step like any other, so the rewind itself can be undone.
+  CommitUndo();
+  std::string current = Snapshot();
+  std::istringstream in(snapshot);
+  if (!ReadCanvas(in, currentPath_, /*restoring=*/true)) return;
+  undo_.push_back(std::move(current));
+  constexpr std::size_t kUndoSteps = 200;
+  if (undo_.size() > kUndoSteps) undo_.erase(undo_.begin());
+  redo_.clear();
+  undoBase_ = Snapshot();
+  undoPending_ = false;
+  ScheduleAutosave();
 }
 
 void App::StepUndo(bool redo) {

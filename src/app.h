@@ -9,6 +9,8 @@
 #include "blocks.h"
 #include "fontstore.h"
 #include "types/RealFunctionViz.h"
+#include "chat.h"
+#include "conversation.h"
 #include "media.h"
 #include "selection.h"
 #include "slides.h"
@@ -22,6 +24,9 @@
 #include "viz.h"
 
 namespace sb {
+
+// The size of type a new box opens at, in world units.
+inline constexpr float kDefaultBlockEm = 26.0f;
 
 class App {
  public:
@@ -38,6 +43,19 @@ class App {
   void SetFullscreen(bool on);
   // Every code box on this canvas reads as code, never as mathematics.
   void SetAlwaysCode(bool on);
+  // Dev: a conversation in the middle of the view, saying this. ` || ` splits
+  // it into messages, each said once the reply before it is done; a message
+  // `box:text` makes a box instead, and `point:x,y` puts the pointer there as
+  // far as the conversation is concerned.
+  void Converse(const std::string& text, const std::string& effort);
+  // Dev: actions on the first conversation, comma-separated and done in order:
+  // those ChatPanel::Dev knows, `discard` (thrown away, as an undo step) and
+  // `undo`.
+  void DevChat(const std::string& actions);
+  // Dev: the canvas as Claude is shown it.
+  std::string Describe() { return DescribeCanvas(); }
+  // Dev: writes the canvas to a file, as Ctrl+S to a new name would.
+  bool SaveTo(const std::string& path) { return SaveCanvas(path); }
 
   void Update();
   void Draw();
@@ -58,6 +76,72 @@ class App {
   // pointer, so nothing behind it pans or takes focus.
   bool       HandleBlockDrag();
   CodeBlock* NewBlockAtCentre();
+
+  // --- where a new window goes ---------------------------------------------
+  //
+  // **A new window goes in the nearest gap to the middle of the view**, centred
+  // there if it can be: every window already on the canvas stays where it is,
+  // and the new one is put where it overlaps none of them, with room round it.
+  // Then, if that is not the middle, the camera glides until it is.
+  //
+  // Every window on the canvas, in world units.
+  std::vector<Rectangle> WindowRects();
+  // The top-left of the nearest place to the middle of the view where a window
+  // of this size fits among `taken`.
+  Vector2 FindGap(Vector2 size, const std::vector<Rectangle>& taken);
+  // Glides the camera to centre a rectangle of the canvas, unless it already is.
+  void    CentreOn(Rectangle world);
+
+  // --- Claude's tools on the canvas (app_tools.cpp) ------------------------
+  //
+  // A conversation's reply hands out the tools it wants; they are carried out
+  // here, on the thread that owns the canvas. Some answer at once; making or
+  // editing a box waits until it has compiled and its values are known, and a
+  // look waits for the next frame to be drawn.
+  struct ToolJob {
+    ChatWindow*      window = nullptr;
+    claude::ToolCall call;
+    CodeBlock*       waitFor = nullptr;   // answered once this box has settled
+    int              frames = 0;
+    std::string      said;                // what to say before the box's report
+    bool             look = false;
+    Rectangle        lookWorld{};         // what a look frames
+    std::string      lookKind;
+  };
+  std::vector<ToolJob> toolJobs_;
+  std::vector<std::string> converseQueue_;   // dev: messages still to say
+  std::string              converseEffort_;
+  bool                     devPointed_ = false;
+  Vector2                  devPointer_{};
+  void                     ConverseNext();
+  // Once a frame: hands out new calls, and answers the ones that have settled.
+  void        ServeTools();
+  // Carries out a call; false when it has to wait.
+  bool        StartTool(ToolJob& job);
+  // Whether a box a job is waiting on has compiled and been read.
+  bool        Settled(const ToolJob& job) const;
+  // At the start of drawing: a look waiting on this frame is drawn first,
+  // framed on its box, and read back as a picture.
+  void        TakeLooks();
+  std::string DescribeCanvas();
+  // One box as Claude is shown it. Nothing in it that changes without the box
+  // changing -- where the caret is goes in the status instead -- so an unchanged
+  // box reads the same and need not be sent again.
+  std::string DescribeBox(CodeBlock& block);
+  // The canvas as a message carries it: every box, and where Hamish is.
+  claude::CanvasView ViewCanvas();
+  // The display window under a point on screen, in world units, and what kind.
+  bool DwUnder(Vector2 point, Rectangle* world, std::string* kind);
+  CodeBlock*  BoxNamed(const std::string& id);
+  // A change Claude made is a change somebody made: its own undo step.
+  void        BeforeToolChange();
+  void        AfterToolChange();
+  // Everything on the canvas, without the chrome over it. A look draws this a
+  // second time, unseen, framed on what it is looking at.
+  void        DrawCanvas(bool look);
+  // Puts the canvas back as a snapshot says, as an undo step: what a rewind
+  // that takes the canvas back does.
+  void        RestoreCanvas(const std::string& snapshot);
 
   // Boxes live on the grid and never overlap. Every placement goes through
   // PlaceBlock, which snaps the top-left to the nearest dot and then steps the
@@ -160,7 +244,12 @@ class App {
   // the camera, reuses every box whose text has not changed -- so undoing a move
   // does not rebuild every shader on the canvas -- and leaves positions exactly
   // as written rather than snapping them again at today's zoom.
-  void WriteCanvas(std::ostream& out, const std::string& path, bool withView);
+  // `withView` is the file: the camera, and every open conversation in full.
+  // Otherwise an undo step: no camera, and conversations only by reference --
+  // unless `withChats` is false, which is the canvas a rewind puts back, and
+  // which leaves conversations alone entirely.
+  void WriteCanvas(std::ostream& out, const std::string& path, bool withView,
+                   bool withChats = true);
   bool ReadCanvas(std::istream& in, const std::string& path, bool restoring);
 
   // --- canvas undo ----------------------------------------------------------
@@ -224,6 +313,8 @@ class App {
   // Pictures and video. Not mathematics, so not in types/ -- but windows, and
   // so subject to every rule the others are.
   MediaPanel                              media_;
+  // Conversations with Claude. On top of every other window.
+  ChatPanel                               chats_;
   // What the boxes offer each other, and which version of each box it was
   // gathered from -- so it is gathered again only when something changed.
   mathprogram::Canvas                     canvas_;

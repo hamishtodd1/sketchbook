@@ -247,7 +247,8 @@ The readings themselves:
 
 ## 4. Writing in a box
 
-- **Typing with nothing selected starts a box** wherever you are looking.
+- **Typing with nothing selected starts a box** wherever you are looking -- in the
+  nearest clear space to the middle of the view (see *Placement*).
 - **Tab is about lines, and so is Ctrl+/.** With a highlight, Tab and Shift+Tab
   move every line it touches in and out, and Ctrl+/ comments them all (or
   uncomments them if they all are). Both keep the highlight, since they are edits
@@ -751,6 +752,13 @@ pointer is) and `drag` (what the pointer is asking the value to be). A viz of
 several pieces numbers them, up to four. A viz without `grab` cannot be pointed
 at; without `drag`, it cannot be dragged.
 
+**A piece's mesh can be a model** made in a modelling program: `void mesh2() {
+model("cupped_hands_pair.obj"); }`, the file beside the vizes sketch or beside the
+canvas. It is scaled to fit the unit sphere, like a mesh a viz lays down itself, so
+`vert` sizes it the same way. A piece a value does not want is folded away to
+nothing by its `vert`, which is how one viz shows different things for different
+values.
+
 **A function's viz is its fragments**: `frag`, and optionally `grab`, with
 `value(…)` meaning the function being drawn. It is named by what goes in and out
 -- `Viz(RToR, "Plot")`, `Viz(R2ToR, "Surface")`.
@@ -791,7 +799,10 @@ function on the canvas is drawn by a viz.
 
 **A space window is a place to look into**, with a camera of its own. What is in
 it is whatever has a viz there -- built in, that is a point, which is what a
-trivector of a 4D projective algebra is. **Cl(3,0,1) is space and Cl(2,1,1) is
+trivector of a 4D projective algebra is. **In Cl(3,0,1) a point is a pair of
+cupped hands**, mirrored when its weight (`e123`) is negative, since a point and
+its negative are the same place with opposite orientation; **a point at infinity
+is a ball** out at the edge of everything. **Cl(3,0,1) is space and Cl(2,1,1) is
 spacetime**, where the third axis is time; the two windows differ only in the
 algebra and the sky. A box gets one, and all its values share it to begin with;
 a value can be pulled out and dropped into another window of the same kind.
@@ -826,6 +837,16 @@ governs itself can only be wrong.
 in. **Boxes never overlap**: one put on another steps clear by the nearest edge,
 and a box's docked windows count as part of it. (Pictures do overlap, since a
 caption on a photograph is normal.)
+
+**A new window goes in the nearest gap to the middle of the view.** A box started
+by typing on the canvas, a conversation, a picture or video inserted from the menu:
+each is centred on the middle of the screen if that is clear, and otherwise put
+in the nearest place where it overlaps no other window and has a line's height of
+room round it. Nothing already there moves. Then, if it is not in the middle, the
+camera glides until it is -- so a new window always opens in front of you. A new
+box claims room for its first few lines (about 24 characters by 3) rather than for
+an empty card, since it grows as it is typed into. A file dropped on the window
+still lands where it was dropped: there the pointer said where.
 
 **Everything a box makes flanks its card** -- right, then left, then below each --
 alternating so a box with two windows is balanced. Its number lines and plots,
@@ -977,6 +998,104 @@ arrive by being dropped on the app (or from the menu, for a tablet).
   Its last button is fullscreen -- borderless, not exclusive and not always on top,
   and remembered between runs. A press off the menu closes it, and a press the
   menu acted on belongs to the menu.
+
+### Asking Claude
+
+A **conversation** is a window on the canvas with Claude in it. It is for the two
+things a separate chat was being used for anyway, done where the work is: asking
+about mathematics, where Claude answers partly by *making* things -- boxes, values
+to push on, new vizes -- and asking about the code on the canvas, from an error to
+noticing a named structure being used without being named.
+
+**Claude sees and changes the canvas directly.** It reads every box, its errors
+and its current values; it makes boxes, edits them, deletes them and sets knobs.
+**Each change is an undo
+step**, like anyone else's, so nothing it does needs accepting first. Its actions
+are not listed in the conversation: the canvas is where you see them.
+
+**It does only what it is asked.** A question -- "how do I...", "remind me..." --
+is answered in words, with no tools if the canvas and what it knows will do; it
+makes or changes things only when told to, and if it thinks something would help
+it says so in a sentence and stops. The answer is as long as the question needs:
+a reminder of how something is written is a few lines. (An API reminder that came
+back as a rewritten viz, a test box and a long answer, at 30 cents, is why.)
+
+**Its boxes go beside the conversation**, each under the last. **Your boxes are
+yours**: it changes one only when asked to change that box, and a box you are
+typing in is left alone. **Every message carries the canvas**, so a question about
+"this error" needs no looking up first -- **all of it the first time, and after
+that only what has changed** since Claude last saw it, with where your caret is
+and what is selected. Every copy sent stays in the conversation and is paid for
+again with every request, so an unchanged box is named, not repeated.
+
+**It sees a picture only when you ask it to look**, and only of the display window
+your pointer is on as you send the message. Pictures are the dearest thing it can
+be sent, and checking its own work by eye was the habit that ran up bills. A single message may go
+round its tools at most forty times before it stops and asks to be told to go on,
+so nothing can run up a bill unseen.
+
+**Code it writes is a box.** Code is the source of truth here, so a reply holds
+prose and mathematics, typeset by the app's own TeX, and code only inline and
+short -- a signature, a call, a line; anything longer is put on the canvas near
+the conversation, when it was asked for, and spoken of by name. **A name
+in a reply is a mention**: pointing at it lights the thing on the canvas, as a
+variable's name in a box does.
+
+**What Claude is told is a file in the repo**, `prompt/system.md`, read with every
+message: text to be read and changed like the vizes sketches, taking effect on the
+next message. It is one prompt for everything. It does only what is asked, at the
+length asked; it answers every part of what is asked; it says in a sentence when
+a named structure is being used without being named; a small thing asked for it
+does at once, since every change is an undo step; and for anything substantial it
+comes back first with a short plan and a question.
+
+**It speaks only when asked.** Nothing runs while you are working, so nothing
+costs anything while you are working.
+
+**There can be several**, each its own window and its own conversation, so a
+question about a surface can sit beside the surface. A conversation is a fixed-size
+window that scrolls; Enter sends and Shift+Enter starts a new line; while Claude is
+working there is an indicator and a stop button, and its thinking is not shown.
+**It is saved in the `.sketch`** like any window, so it moves with the canvas,
+and opening the canvas again picks the conversation up where it was. Pictures
+Claude looked at are not kept -- they are large, and it can be asked to look again.
+
+**Throwing a conversation away can be undone**, and it comes back with everything
+it said. **But what is said is not an undo step**: undo is about the canvas, and a
+message is not taken back by Ctrl+Z -- rewinding is how. And a conversation thrown
+away is not saved: close the canvas and open it again, and it is gone.
+
+**Rewinding** to one of your messages -- pointing at it offers the button -- asks
+each time whether to take the canvas back too. Either way what you said goes back
+into the input, to be said again or changed; taking the canvas back is itself an
+undo step, so it can be undone. What was spent stays spent.
+
+**The model menu is the Claude Code app's**: each model's name, a line on what it
+is for, a tick on the one in use -- and what it costs per million tokens, since
+that is what choosing decides. It opens from the model's name in the header, and
+only between replies. A model's thinking is its own and is not handed to another,
+so switching drops the earlier thinking from what is sent. **The effort slider is
+always visible**, since effort is the main control on both how deep an answer goes
+and what it costs. **The context bar** under the header is how full the context is,
+turning amber and then red as it fills, and the header says what the conversation
+has cost. Claude may search the web, and may read the built-in vizes sketches to
+make new vizes like them.
+
+**One is started from the Escape menu** ("Ask Claude"), in the middle of the view
+with the caret in it. **It is drawn over every other window**, and covers what
+is under it: while the pointer is on a conversation, nothing beneath it is being
+pointed at. **Its wheel scrolls it** rather than resizing it, since a window that
+scrolls inside is one whose wheel is its own, and **its bottom-right corner
+resizes it**, the words reflowing. While it has the caret it holds the keyboard
+as a box does: canvas undo, Delete and the slide arrows stand aside, and Escape
+takes the caret out rather than opening the menu. Your words sit in a bubble at
+the right; Claude's are set across the window. A formula still arriving is held
+back until it is whole, rather than shown raw for a moment.
+
+**It runs on your own API key**, entered from the Escape menu and kept with your
+settings -- encrypted to your Windows account, never in a canvas. That is billed
+per token, separately from a Claude subscription; the context bar's cost is there
+so that is never a surprise.
 
 ---
 

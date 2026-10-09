@@ -31,7 +31,21 @@ inline bool& HeldFlag() {
 inline void SetHeld(bool held) { HeldFlag() = held; }
 inline bool Held() { return HeldFlag(); }
 
+// **A window drawn over everything covers what is under it.** A conversation
+// sits on top of every other window, so while the pointer is on one, nothing
+// beneath it is being pointed at -- a number line half under it does not light
+// up, and a box under it does not flip to code. Set once a frame by the app.
+inline bool& CoveredFlag() {
+  static bool covered = false;
+  return covered;
+}
+inline void SetCovered(bool covered) { CoveredFlag() = covered; }
+
 // Nowhere is far enough off every edge that no rectangle can contain it.
-inline Vector2 Pointer() { return Held() ? Vector2{-1.0e9f, -1.0e9f} : GetMousePosition(); }
+inline Vector2 Pointer() {
+  return (Held() || CoveredFlag()) ? Vector2{-1.0e9f, -1.0e9f} : GetMousePosition();
+}
+// What the covering window itself sees: the pointer, unless a gesture is held.
+inline Vector2 TopPointer() { return Held() ? Vector2{-1.0e9f, -1.0e9f} : GetMousePosition(); }
 
 }  // namespace sb::hover

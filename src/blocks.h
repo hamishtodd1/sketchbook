@@ -32,6 +32,10 @@ class CodeBlock;
 // `from` is the visualization of the value, not the pointer: the handle on a
 // number line, the picture on a plot. The one exception is a shader's preview,
 // where the pointer really is the value it is reporting.
+// A card: the rounded, shadowed panel a box is drawn on, and anything else on
+// the canvas that wants to look like one.
+void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float borderWidth);
+
 struct ActiveValue {
   CodeBlock*  block = nullptr;
   std::string name;
@@ -79,6 +83,11 @@ class CodeBlock {
  public:
   CodeBlock(Vector2 worldTopLeft, float worldEm, std::vector<std::string> lines);
   ~CodeBlock();
+
+  // Which box this is for as long as the app is open: how a conversation with
+  // Claude refers to it ("b7"). Not saved, and a box rebuilt by an undo step is
+  // a new box with a new number.
+  int Id() const { return id_; }
 
   // Everything the geometry is a function of.
   //
@@ -231,6 +240,7 @@ class CodeBlock {
   void        ExtendSelection(Vector2 screenPoint, const Viewport& viewport, FontStore& fonts);
   bool        HasSelection() const;
   void        SelectNone() { anchorLine_ = caretLine_; anchorCol_ = caretCol_; }
+  int         CaretLine() const { return caretLine_; }
   // The whole box, which is what Ctrl+A means while there is a caret in one.
   void        SelectAll();
   bool        PointInSelection(Vector2 screenPoint, const Viewport& viewport,
@@ -659,6 +669,10 @@ class CodeBlock {
 
   void   PushUndo(EditKind kind);
   void   Undo();
+  // Forward again, past an undo: Ctrl+Y, or Ctrl+Shift+Z.
+  void   Redo();
+  // Puts the text and caret back as a step had them.
+  void   Restore(const Snapshot& snapshot);
 
   // `indent` carries the line's leading whitespace onto the new line, which is
   // what typing Enter wants and what pasting must not do: text arriving from
@@ -715,6 +729,7 @@ class CodeBlock {
   std::vector<std::string> lines_;
 
   bool   focused_ = false;
+  int    id_ = 0;
   // How the words of a text box are set. Ignored by a code box.
   bool    bold_ = false;
   bool    italic_ = false;
@@ -763,6 +778,10 @@ class CodeBlock {
   std::vector<ActiveValue> highlights_;
 
   std::vector<Snapshot> undo_;
+  // What an undo went back past, for a redo to bring forward. Cleared by any
+  // new edit, since a redo after one would be going forward into a different
+  // text.
+  std::vector<Snapshot> redo_;
   EditKind              lastEdit_ = EditKind::None;
   double                lastEditTime_ = -1.0;
 

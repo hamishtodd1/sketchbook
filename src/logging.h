@@ -10,7 +10,7 @@
 // at all (`CompileShaderHalf`). Lowering the level would take the diagnostics
 // with the noise.
 //
-// What survives is a whitelist -- this app's own seven prefixes -- rather than a
+// What survives is a whitelist -- this app's own eight prefixes -- rather than a
 // list of things to hide. raylib has dozens of subsystems and they all talk;
 // this app has a handful and each only speaks when something has gone wrong. A
 // new prefix has to be added here to be heard, which is a small price for a log
@@ -33,7 +33,8 @@ inline bool Ours(const char* text) {
   // `GL:` is deliberately absent: that prefix is raylib's, and this app's own
   // entry-point notices say `GLEXT:` so the two can be told apart.
   static const char* const kPrefixes[] = {"CANVAS:", "MEDIA:", "BLOCKS:",
-                                          "GLEXT:", "SPACE:", "SHADER BOX:", "VIZ:"};
+                                          "GLEXT:", "SPACE:", "SHADER BOX:", "VIZ:",
+                                          "CLAUDE:"};
   for (const char* prefix : kPrefixes) {
     if (std::strncmp(text, prefix, std::strlen(prefix)) == 0) return true;
   }
@@ -50,6 +51,9 @@ inline void Filtered(int level, const char* text, va_list args) {
   std::fprintf(stderr, "%s: ", label);
   std::vfprintf(stderr, text, args);
   std::fputc('\n', stderr);
+  // Flushed every time: a line lost to a crash is the line that would have said
+  // what crashed, and so little is said that it costs nothing.
+  std::fflush(stderr);
 }
 
 inline void Install(bool verbose) {

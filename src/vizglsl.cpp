@@ -1,6 +1,7 @@
 #include "vizglsl.h"
 
 #include <algorithm>
+#include <regex>
 #include <cctype>
 #include <map>
 #include <string_view>
@@ -592,12 +593,36 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
     }
   }
 
+  // **A mesh can be a model** read from a file: a `meshN` whose whole body is
+  // `model("file.obj");`. Its lines never reach a compiler -- GLSL has no
+  // strings, and neither does the operator rewrite -- and the geometry is read
+  // from the file when the viz is built.
+  std::vector<bool> modelLine(lines.size(), false);
+  for (const auto& [span, stage] : standard) {
+    Standard found;
+    std::string bad;
+    if (!StandardName(span.name, &found, &bad) || found.base != "mesh") continue;
+    std::string text;
+    for (int i = span.first; i <= span.last && i < static_cast<int>(lines.size()); ++i) {
+      text += lines[static_cast<std::size_t>(i)] + "\n";
+    }
+    static const std::regex kModel(
+        R"re(void\s+\w+\s*\(\s*\)\s*\{\s*model\s*\(\s*"([^"]+)"\s*\)\s*;\s*\})re");
+    std::smatch match;
+    if (!std::regex_search(text, match, kModel)) continue;
+    out.model[found.piece] = match[1].str();
+    for (int i = span.first; i <= span.last && i < static_cast<int>(lines.size()); ++i) {
+      modelLine[static_cast<std::size_t>(i)] = true;
+    }
+  }
+
   // The window's own lines, operators rewritten. The sigil and the algebra line
   // are statements about the box and leave blanks behind.
   std::string joined;
-  for (const std::string& line : lines) {
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    const std::string& line = lines[i];
     const bool sigil = mathline::Parse(line).kind == mathline::Kind::Viz ||
-                       clifford::ParseAlgebra(line, nullptr);
+                       clifford::ParseAlgebra(line, nullptr) || modelLine[i];
     joined += (sigil ? std::string() : line) + "\n";
   }
   std::string rewritten;
@@ -798,8 +823,10 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
       "  int i = int(gl_WorkGroupID.x);\n"
       "  if (sbMode == 0) {\n";
   for (int k = 0; k < out.pieces; ++k) {
-    computeMain += "    " + std::string(k == 0 ? "if" : "else if") + " (sbPiece == " +
-                   std::to_string(k) + ") " + numbered("mesh", k) + "();\n";
+    // A model's piece is filled from its file, so there is nothing to run.
+    if (!out.model[k].empty()) continue;
+    computeMain += "    if (sbPiece == " + std::to_string(k) + ") " + numbered("mesh", k) +
+                   "();\n";
   }
   computeMain +=
       "    return;\n"

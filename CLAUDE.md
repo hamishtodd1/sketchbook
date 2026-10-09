@@ -24,7 +24,8 @@ cmake --build --preset mingw
 
 Building while the app is open works (the running exe is moved aside). Dev
 flags: `--screenshot <file.png> --frames <n> --width <w> --height <h>`,
-`--open <file>`, `--verbose`, `--assemble <file>`. How to test on this machine
+`--open <file>`, `--verbose`, `--assemble <file>`, `--describe`, `--converse "..."`.
+How to test on this machine
 without disturbing Hamish's own session is in `TECHNICAL.md`, *Building and
 testing* -- read it before launching anything.
 
@@ -45,6 +46,9 @@ testing* -- read it before launching anything.
   a fact stated in two places drifts.
 - **If a request contradicts `DESIGN.md`, say so before implementing it.** A
   contradiction left standing is how the vizes drifted (`DESIGN.md` §9).
+- **`prompt/system.md` tells Claude-in-the-app how the language works.** When the
+  language or the windows change, change it too, or the Claude in the app is told
+  something false.
 
 ## Hard rules
 

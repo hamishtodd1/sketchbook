@@ -8,6 +8,7 @@
 #include "blocks.h"
 #include "glext.h"
 #include "logging.h"
+#include "objfile.h"
 #include "rlgl.h"
 
 #ifndef SKETCHBOOK_VIZES_DIR
@@ -22,6 +23,22 @@ namespace {
 // vertex array bound even when it reads nothing from one, and this is that
 // nothing: the geometry arrives through a storage buffer instead.
 unsigned int g_emptyVao = 0;
+
+std::string g_canvasFolder;
+
+// A model named by a viz: beside the built-in vizes, or beside the canvas.
+std::string FindModel(const std::string& name) {
+  const std::filesystem::path given(name);
+  std::error_code ec;
+  if (given.is_absolute() && std::filesystem::exists(given, ec)) return name;
+  for (const std::filesystem::path& folder :
+       {std::filesystem::path(SKETCHBOOK_VIZES_DIR), std::filesystem::path(g_canvasFolder)}) {
+    if (folder.empty()) continue;
+    const std::filesystem::path there = folder / given;
+    if (std::filesystem::exists(there, ec)) return there.string();
+  }
+  return name;
+}
 
 void SetInt(int at, int value) {
   if (at >= 0) rlSetUniform(at, &value, RL_SHADER_UNIFORM_INT, 1);
@@ -39,6 +56,8 @@ void SetVec3(int at, Vector3 value) {
 }
 
 }  // namespace
+
+void SetCanvasFolder(const std::string& folder) { g_canvasFolder = folder; }
 
 // ------------------------------------------------------------------- VizGpu
 
@@ -117,6 +136,28 @@ bool VizGpu::Build(const vizglsl::Sources& sources, std::string* log) {
                                  vizglsl::kVertexFloats * sizeof(float));
   rlEnableShader(compute_);
   for (int k = 0; k < pieces_; ++k) {
+    // A model is read from its file into a buffer the size of it, in the same
+    // layout `mesh` writes: the count, then eight numbers a corner.
+    if (!sources.model[k].empty()) {
+      std::vector<float> corners;
+      std::string        why;
+      if (!obj::Load(FindModel(sources.model[k]), &corners, &why)) {
+        rlDisableShader();
+        Release();
+        *log = "could not read the model: " + why;
+        return false;
+      }
+      const unsigned int count = static_cast<unsigned int>(corners.size() / vizglsl::kVertexFloats);
+      const unsigned int size =
+          static_cast<unsigned int>(sizeof(unsigned int) + corners.size() * sizeof(float));
+      mesh_[k] = rlLoadShaderBuffer(size, nullptr, RL_DYNAMIC_COPY);
+      rlUpdateShaderBuffer(mesh_[k], &count, sizeof(count), 0);
+      rlUpdateShaderBuffer(mesh_[k], corners.data(),
+                           static_cast<unsigned int>(corners.size() * sizeof(float)),
+                           sizeof(unsigned int));
+      meshCount_[k] = static_cast<int>(count - count % 3);
+      continue;
+    }
     mesh_[k] = rlLoadShaderBuffer(bytes, nullptr, RL_DYNAMIC_COPY);
     const unsigned int zero = 0;
     rlUpdateShaderBuffer(mesh_[k], &zero, sizeof(zero), 0);

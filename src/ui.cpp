@@ -33,7 +33,9 @@ struct MenuLayout {
   Rectangle load;
   Rectangle insert;
   Rectangle slide;
+  Rectangle ask;
   Rectangle alwaysCode;
+  Rectangle apiKey;
   Rectangle fullscreen;
 };
 
@@ -91,10 +93,17 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   // Slides come from here, and only from here.
   m.slide = {inset, y, inner, kButtonHeight};
   y += kButtonHeight + 8.0f;
+  // A conversation with Claude, in the middle of the view.
+  m.ask = {inset, y, inner, kButtonHeight};
+  y += kButtonHeight + 8.0f;
   // How boxes read. A tickbox rather than a button, since it is a state that
   // stays put while the menu is up, and the tick is what says which it is in.
   m.alwaysCode = {inset, y, inner, kRowHeight};
   y += kRowHeight + 8.0f;
+  // The Claude API key, pasted rather than typed: it is copied from the
+  // Console, and a key never has to be shown on screen to be given.
+  m.apiKey = {inset, y, inner, kButtonHeight};
+  y += kButtonHeight + 8.0f;
   // The whole screen, title bar and all. It is a thing done to the window
   // rather than to the canvas, so it comes last.
   m.fullscreen = {inset, y, inner, kButtonHeight};
@@ -120,7 +129,9 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   place(&m.load);
   place(&m.insert);
   place(&m.slide);
+  place(&m.ask);
   place(&m.alwaysCode);
+  place(&m.apiKey);
   place(&m.fullscreen);
   m.recentLabelTop += at.y;
   return m;
@@ -245,7 +256,9 @@ MenuAction OptionsMenu::Update(Options* options) {
   if (CheckCollisionPointRec(mouse, m.load)) return MenuAction::Load;
   if (CheckCollisionPointRec(mouse, m.insert)) return MenuAction::Insert;
   if (CheckCollisionPointRec(mouse, m.slide)) return MenuAction::NewSlide;
+  if (CheckCollisionPointRec(mouse, m.ask)) return MenuAction::AskClaude;
   if (CheckCollisionPointRec(mouse, m.alwaysCode)) return MenuAction::AlwaysCode;
+  if (CheckCollisionPointRec(mouse, m.apiKey)) return MenuAction::PasteApiKey;
   if (CheckCollisionPointRec(mouse, m.fullscreen)) return MenuAction::Fullscreen;
   return MenuAction::None;
 }
@@ -332,8 +345,15 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
   DrawButton(fonts, m.insert, "Insert picture or video",
              CheckCollisionPointRec(mouse, m.insert));
   DrawButton(fonts, m.slide, "New slide", CheckCollisionPointRec(mouse, m.slide));
+  DrawButton(fonts, m.ask, "Ask Claude", CheckCollisionPointRec(mouse, m.ask));
   DrawTickbox(fonts, m.alwaysCode, "Always show code", options.alwaysCode,
               CheckCollisionPointRec(mouse, m.alwaysCode));
+  // Says what pressing it does, and which key is set if one is.
+  const std::string keyLabel =
+      !options.apiKeyNote.empty() ? options.apiKeyNote
+      : options.apiKeyTail.empty() ? std::string("Paste Claude API key")
+                                   : "API key ..." + options.apiKeyTail + " (paste to replace)";
+  DrawButton(fonts, m.apiKey, keyLabel.c_str(), CheckCollisionPointRec(mouse, m.apiKey));
   // Says what pressing it would give you, like every other toggle here.
   DrawButton(fonts, m.fullscreen,
              options.fullscreen ? "Leave fullscreen" : "Fullscreen",

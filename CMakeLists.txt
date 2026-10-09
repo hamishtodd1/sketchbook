@@ -68,6 +68,16 @@ add_executable(sketchbook
   src/busy_win32.cpp
   src/recent.cpp
   src/settings.cpp
+  src/secret_win32.cpp
+  src/json.cpp
+  src/claude.cpp
+  src/claude_win32.cpp
+  src/conversation.cpp
+  src/chat.cpp
+  src/prompt.cpp
+  src/app_tools.cpp
+  src/crash_win32.cpp
+  src/objfile.cpp
   src/ui.cpp
   src/viewport.cpp
   src/viz.cpp
@@ -83,6 +93,8 @@ target_link_libraries(sketchbook PRIVATE raylib Threads::Threads)
 if(WIN32)
   # GetOpenFileName/GetSaveFileName for the canvas load/save dialogs.
   target_link_libraries(sketchbook PRIVATE comdlg32)
+  # WinHTTP to talk to the Claude API, and DPAPI (crypt32) to keep its key.
+  target_link_libraries(sketchbook PRIVATE winhttp crypt32)
 endif()
 
 # Assets are found next to the executable first, then at the source tree path
@@ -90,7 +102,9 @@ endif()
 target_compile_definitions(sketchbook PRIVATE
   SKETCHBOOK_SOURCE_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
   # The built-in vizes are sketches, and they live in the repo.
-  SKETCHBOOK_VIZES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/vizes")
+  SKETCHBOOK_VIZES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/vizes"
+  # And what Claude is told, which is text in the repo too.
+  SKETCHBOOK_PROMPT_FILE="${CMAKE_CURRENT_SOURCE_DIR}/prompt/system.md")
 
 if(MSVC)
   target_compile_options(sketchbook PRIVATE /W4 /permissive-)

@@ -1,5 +1,7 @@
 #include "settings.h"
 
+#include "secret.h"
+
 #include <cstdlib>
 #include <fstream>
 #include <map>
@@ -64,6 +66,20 @@ bool Fullscreen() {
 void RememberFullscreen(bool on) {
   Store store = Read();
   store["fullscreen"] = on ? "1" : "0";
+  Write(store);
+}
+
+std::string ApiKey() {
+  const Store store = Read();
+  const auto  found = store.find("apikey");
+  return found == store.end() ? std::string() : secret::Open(found->second);
+}
+
+void RememberApiKey(const std::string& key) {
+  Store store = Read();
+  const std::string sealed = secret::Seal(key);
+  if (sealed.empty()) store.erase("apikey");
+  else store["apikey"] = sealed;
   Write(store);
 }
 

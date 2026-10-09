@@ -96,6 +96,10 @@ struct Sources {
   // How many pieces, and which have what.
   int  pieces = 0;
   bool frag[kMaxPieces] = {};
+  // A piece whose mesh is a model read from a file rather than laid down by its
+  // own GLSL -- `void mesh2() { model("hands.obj"); }` -- names the file here.
+  // Its function is not compiled at all.
+  std::string model[kMaxPieces];
   bool position = false;
   bool grab = false;
   bool drag = false;

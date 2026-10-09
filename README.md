@@ -29,7 +29,7 @@ overwritten.
 
 The app opens the canvas you last worked on. To open a particular one, pass it
 on the command line (`sketchbook.exe path.sketch`, or `--open path.sketch`) or
-drop it on the window. `C:/sketches/demo.sketch` is a deck of six slides with one
+drop it on the window. `sketches/demo.sketch` is a deck of six slides with one
 of everything on it -- reals and their knobs, functions and their plots, a
 shader, an algebra, prose, a picture and a video. Click a slide's rim to go to
 it, then use the arrow keys.
@@ -60,7 +60,7 @@ it, then use the arrow keys.
 | `Delete` | Throw the selection away |
 | `Ctrl`+`C` / `X` / `V` | With a caret, the text; without one, the selected boxes |
 | `Ctrl`+`Z` | Undo -- the box's own with a caret, the canvas's without |
-| `Ctrl`+`Y` | Redo, for the canvas |
+| `Ctrl`+`Y` or `Ctrl`+`Shift`+`Z` | Redo -- the box's own with a caret, the canvas's without |
 | `Ctrl`+`A` | Select all of the box |
 | `Tab` / `Shift`+`Tab`, `Ctrl`+`/` | Indent, outdent, comment the highlighted lines |
 | `Home` with no caret | Frame everything on screen |

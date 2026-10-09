@@ -37,6 +37,10 @@ namespace sb {
 
 class CodeBlock;
 
+// Where a model a viz names is looked for, after the built-in vizes' folder: the
+// folder of the canvas open now, so a canvas can carry models of its own.
+void SetCanvasFolder(const std::string& folder);
+
 // What a dw tells a viz about the frame it is drawn in.
 struct VizFrame {
   Matrix  viewProj{};       // the dw's own space to clip space
