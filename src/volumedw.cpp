@@ -167,7 +167,7 @@ Rectangle VolumePanel::RectFor(std::size_t index, const Viewport& viewport,
                              FontStore& fonts) const {
   const float zoom = viewport.Zoom();
   const VolumeView& view = views_[index];
-  const float side = kFlankSide * zoom;
+  const float side = kFlankSide * zoom * view.size;
 
   if (dragging_ && dragMoved_ && index == dragView_) {
     return {dragScreenPos_.x, dragScreenPos_.y, side, side};

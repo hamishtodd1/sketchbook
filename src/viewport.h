@@ -26,7 +26,9 @@ class Viewport {
   // `deckSwipes` says a two-finger swipe would mean something here -- the
   // camera is framing a slide -- so the gesture is worth telling apart from the
   // pan and the pinch that two fingers otherwise are.
-  void Update(bool interactive, bool pointerFree, bool panFree = true,
+  // `wheelFree` is false over something whose wheel is its own -- a
+  // conversation, which scrolls; a window with a camera or a scale of its own.
+  void Update(bool interactive, bool pointerFree, bool wheelFree, bool panFree = true,
               bool deckSwipes = false);
 
   // A two-finger swipe, handed over once per gesture and then forgotten: -1 for

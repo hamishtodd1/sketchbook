@@ -330,7 +330,7 @@ Rectangle ColorPanel::RectFor(std::size_t index, const Viewport& viewport,
                               FontStore& fonts) const {
   const float      zoom = viewport.Zoom();
   const ColorView& view = views_[index];
-  const float      side = kFlankSide * zoom;
+  const float      side = kFlankSide * zoom * view.size;
   if (drag_ == Drag::Move && dragMoved_ && index == dragView_) {
     return {dragScreenPos_.x, dragScreenPos_.y, side, side};
   }
@@ -805,6 +805,7 @@ void ColorPanel::Draw(const Viewport& viewport, FontStore& fonts, VizStore& vize
   const Vector2 pointer = hover::Pointer();
   std::vector<ActiveValue> active;
   ActiveVariables(viewport, fonts, &active);
+  active.insert(active.end(), lit_.begin(), lit_.end());
   // What a window that has gone was holding on the GPU goes with it.
   for (auto it = panes_.begin(); it != panes_.end();) {
     const bool present = std::any_of(views_.begin(), views_.end(),

@@ -1,22 +1,11 @@
-// Resizing a window with the wheel.
+// Snapping a window's size to its neighbours'.
 //
-// The gesture is the same for every kind of window: put the pointer on one and
-// scroll, and it grows or shrinks **uniformly** -- one number, applied to both
-// dimensions, so nothing is ever stretched out of shape. For a box of text or
-// code that number is the size of the type; for a picture it is how big the
-// picture is. Two fingers pinching do the same thing, since a trackpad pinch
-// arrives as a wheel.
-//
-// Two rules make it feel like a handle rather than a slider:
-//
-// **The nearest corner stays where it is.** Whichever corner you are pointing
-// at is the one that does not move, so the window grows away from your hand
-// instead of out from under it.
-//
-// **It snaps to its neighbours.** Two pictures side by side should be able to
-// be exactly the same height, and a caption should be able to be exactly as
-// wide as what it is under. Nothing else on this canvas can express "the same
-// size as that one", so the resize gesture has to.
+// A window is resized by its grip (grip.h), uniformly -- one number applied to
+// both dimensions, so nothing is stretched out of shape. **It snaps to its
+// neighbours**: two pictures side by side should be able to be exactly the same
+// height, and a caption exactly as wide as what it is under. Nothing else on
+// this canvas can express "the same size as that one", so the resize gesture
+// has to.
 #pragma once
 
 #include <algorithm>
@@ -26,9 +15,6 @@
 #include "raylib.h"
 
 namespace sb {
-
-// One wheel notch.
-inline constexpr float kResizeStep = 1.10f;
 
 // How close a size has to be to a neighbour's before it is taken to mean it.
 inline constexpr float kResizeSnapTolerance = 0.055f;
@@ -46,7 +32,7 @@ inline bool NearEnoughToSnap(Rectangle mine, Rectangle other) {
   return CheckCollisionRecs(grown, other);
 }
 
-// The scale to actually apply, given the one the wheel asked for. Every nearby
+// The scale to actually apply, given the one the grip asked for. Every nearby
 // window offers two candidates -- its height and its width -- and whichever is
 // closest to what was asked wins, if it is close at all. Because the resize is
 // uniform, matching either dimension fixes the scale, so the two kinds of
@@ -73,13 +59,6 @@ inline float SnapResizeScale(Rectangle mine, float wanted,
     consider(other.width / mine.width);
   }
   return best;
-}
-
-// The corner of `rect` nearest the pointer -- the one that stays put.
-inline Vector2 NearestCorner(Rectangle rect, Vector2 point) {
-  const float x = (point.x < rect.x + rect.width * 0.5f) ? rect.x : rect.x + rect.width;
-  const float y = (point.y < rect.y + rect.height * 0.5f) ? rect.y : rect.y + rect.height;
-  return {x, y};
 }
 
 }  // namespace sb

@@ -1,4 +1,5 @@
 #include "media.h"
+#include "grip.h"
 
 #include <algorithm>
 #include <cmath>
@@ -250,9 +251,17 @@ Rectangle MediaPanel::CornerHandle(Rectangle rect, int corner, float footer) {
   }
 }
 
+Rectangle MediaPanel::GripOf(int index, const Viewport& viewport) const {
+  if (index < 0 || index >= static_cast<int>(items_.size())) return {};
+  const MediaItem& item = *items_[static_cast<std::size_t>(index)];
+  const Rectangle  rect = ScreenRect(item, viewport);
+  return CornerHandle(rect, 3, FooterOf(rect, item));
+}
+
 int MediaPanel::CropCornerAt(Rectangle rect, Vector2 point, float footer) {
   if (rect.width < 40.0f || rect.height - footer < 40.0f) return -1;
-  for (int corner = 0; corner < 4; ++corner) {
+  // Three corners: the fourth, bottom-right, is the grip that resizes.
+  for (int corner = 0; corner < 3; ++corner) {
     if (CheckCollisionPointRec(point, CornerHandle(rect, corner, footer))) return corner;
   }
   return -1;
@@ -674,7 +683,8 @@ void MediaPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     const float footer = FooterOf(rect, item);
     if ((hovered || item.selected) && !item.broken && rect.width > 40.0f &&
         rect.height - footer > 40.0f) {
-      for (int corner = 0; corner < 4; ++corner) {
+      DrawGrip(CornerHandle(rect, 3, footer), kCropHandle);
+      for (int corner = 0; corner < 3; ++corner) {
         const Rectangle handle = CornerHandle(rect, corner, footer);
         const bool      hot = CheckCollisionPointRec(here, handle);
         // An L-bracket rather than a square: it reads as a corner of a frame,

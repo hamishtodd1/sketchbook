@@ -125,7 +125,7 @@ at any zoom. A staircase edge is a bug.
 Everything on the canvas -- a code box, a paragraph, a number line, a plot, a
 picture, a space window, a photograph, a video -- is a **window**, and they all
 behave alike: carried by the rim round their edge, landing on the grid, caught by
-the lasso, resized by the wheel, thrown away on the same drop target. A new kind
+the lasso, resized by the grip in their corner, thrown away on the same drop target. A new kind
 of window gets all of that, not a variant of it.
 
 ### Showing that two things are the same object
@@ -249,8 +249,8 @@ The readings themselves:
 
 - **Typing with nothing selected starts a box** wherever you are looking -- in the
   nearest clear space to the middle of the view (see *Placement*).
-- **Tab is about lines, and so is Ctrl+/.** With a highlight, Tab and Shift+Tab
-  move every line it touches in and out, and Ctrl+/ comments them all (or
+- **Tab is about lines, and so is Ctrl+/.** A step of indentation is two spaces.
+  With a highlight, Tab and Shift+Tab move every line it touches in and out, and Ctrl+/ comments them all (or
   uncomments them if they all are). Both keep the highlight, since they are edits
   *about* it. Comments go in at the shallowest indentation, and a half-commented
   stretch becomes wholly commented.
@@ -274,6 +274,8 @@ The readings themselves:
   Tab over a highlight, Alt+Delete) and a click go back to one caret.
 - **Pasted text keeps its own indentation**, rather than having this line's
   indentation added to every line of it.
+- **Double-clicking a name highlights the whole of it**, as Ctrl+D does -- and so
+  takes hold of it, ready to be dragged out.
 - **Dragging across text highlights it**, and so does Shift with any caret
   movement. Selecting part of a name is how you take hold of what it refers to.
 - **The caret decides what keys mean.** With a caret in a box, Ctrl+C/X/V are the
@@ -284,7 +286,10 @@ The readings themselves:
   into takes the keys away, since that is a caret too.
 - **A mistake shows on its line**: that line reveals its code, a red caret points
   at the spot, and a balloon gives the first *two* errors, since one mistake
-  usually has another right behind it.
+  usually has another right behind it. **Clicking the balloon puts it away**, red caret and
+  all, until the next compile or the next time the caret leaves the box --
+  either shows it again, even if the error is the same. **Its corner has a copy button** (two pages; a tick once pressed),
+  since an error is often wanted somewhere else -- a search, a question.
 
 ---
 
@@ -466,7 +471,10 @@ lets go -- and a lasso can sweep across windows without stopping.
 exactly as `float f(float x)` is, and runs from its signature to the brace that
 closes it. There is no type name for "a function"; the signature *is* the type.
 (`RealFunction f;`, then `RToR f;`, were tried: they could only name one arrow,
-and said nothing a signature does not.) A function takes one argument for now.
+and said nothing a signature does not.) A function takes one argument for now;
+**a GLSL function of any other shape** -- two arguments, none, a `void` -- is
+compiled, can be called, and is shared like any other, but is not a function in
+this sense: nothing draws it.
 
 **Functions compose by calling**: `h = f + 2g` is
 `float h(float x) { return f(x) + 2.0 * g(x); }`, which is honest about what runs
@@ -604,7 +612,9 @@ a **user** drops an extension. Today its contents are compiled in; eventually it
 may be files loaded at runtime. Either way the directory is the unit. There is no
 `Real.*`, because `float` is already GLSL: only some types are new vocabulary,
 but all of them need showing. **Choosing a value and showing it are one job**, so
-a type's example generator sits with how it is shown.
+a type's example generator sits with how it is shown -- which is its viz, `example`
+below. What is left in `src/types/` chooses only for a type no viz box chooses for
+(`Even`, say), and as a box is first opened, before a viz has been built.
 
 ### Clifford algebras
 
@@ -766,6 +776,16 @@ pointer is) and `drag` (what the pointer is asking the value to be). A viz of
 several pieces numbers them, up to four. A viz without `grab` cannot be pointed
 at; without `drag`, it cannot be dragged.
 
+**`example` chooses a new value**: `Tri example() { ... }` is what `Tri p;` is
+given when nothing else says what it is. Inside it `rand()` starts from the
+variable's name, so `p` gets the same example every time, and `sbLimitsMin` /
+`sbLimitsMax` are the window's walls. A `Tri` in space is a point of weight 1
+somewhere inside them, where it can be seen and grabbed; a real is a tidy number
+in [-1, 1); a colour is a bright one of any hue. **A type has one example**,
+written in any one of its viz boxes: two is an error in both. The canvas's own
+wins over the built-in. Asking is a moment on the GPU, so it happens only when a
+variable is new -- nothing kept from before the edit, nothing saved.
+
 **A piece's mesh can be a model** made in a modelling program: `void mesh2() {
 model("cupped_hands_pair.obj"); }`, the file beside the vizes sketch or beside the
 canvas. It is scaled to fit the unit sphere, like a mesh a viz lays down itself, so
@@ -775,7 +795,17 @@ values.
 
 **A function's viz is its fragments**: `frag`, and optionally `grab`, with
 `value(…)` meaning the function being drawn. It is named by what goes in and out
--- `Viz(RToR, "Plot")`, `Viz(R2ToR, "Surface")`.
+-- `Viz(RToR, "Plot")`, `Viz(R2ToR, "Surface")`. It runs inside the box whose
+function it draws, on whatever canvas that is, so **what it takes from its sketch
+travels with it**, renamed as its own helpers are so nothing can clash with the
+canvas it lands on; and its knobs, and its sketch's, are read there every frame,
+so dragging one restyles every curve drawn with it and compiles nothing. **Its
+`example` chooses a body for a function nobody wrote**: `float example(float x)`
+is what `float u(float x);` runs, with `rand()` started from `u`'s name -- the
+built-ins pick one of four shapes a person would know (a wave, a parabola, a bump,
+a line) of how far out the input is, for each part of the answer. The hovered
+line shows `{ return example(x); }`. A box that takes `u` from another box takes
+that viz along, since the body is its.
 
 **The built-in vizes are sketches in the repo**, in `vizes/`: one per algebra
 (`Cl(3,0,1) vizes.sketch`, `Cl(2,1,1) vizes.sketch`), since a `Tri` means
@@ -783,6 +813,26 @@ something different in each, and `vizes.sketch` for types of no algebra. Every
 canvas has them without asking, and editing one takes effect everywhere. Each has
 values of its own to look at while it is edited. **A canvas's own viz wins**; one
 that does not compile gives way to the built-in.
+
+**A viz sees what its sketch shares**, as every box does: the functions and free
+values of the ordinary boxes beside it. A helper two vizes need -- where a `Tri`
+is, a sphere's maths -- is written once, in an ordinary box, where it can also be
+tried out with knobs and plots; and a knob there restyles every viz that reads it,
+live, as any knob moves what reads it. A built-in viz takes these from its own
+vizes sketch, compiled in: nothing of that sketch reaches a canvas using it, so
+its names cannot clash with the canvas's, and its knobs are as the sketch saved
+them. A viz box's own functions stay its own -- they can use what only a viz has
+(`emit`, `sbPointer`), which no other box could call.
+
+**A viz box is a box.** Its free values get knobs and windows, wherever they are
+written -- `float cylinderRadius = 0.12;` inside `mesh` is a knob, as it would be
+inside any function -- and its functions of one argument are drawn, as anywhere
+else. Dragging one of its knobs restyles the viz live, compiling nothing. Its
+standard functions (`mesh`, `vert`, `position`, `grab`, `drag`...) are not drawn:
+they answer the window's questions about the pointer and the camera, and have no
+meaning outside it. **A viz box can show itself**: `Tri self;` in the `Tri` viz
+is a point in a space window, drawn by the viz it sits in -- which is part of the
+point. (A built-in viz's own windows are never built: nobody is looking at them.)
 
 Bulky machinery lives in a few app helpers that a viz *calls* (a ray march, say),
 so the viz's own code reads as what it does: short, but there.
@@ -806,7 +856,8 @@ function on the canvas is drawn by a viz.
 
 - **A path**: only triangles. A line of constant screen width will want its own
   primitive.
-- **A helper shared between windows**: a helper belongs to its own window.
+- **A helper written in one viz box, for another**: shared helpers go in an
+  ordinary box.
 - **Several dws from one window**: a window names one.
 
 ### Space and spacetime
@@ -895,11 +946,26 @@ which it is *read against*, sit under it, as wide as it is.
 
 ### Resizing
 
-**The wheel resizes a window uniformly**, about the corner nearest the pointer, so
-it grows away from your hand. **It snaps to its neighbours' heights and widths** --
-"as tall as that" and "as wide as that" are one question, since the resize is
-uniform. Code boxes are offered as targets but do not snap themselves: the same
-size as another program means nothing.
+**A window is resized by the grip in its bottom-right corner** -- three short
+diagonals, shown while it is pointed at -- the conversation's grip, which every
+window now has. **It keeps its shape**: dragging it scales the window uniformly,
+the top-left corner held still, so a box's type gets bigger and a picture gets
+bigger, and nothing is stretched. (A conversation is the exception, and the
+model: its grip sets its width and height apart, its words reflowing.) **It snaps
+to its neighbours' heights and widths** -- "as tall as that" and "as wide as that"
+are one question, since the resize is uniform. Code boxes are offered as targets
+but do not snap themselves: the same size as another program means nothing.
+
+**The wheel zooms the canvas**, over boxes and pictures as over bare canvas.
+Over a conversation it scrolls it, and inside a window with a camera or a scale
+of its own -- a picture of a function, a surface, a volume, a space window -- it
+is that window's.
+
+**A display window resized comes loose from its box.** Docking is a row of slots
+of one size beside or under the box, and a window of another size has no slot;
+it stays exactly where it was on screen, and the windows docked after it close
+up. (Docking wants rethinking; until then a loose window can be overlapped by
+what closes up behind it.)
 
 ### Undo
 
@@ -913,7 +979,8 @@ move does not rebuild every shader.
 ### Sharing between boxes
 
 **Everything shareable is visible everywhere, automatically**: a function defined
-in any box can be called from any other, and a free value read by any other --
+in any box can be called from any other, viz boxes included, and a free value
+read by any other --
 the way a paper defines a thing once and then uses it. No imports, no names for
 boxes, no special box of definitions.
 
@@ -989,8 +1056,8 @@ a slide is the same live plot.
 Neither is mathematics; both are windows, which is nearly the whole design. They
 arrive by being dropped on the app (or from the menu, for a tablet).
 
-- **A corner crops** -- the frame moves, the picture does not. Resizing is the
-  wheel's.
+- **Three corners crop** -- the frame moves, the picture does not. The fourth,
+  bottom-right, is the grip, and resizes.
 - **A video has a transport**: play, a bar, and two trim markers whose exact times
   can be typed, since a clip is often chosen for one particular second. It loops
   between them. There is no decoder in the app, and there will not be: `ffmpeg` is

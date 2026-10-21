@@ -124,15 +124,15 @@ Rectangle PlotPanel::RectFor(std::size_t index, const Viewport& viewport,
   // Square, and the same size docked or not. Unlike a number line it does not
   // widen to its box: both axes are drawn at one scale, so a wide window would
   // just be a lot of empty output range with the curve squeezed up the middle.
-  const float width = kPlotSide * zoom;
+  const float width = kPlotSide * zoom * (plot.docked ? 1.0f : plot.size);
 
   if (drag_ == Drag::Move && dragMoved_ && index == dragPlot_) {
-    return {dragScreenPos_.x, dragScreenPos_.y, width, kPlotSide * zoom};
+    return {dragScreenPos_.x, dragScreenPos_.y, width, width};
   }
 
   if (!plot.docked || plot.dock == nullptr) {
     const Vector2 topLeft = viewport.ToScreen(plot.worldPos);
-    return {topLeft.x, topLeft.y, kPlotSide * zoom, kPlotSide * zoom};
+    return {topLeft.x, topLeft.y, width, width};
   }
 
   // Under the box, and under whatever number lines that box already has.
@@ -498,6 +498,7 @@ void PlotPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
   // code and gets a wire. Those are the ones that blink.
   std::vector<ActiveValue> active;
   ActiveVariables(viewport, fonts, &active);
+  active.insert(active.end(), lit_.begin(), lit_.end());
   const auto inUse = [&active](const CurveRef& ref) {
     for (const ActiveValue& value : active) {
       if (value.block == ref.block && value.name == ref.name) return true;

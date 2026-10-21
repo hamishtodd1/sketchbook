@@ -13,6 +13,8 @@
 // f + g drawn against one set of axes.
 #pragma once
 
+#include <algorithm>
+
 #include <memory>
 #include <string>
 #include <utility>
@@ -22,6 +24,7 @@
 #include "blocks.h"
 #include "viz.h"
 #include "fontstore.h"
+#include "grip.h"
 #include "raylib.h"
 #include "viewport.h"
 
@@ -33,6 +36,9 @@ struct CurveRef {
 };
 
 struct Plot {
+  // How big it is when it is not docked, as a multiple of where every window of
+  // its kind starts. Its grip sets it (grip.h).
+  float size = 1.0f;
   std::vector<CurveRef> refs;
   // The value at the middle of the window: x is output, y is input. Both axes
   // are drawn at the same scale, so a slope of one is a diagonal.
@@ -45,7 +51,7 @@ struct Plot {
   Vector2               dragFrom{};
 };
 
-class PlotPanel {
+class PlotPanel : public Resizable {
  public:
   // Which curve is under a screen point. A curve is drawn by the GPU and nothing
   // on this side knows where one is, so each curve's viz is asked, by its
@@ -95,6 +101,9 @@ class PlotPanel {
                  FontStore& fonts, Vector2* out) const;
 
   // As AxisPanel::ActiveVariables.
+  // What the rest of the canvas has lit this frame -- a name pointed at in the
+  // code, a value held in another window -- so the same value blinks here too.
+  void SetLit(std::vector<ActiveValue> lit) { lit_ = std::move(lit); }
   void ActiveVariables(const Viewport& viewport, FontStore& fonts,
                        std::vector<ActiveValue>* out) const;
 
@@ -125,6 +134,20 @@ class PlotPanel {
   void Clear() { plots_.clear(); drag_ = Drag::None; }
   void Adopt(std::vector<Plot> plots) { plots_ = std::move(plots); }
 
+  // The grip (grip.h).
+  int       GripCount() const override { return static_cast<int>(plots_.size()); }
+  Rectangle GripWindow(int index, const Viewport& viewport, FontStore& fonts) const override {
+    return RectFor(static_cast<std::size_t>(index), viewport, fonts);
+  }
+  void Loosen(int index, const Viewport& viewport, FontStore& fonts) override {
+    LoosenWindow(plots_[static_cast<std::size_t>(index)], GripWindow(index, viewport, fonts),
+                 viewport);
+  }
+  float WindowSize(int index) const override { return plots_[static_cast<std::size_t>(index)].size; }
+  void  SetWindowSize(int index, float size) override {
+    plots_[static_cast<std::size_t>(index)].size = std::clamp(size, kMinWindowSize, kMaxWindowSize);
+  }
+
  private:
   enum class Drag { None, Pan, Move };
 
@@ -152,6 +175,7 @@ class PlotPanel {
   Vector2     dragGrab_{};
   Vector2     dragScreenPos_{};
   bool        dragMoved_ = false;
+  std::vector<ActiveValue> lit_;
 };
 
 }  // namespace sb

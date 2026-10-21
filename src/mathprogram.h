@@ -8,6 +8,7 @@
 // that makes it compile is injected here, never in their text.
 #pragma once
 
+#include <functional>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -218,8 +219,24 @@ struct SharedValue {
 struct FunctionViz {
   std::string text;
   bool        grab = false;
+  // It chooses a body for a function nobody gave one: `example`, spliced.
+  bool        example = false;
+  // The knobs its text reads -- its own, and what it takes from its sketch --
+  // which the box it is spliced into declares and sets. Their numbers arrive
+  // every frame in `Canvas::vizKnobs`, not here.
+  std::vector<Literal> knobs;
   bool operator==(const FunctionViz& other) const {
-    return text == other.text && grab == other.grab;
+    if (text != other.text || grab != other.grab || example != other.example ||
+        knobs.size() != other.knobs.size()) {
+      return false;
+    }
+    for (std::size_t i = 0; i < knobs.size(); ++i) {
+      if (knobs[i].uniform != other.knobs[i].uniform ||
+          knobs[i].components.size() != other.knobs[i].components.size()) {
+        return false;
+      }
+    }
+    return true;
   }
 };
 
@@ -251,6 +268,17 @@ struct Canvas {
   // -- and a box that defines one compiles that viz in. The canvas's own, or
   // the built-in one.
   std::map<std::string, FunctionViz> functionVizes;
+  // **A new value is chosen by its type's viz**, its `example`, which runs on
+  // the GPU -- so it is asked for through the app. Unset, or false, and the
+  // type's own generator here chooses.
+  std::function<bool(const clifford::Signature& algebra, const std::string& type,
+                     const std::string& name, std::vector<float>* out)>
+      example;
+  // Types whose `example` is written in two viz boxes: a type has one.
+  std::vector<std::string> exampleTwice;
+  // The numbers of the function vizes' knobs, by uniform, as they are this
+  // frame: a box drawing with one reads them, and nothing is rebuilt.
+  std::unordered_map<std::string, Literal> vizKnobs;
 };
 
 // Everything the boxes offer, gathered. Boxes that offer nothing -- words, a
@@ -336,6 +364,13 @@ class Program {
   // `Tri@Space`: the type and the window, which is what a viz is keyed by.
   const std::string& vizType() const { return vizType_; }
   const vizglsl::Sources& viz() const { return viz_; }
+  bool                    writesExample() const { return writesExample_; }
+  // What a function nobody gave a body is given, as the page shows it -- or
+  // empty if the line is not one.
+  std::string InjectedBody(int line) const {
+    const auto found = injectedBodies_.find(line);
+    return found == injectedBodies_.end() ? std::string() : found->second;
+  }
 
   const std::string& glslSource() const { return glsl_; }
   // The vertex half. Ours rather than raylib's default, because the fragment
@@ -391,7 +426,10 @@ class Program {
   const std::vector<std::string>& probedNames() const { return probed_; }
   // What the probe read, in probedNames() order.
   void                            SetProbedValues(const std::vector<float>& values);
-  void                            ShaderCompiled(bool ok, const std::string& log);
+  // `viz` says the log is from a viz box's own programs, whose lines are laid
+  // out differently from its shader's.
+  void                            ShaderCompiled(bool ok, const std::string& log,
+                                                 bool viz = false);
 
   State                        state() const { return state_; }
   const std::vector<Variable>& variables() const { return variables_; }
@@ -417,6 +455,10 @@ class Program {
   std::vector<float>       trace_;
   std::vector<std::string> probed_;
   compiler::ShaderLines    glslLines_;
+  // A viz box's own three programs, as one string to compare, and where its
+  // lines are in them.
+  std::string              vizGlsl_;
+  compiler::ShaderLines    vizLines_;
   compiler::Diagnostic     error_;
 
   std::vector<std::pair<std::string, float>> restore_;
@@ -438,6 +480,16 @@ class Program {
   std::string                 importKey_;
   // The knobs it reads from other boxes, with their current numbers.
   std::vector<Literal>        imported_;
+  // What a box never takes from the canvas: the names it defines, or a viz's
+  // own functions. Kept so that asking whether the imports are stale asks the
+  // same question the build did.
+  std::vector<std::string>    ownNames_;
+  // A viz box that writes `example`, and what the canvas says about that.
+  bool                        writesExample_ = false;
+  std::map<int, std::string>  injectedBodies_;
+  std::string                 ExampleKey(const Canvas& canvas) const;
+  std::string WriteImports(const std::vector<const SharedValue*>& values,
+                           const std::vector<const SharedFunction*>& functions, std::string* seed);
   std::string                 importedSource_;
   std::vector<std::string>    importedNames_;
   // Names this box mentions that are derived values in another box.

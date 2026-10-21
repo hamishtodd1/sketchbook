@@ -23,6 +23,7 @@
 // Like the rest of the toolchain, this knows nothing about raylib.
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -91,8 +92,10 @@ struct Sources {
   std::string leanVertex;
   std::string leanFragment;
   // The line of each source that the box's first line lands on. The same in
-  // all three, so one map reads a diagnostic from any of them.
+  // all three, so one map reads a diagnostic from any of them. What the sketch
+  // shares comes just before it, after line `sharedAt`.
   int bodyAt = 0;
+  int sharedAt = 0;
   // How many pieces, and which have what.
   int  pieces = 0;
   bool frag[kMaxPieces] = {};
@@ -103,6 +106,8 @@ struct Sources {
   bool position = false;
   bool grab = false;
   bool drag = false;
+  // `T example()`: how a new value of the type is chosen.
+  bool example = false;
   // How many numbers one value is.
   int stride = 1;
 
@@ -119,9 +124,40 @@ struct Sources {
 };
 
 // `lines` is the whole box, sigil and all. `algebraTypes` are the algebra's
-// types the box mentions, which have to be written out for it.
+// types the box mentions, which have to be written out for it. `imports` is
+// what it takes from its sketch, and `seed` gives the shared values their
+// values at the top of every `main`.
 Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
                  const std::string& dw, const clifford::Signature& sig,
-                 const std::vector<std::string>& algebraTypes);
+                 const std::vector<std::string>& algebraTypes,
+                 const std::string& imports = std::string(),
+                 const std::string& seed = std::string());
+// A viz of a function: `imports` is what it takes from its sketch (functions'
+// declarations and text), `renames` what those names and the shared values become
+// once spliced, `uniforms` the knobs it reads, declared for its standalone check
+// -- the box it is spliced into declares them itself, once.
+Sources AssembleFunctionViz(const std::vector<std::string>& lines, const std::string& type,
+                            const std::string& dw, const std::string& imports,
+                            const std::map<std::string, std::string>& renames,
+                            const std::string& uniforms);
+// The random numbers an `example` of a function uses, from a state set to the
+// name of the function it is choosing: in every box's shader, before its
+// functions, since a chosen body sets it.
+std::string ExampleRandom();
+
+// The names of the functions a viz box defines -- its own, never taken from
+// the sketch.
+std::vector<std::string> FunctionNames(const std::vector<std::string>& lines);
+// Every function a box defines, whatever it takes: first and last line.
+std::vector<std::pair<int, int>> FunctionSpans(const std::vector<std::string>& lines);
+// `mesh`, `vert2`, `grab`...: a name a viz gives a meaning to.
+bool IsStandardName(const std::string& name);
+// What only a viz has -- `emit`, the pointer, the camera, `sbUncut` -- as
+// stand-ins that do nothing, for a viz box's own shader: there it is built as
+// any box is, for its windows, and nothing of a viz's is real.
+std::string Stubs();
+// The lines of a mesh that is a model file, `void mesh2() { model("x.obj"); }`:
+// not GLSL, so nothing but a viz's own build may see them.
+std::vector<bool> ModelLines(const std::vector<std::string>& lines);
 
 }  // namespace sb::vizglsl

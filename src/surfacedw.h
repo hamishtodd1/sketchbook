@@ -20,12 +20,15 @@
 // lasso, thrown away on the cross.
 #pragma once
 
+#include <algorithm>
+
 #include <memory>
 #include <vector>
 
 #include "blocks.h"
 #include "dock.h"
 #include "fontstore.h"
+#include "grip.h"
 #include "raylib.h"
 #include "types/RealFunctionViz.h"
 #include "types/RealViz.h"
@@ -34,6 +37,9 @@
 namespace sb {
 
 struct SurfaceView {
+  // How big it is when it is not docked, as a multiple of where every window of
+  // its kind starts. Its grip sets it (grip.h).
+  float size = 1.0f;
   CodeBlock* block = nullptr;
   bool       docked = true;
   Vector2    worldPos{};
@@ -47,7 +53,7 @@ struct SurfaceView {
   Vector2    dragFrom{};
 };
 
-class SurfacePanel : public Flanking {
+class SurfacePanel : public Flanking, public Resizable {
  public:
   using Blocks = std::vector<std::unique_ptr<CodeBlock>>;
 
@@ -91,6 +97,20 @@ class SurfacePanel : public Flanking {
   const std::vector<SurfaceView>& Views() const { return views_; }
   void Clear() { views_.clear(); dragging_ = false; orbiting_ = false; }
   void Adopt(std::vector<SurfaceView> views) { views_ = std::move(views); }
+
+  // The grip (grip.h).
+  int       GripCount() const override { return static_cast<int>(views_.size()); }
+  Rectangle GripWindow(int index, const Viewport& viewport, FontStore& fonts) const override {
+    return RectFor(static_cast<std::size_t>(index), viewport, fonts);
+  }
+  void Loosen(int index, const Viewport& viewport, FontStore& fonts) override {
+    LoosenWindow(views_[static_cast<std::size_t>(index)], GripWindow(index, viewport, fonts),
+                 viewport);
+  }
+  float WindowSize(int index) const override { return views_[static_cast<std::size_t>(index)].size; }
+  void  SetWindowSize(int index, float size) override {
+    views_[static_cast<std::size_t>(index)].size = std::clamp(size, kMinWindowSize, kMaxWindowSize);
+  }
 
  private:
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;

@@ -53,7 +53,9 @@ class App {
   // `undo`.
   void DevChat(const std::string& actions);
   // Dev: a box of these lines (`|` between them) with the caret in it, and the
-  // keys (CodeBlock::DevKeys) done in it; its lines are logged afterwards.
+  // keys (CodeBlock::DevKeys) done in it; its lines are logged afterwards. The
+  // app adds `wait:N` (frames), `blur` (the caret out, as a click elsewhere)
+  // and `focus` (back in).
   void DevKeys(const std::string& box, const std::string& keys);
   // Dev: the canvas as Claude is shown it.
   std::string Describe() { return DescribeCanvas(); }
@@ -113,6 +115,10 @@ class App {
   };
   std::vector<ToolJob> toolJobs_;
   std::vector<std::string> converseQueue_;   // dev: messages still to say
+  CodeBlock*               devKeysBlock_ = nullptr;
+  std::string              devKeysLeft_;
+  int                      devKeysWait_ = 0;
+  void                     DevKeysStep();
   std::string              converseEffort_;
   bool                     devPointed_ = false;
   Vector2                  devPointer_{};
@@ -133,6 +139,10 @@ class App {
   std::string DescribeBox(CodeBlock& block);
   // The canvas as a message carries it: every box, and where Hamish is.
   claude::CanvasView ViewCanvas();
+  // Where the canvas asks for a new value: the vizes' `example`s.
+  std::function<bool(const clifford::Signature&, const std::string&, const std::string&,
+                     std::vector<float>*)>
+  ExampleSource();
   // The display window under a point on screen, in world units, and what kind.
   bool DwUnder(Vector2 point, Rectangle* world, std::string* kind);
   CodeBlock*  BoxNamed(const std::string& id);
@@ -160,7 +170,32 @@ class App {
   // any one panel because the snapping rule has to see every kind of window at
   // once: a picture matching the height of the picture beside it, or a caption
   // matching the width of what it is under.
-  bool HandleResize();
+  // Dragging a box's or a picture's grip: it scales, keeping its shape.
+  bool HandleGrip();
+  void StartGrip(CodeBlock* block, int item, Vector2 fromWorld);
+  void StartDwGrip(Resizable* panel, int index, Vector2 fromWorld);
+  void MoveGrip(Vector2 world);
+  void EndGrip();
+  struct Grip {
+    CodeBlock*             block = nullptr;   // or
+    int                    item = -1;         // a picture, or
+    Resizable*             panel = nullptr;   // a display window,
+    int                    index = -1;        // that one of its kind
+    float                  startSize = 1.0f;
+    Rectangle              start{};           // where it was, world
+    Vector2                from{};            // where the pointer was, world
+    float                  startEm = 0.0f;
+    bool                   snaps = false;     // pictures and prose: see resize.h
+    std::vector<Rectangle> neighbours;
+  };
+  Grip grip_;
+  bool Gripping() const {
+    return grip_.block != nullptr || grip_.item >= 0 || grip_.panel != nullptr;
+  }
+  // Every kind of display window, in the order they are drawn.
+  std::vector<Resizable*> Resizables() {
+    return {&axes_, &plots_, &shaders_, &colours_, &surfaces_, &volumes_, &spaces_};
+  }
 
   // Files dropped on the window: a picture or a video becomes a window where
   // the pointer is, and a .sketch opens.
@@ -359,6 +394,11 @@ class App {
   CodeBlock*  textBlock_ = nullptr;
   std::string pullName_;
   Vector2     pullFrom_{};
+  // The last press on a box's text, so a second one can be known as a double
+  // click. Only compared, never followed, so a box deleted since is harmless.
+  const CodeBlock* lastPressBlock_ = nullptr;
+  double           lastPressTime_ = -1.0;
+  Vector2          lastPressAt_{};
   // True while the system cursor is hidden because a hand is being drawn in its
   // place. Kept so the two can never get out of step.
   bool       cursorHidden_ = false;

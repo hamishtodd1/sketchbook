@@ -10,6 +10,7 @@
 #include "logging.h"
 #include "objfile.h"
 #include "rlgl.h"
+#include "types/examples.h"
 
 #ifndef SKETCHBOOK_VIZES_DIR
 #define SKETCHBOOK_VIZES_DIR "vizes"
@@ -32,7 +33,7 @@ std::string FindModel(const std::string& name) {
   std::error_code ec;
   if (given.is_absolute() && std::filesystem::exists(given, ec)) return name;
   for (const std::filesystem::path& folder :
-       {std::filesystem::path(SKETCHBOOK_VIZES_DIR), std::filesystem::path(g_canvasFolder)}) {
+       {std::filesystem::path(VizesFolder()), std::filesystem::path(g_canvasFolder)}) {
     if (folder.empty()) continue;
     const std::filesystem::path there = folder / given;
     if (std::filesystem::exists(there, ec)) return there.string();
@@ -59,9 +60,15 @@ void SetVec3(int at, Vector3 value) {
 
 void SetCanvasFolder(const std::string& folder) { g_canvasFolder = folder; }
 
+namespace {
+std::string g_vizesFolder = SKETCHBOOK_VIZES_DIR;
+}  // namespace
+void               SetVizesFolder(const std::string& folder) { g_vizesFolder = folder; }
+const std::string& VizesFolder() { return g_vizesFolder; }
+
 // ------------------------------------------------------------------- VizGpu
 
-VizGpu::Slots VizGpu::Find(unsigned int program) {
+VizGpu::Slots VizGpu::Find(unsigned int program) const {
   const auto at = [program](const char* name) {
     return static_cast<int>(rlGetLocationUniform(program, name));
   };
@@ -81,12 +88,101 @@ VizGpu::Slots VizGpu::Find(unsigned int program) {
   s.limitsMin = at("sbLimitsMin");
   s.limitsMax = at("sbLimitsMax");
   s.pixel = at("sbPixel");
+  s.seed = at("sbSeed");
+  EachKnob([&](const mathprogram::Literal& knob) {
+    const int where = at(knob.uniform.c_str());
+    if (where >= 0) s.knobs.emplace_back(knob.uniform, where);
+  });
   return s;
 }
 
-bool VizGpu::Build(const vizglsl::Sources& sources, std::string* log) {
+void VizGpu::EachKnob(const std::function<void(const mathprogram::Literal&)>& visit) const {
+  if (program_ == nullptr) return;
+  for (const mathprogram::Literal& knob : program_->imported()) visit(knob);
+  for (const mathprogram::Variable& variable : program_->variables()) {
+    for (const mathprogram::Literal& knob : variable.literals) visit(knob);
+  }
+}
+
+void VizGpu::SetKnobs(const Slots& at) const {
+  if (at.knobs.empty()) return;
+  EachKnob([&](const mathprogram::Literal& knob) {
+    for (const auto& [uniform, where] : at.knobs) {
+      if (uniform != knob.uniform) continue;
+      if (knob.array) {
+        rlSetUniform(where, knob.components.data(), RL_SHADER_UNIFORM_FLOAT,
+                     static_cast<int>(knob.components.size()));
+      } else if (knob.components.size() == 3) {
+        rlSetUniform(where, knob.components.data(), RL_SHADER_UNIFORM_VEC3, 1);
+      } else {
+        rlSetUniform(where, &knob.value, RL_SHADER_UNIFORM_FLOAT, 1);
+      }
+    }
+  });
+}
+
+std::vector<float> VizGpu::Knobs() const {
+  std::vector<float> out;
+  EachKnob([&](const mathprogram::Literal& knob) {
+    if (knob.components.empty()) out.push_back(knob.value);
+    else out.insert(out.end(), knob.components.begin(), knob.components.end());
+  });
+  return out;
+}
+
+void VizGpu::Mesh(int k) {
+  const unsigned int zero = 0;
+  rlUpdateShaderBuffer(mesh_[k], &zero, sizeof(zero), 0);
+  SetInt(computeAt_.mode, 0);
+  SetInt(computeAt_.piece, k);
+  SetKnobs(computeAt_);
+  rlBindShaderBuffer(mesh_[k], 1);
+  rlComputeShaderDispatch(1, 1, 1);
+  glext::Barrier(glext::kShaderStorage | glext::kBufferUpdate);
+  unsigned int laid = 0;
+  rlReadShaderBuffer(mesh_[k], &laid, sizeof(laid), 0);
+  const int kept = std::min(static_cast<int>(laid), vizglsl::kMeshCap);
+  meshCount_[k] = kept - kept % 3;
+}
+
+bool VizGpu::Example(unsigned int seed, const VizFrame& frame, std::vector<float>* out) const {
+  if (!Ready() || !example_ || valueFloats_ <= 0) return false;
+  const unsigned int bytes = static_cast<unsigned int>(valueFloats_ * sizeof(float));
+  const unsigned int buffer = rlLoadShaderBuffer(bytes, nullptr, RL_DYNAMIC_COPY);
+  rlEnableShader(compute_);
+  Set(frame, computeAt_, 0);
+  SetInt(computeAt_.mode, 3);
+  SetInt(computeAt_.seed, static_cast<int>(seed));
+  rlBindShaderBuffer(buffer, 3);
+  rlComputeShaderDispatch(1, 1, 1);
+  glext::Barrier(glext::kShaderStorage | glext::kBufferUpdate);
+  out->assign(static_cast<std::size_t>(valueFloats_), 0.0f);
+  rlReadShaderBuffer(buffer, out->data(), bytes, 0);
+  rlDisableShader();
+  rlUnloadShaderBuffer(buffer);
+  return std::all_of(out->begin(), out->end(), [](float v) { return std::isfinite(v); });
+}
+
+void VizGpu::Refresh() {
+  if (!Ready() || program_ == nullptr) return;
+  std::vector<float> now = Knobs();
+  if (now == meshedWith_) return;
+  // **A knob never recompiles**, but a mesh made with it is made again: one
+  // dispatch a piece, only when a knob has moved.
+  meshedWith_ = std::move(now);
+  rlEnableShader(compute_);
+  for (int k = 0; k < pieces_; ++k) {
+    if (!model_[k]) Mesh(k);
+  }
+  rlDisableShader();
+}
+
+bool VizGpu::Build(const vizglsl::Sources& sources, const mathprogram::Program* program,
+                   std::string* log) {
   Release();
   log->clear();
+  program_ = program;
+  example_ = sources.example;
   pieces_ = sources.pieces;
   valueFloats_ = sources.stride;
   grab_ = sources.grab;
@@ -156,22 +252,14 @@ bool VizGpu::Build(const vizglsl::Sources& sources, std::string* log) {
                            static_cast<unsigned int>(corners.size() * sizeof(float)),
                            sizeof(unsigned int));
       meshCount_[k] = static_cast<int>(count - count % 3);
+      model_[k] = true;
       continue;
     }
     mesh_[k] = rlLoadShaderBuffer(bytes, nullptr, RL_DYNAMIC_COPY);
-    const unsigned int zero = 0;
-    rlUpdateShaderBuffer(mesh_[k], &zero, sizeof(zero), 0);
-    SetInt(computeAt_.mode, 0);
-    SetInt(computeAt_.piece, k);
-    rlBindShaderBuffer(mesh_[k], 1);
-    rlComputeShaderDispatch(1, 1, 1);
-    glext::Barrier(glext::kShaderStorage | glext::kBufferUpdate);
-    unsigned int laid = 0;
-    rlReadShaderBuffer(mesh_[k], &laid, sizeof(laid), 0);
-    const int kept = std::min(static_cast<int>(laid), vizglsl::kMeshCap);
-    meshCount_[k] = kept - kept % 3;
+    Mesh(k);
   }
   rlDisableShader();
+  meshedWith_ = Knobs();
   return true;
 }
 
@@ -184,8 +272,10 @@ void VizGpu::Release() {
     if (mesh_[k] != 0) rlUnloadShaderBuffer(mesh_[k]);
     mesh_[k] = 0;
     meshCount_[k] = 0;
+    model_[k] = false;
   }
   pieces_ = 0;
+  meshedWith_.clear();
 }
 
 void VizGpu::Set(const VizFrame& frame, const Slots& at, int count) const {
@@ -201,6 +291,7 @@ void VizGpu::Set(const VizFrame& frame, const Slots& at, int count) const {
   SetVec3(at.limitsMin, frame.limitsMin);
   SetVec3(at.limitsMax, frame.limitsMax);
   SetFloat(at.pixel, frame.pixel);
+  SetKnobs(at);
 }
 
 void VizGpu::Draw(unsigned int values, int count, const VizFrame& frame) const {
@@ -364,6 +455,8 @@ void VizPane::Settle(const VizGpu& viz, const VizFrame& frame, std::vector<float
   drags_ = viz.Drags();
   values_.Upload(run_, viz.Stride());
   about.insert(about.end(), run_.begin(), run_.end());
+  const std::vector<float> knobs = viz.Knobs();
+  about.insert(about.end(), knobs.begin(), knobs.end());
   if (!pointerOver && dragOne < 0 && about == askedAbout_) return;
   if (values_.Ask(viz, frame, dragOne)) askedAbout_ = std::move(about);
 }
@@ -436,6 +529,7 @@ void VizStore::Load(const std::string& path) {
   for (std::vector<std::string>& lines : boxes) {
     library->blocks.push_back(std::make_unique<CodeBlock>(Vector2{0.0f, 0.0f}, 20.0f,
                                                           std::move(lines)));
+    library->blocks.back()->SetLibrary(true);
   }
   // Built once alone, so each box knows what it offers, and again against the
   // sketch's canvas -- which is where the algebra comes from.
@@ -476,13 +570,16 @@ void VizStore::Sync(const std::vector<std::unique_ptr<CodeBlock>>& blocks,
       if (std::filesystem::last_write_time(library->path, error) != library->stamp) reload = true;
     }
   }
-  if (!reload) return;
+  if (reload) Reload(signature);
+}
+
+void VizStore::Reload(const clifford::Signature& signature) {
   ReleaseGpu();
   libraries_.clear();
   loaded_ = true;
   signature_ = signature;
-  checkedAt_ = now;
-  const std::string dir = SKETCHBOOK_VIZES_DIR;
+  checkedAt_ = GetTime();
+  const std::string dir = VizesFolder();
   const std::string algebra = "Cl(" + std::to_string(signature.p) + "," +
                               std::to_string(signature.q) + "," + std::to_string(signature.r) +
                               ") vizes.sketch";
@@ -498,6 +595,7 @@ const VizGpu* VizStore::Find(const std::string& type, const std::string& dw) {
   // The canvas's own, if it has one that works. One being written, or wrong,
   // gives way to the built-in rather than leaving nothing drawn.
   if (const auto found = local_.find(key); found != local_.end()) {
+    found->second->RefreshViz();
     if (const VizGpu* viz = found->second->VizProgram(); viz != nullptr) return viz;
   }
   for (const std::unique_ptr<Library>& library : libraries_) {
@@ -506,6 +604,9 @@ const VizGpu* VizStore::Find(const std::string& type, const std::string& dw) {
     CodeBlock* block = found->second;
     // Compiled the first time it is wanted.
     if (block->Program().state() == mathprogram::State::Shading) block->Poll();
+    // Its knobs are its own sketch's, as they were saved.
+    block->PullImports(library->canvas);
+    block->RefreshViz();
     if (const VizGpu* viz = block->VizProgram(); viz != nullptr) return viz;
     if (block->Program().state() == mathprogram::State::Failed && !library->told[key]) {
       library->told[key] = true;
@@ -514,6 +615,38 @@ const VizGpu* VizStore::Find(const std::string& type, const std::string& dw) {
     }
   }
   return nullptr;
+}
+
+bool VizStore::Example(const std::vector<std::unique_ptr<CodeBlock>>& blocks,
+                       const clifford::Signature& signature, const std::string& type,
+                       const std::string& name, std::vector<float>* out) {
+  // Asked as a canvas is opened, before anything has said which built-ins
+  // apply: the box asking knows its algebra, so they are read now.
+  if (!loaded_ || signature.p != signature_.p || signature.q != signature_.q ||
+      signature.r != signature_.r) {
+    Reload(signature);
+  }
+  const std::string prefix = type + "@";
+  const unsigned int seed = types::NameSeed(name);
+  const auto ask = [&](const std::string& key, CodeBlock* block) {
+    if (!block->Program().viz().example) return false;
+    if (block->Program().state() == mathprogram::State::Shading) block->Poll();
+    const VizGpu* viz = block->VizProgram();
+    if (viz == nullptr || !viz->HasExample()) return false;
+    const VizFrame frame =
+        exampleFrames_ ? exampleFrames_(key.substr(prefix.size())) : VizFrame{};
+    return viz->Example(seed, frame, out);
+  };
+  for (const std::unique_ptr<CodeBlock>& block : blocks) {
+    const std::string& key = block->VizType();
+    if (key.rfind(prefix, 0) == 0 && ask(key, block.get())) return true;
+  }
+  for (const std::unique_ptr<Library>& library : libraries_) {
+    for (const auto& [key, block] : library->vizes) {
+      if (key.rfind(prefix, 0) == 0 && ask(key, block)) return true;
+    }
+  }
+  return false;
 }
 
 bool VizStore::Has(const std::string& type, const std::string& dw) const {
@@ -526,7 +659,8 @@ bool VizStore::Has(const std::string& type, const std::string& dw) const {
 }
 
 std::map<std::string, mathprogram::FunctionViz> VizStore::FunctionVizes(
-    const std::vector<std::unique_ptr<CodeBlock>>& blocks) {
+    const std::vector<std::unique_ptr<CodeBlock>>& blocks,
+    std::unordered_map<std::string, mathprogram::Literal>* knobs) {
   // Only the ones some box on the canvas has a function to draw with.
   std::vector<std::string> wanted;
   for (const std::unique_ptr<CodeBlock>& block : blocks) {
@@ -540,8 +674,23 @@ std::map<std::string, mathprogram::FunctionViz> VizStore::FunctionVizes(
     }
   }
   std::map<std::string, mathprogram::FunctionViz> out;
+  // Its text, and the knobs it reads: its own, and what it took from its
+  // sketch, whose numbers it has just fetched.
   const auto offer = [&](const std::string& key, const CodeBlock& block) {
-    out[key] = {block.Program().viz().spliced, block.Program().viz().grab};
+    const mathprogram::Program& program = block.Program();
+    mathprogram::FunctionViz    viz;
+    viz.text = program.viz().spliced;
+    viz.grab = program.viz().grab;
+    viz.example = program.viz().example;
+    const auto take = [&](const mathprogram::Literal& literal) {
+      viz.knobs.push_back(literal);
+      (*knobs)[literal.uniform] = literal;
+    };
+    for (const mathprogram::Variable& variable : program.variables()) {
+      for (const mathprogram::Literal& literal : variable.literals) take(literal);
+    }
+    for (const mathprogram::Literal& literal : program.imported()) take(literal);
+    out[key] = std::move(viz);
   };
   for (const std::string& key : wanted) {
     if (const auto found = local_.find(key);
@@ -554,6 +703,7 @@ std::map<std::string, mathprogram::FunctionViz> VizStore::FunctionVizes(
       if (found == library->vizes.end()) continue;
       CodeBlock* block = found->second;
       if (block->Program().state() == mathprogram::State::Shading) block->Poll();
+      block->PullImports(library->canvas);
       if (block->FunctionVizReady()) {
         offer(key, *block);
         break;

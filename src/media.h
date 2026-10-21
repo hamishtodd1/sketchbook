@@ -4,14 +4,14 @@
 // something to point at while explaining. But both are **windows** like every
 // other, which is nearly the whole design. They are carried by the rim, they
 // land on the grid, they are caught by the lasso, they are thrown away on the
-// drop target, and the wheel resizes them the way it resizes a box.
+// drop target, and their grip resizes them the way it resizes a box.
 //
 // Two things are theirs alone:
 //
-// **A corner crops.** Dragging a corner handle moves that corner of the frame
-// and leaves the picture where it is, so what changes is how much of it you can
-// see -- not how big it is. Resizing is the wheel's job and cropping is the
-// corner's, and keeping them apart is what makes either one predictable.
+// **A corner crops** -- three of them. Dragging one moves that corner of the
+// frame and leaves the picture where it is, so what changes is how much of it
+// you can see -- not how big it is. The fourth, bottom-right, is the grip every
+// window has, and resizes.
 //
 // **A video has a transport.** A play button that becomes a pause button, a bar
 // showing where it has got to, and two markers saying where it should start and
@@ -85,10 +85,13 @@ class MediaPanel {
   void Draw(const Viewport& viewport, FontStore& fonts) const;
 
   // --- resizing ------------------------------------------------------------
-  // The wheel-resize gesture belongs to the app, since it has to see every kind
-  // of window at once to snap one to another. These are what it needs.
+  // The grip's gesture belongs to the app, since it has to see every kind of
+  // window at once to snap one to another. These are what it needs.
   int       ItemAt(Vector2 screenPoint, const Viewport& viewport) const;
   Rectangle WorldBounds(int index) const;
+  // Where an item's resize grip is on screen: its bottom-right corner, above a
+  // video's transport. Its other three corners crop.
+  Rectangle GripOf(int index, const Viewport& viewport) const;
   void      Scale(int index, float factor, Vector2 anchorWorld);
   void      WorldRects(std::vector<Rectangle>* out) const;
 

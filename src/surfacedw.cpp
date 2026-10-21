@@ -65,7 +65,7 @@ Rectangle SurfacePanel::RectFor(std::size_t index, const Viewport& viewport,
                              FontStore& fonts) const {
   const float zoom = viewport.Zoom();
   const SurfaceView& view = views_[index];
-  const float side = kFlankSide * zoom;
+  const float side = kFlankSide * zoom * view.size;
 
   if (dragging_ && dragMoved_ && index == dragView_) {
     return {dragScreenPos_.x, dragScreenPos_.y, side, side};
@@ -154,8 +154,8 @@ bool SurfacePanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
     const bool      onRim = PointOnRim(rect, pointer);
     if (!CheckCollisionPointRec(pointer, rect) && !onRim) continue;
 
-    // The wheel over it is its own scale, the way it is over a plot. Only
-    // inside: over the rim the wheel resizes the window.
+    // The wheel over it is its own scale. Only inside: over the rim it is the
+    // canvas's.
     if (!onRim) {
       const float wheel = GetMouseWheelMove();
       if (wheel != 0.0f) {

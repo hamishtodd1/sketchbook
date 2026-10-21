@@ -1,4 +1,5 @@
 #include "chat.h"
+#include "grip.h"
 
 #include <algorithm>
 #include <cctype>
@@ -475,11 +476,8 @@ ChatPanel::Parts ChatPanel::PartsOf(const ChatWindow& window, const Viewport& vi
   const float trackW = 6.5f * kEm * z;
   p.effort = {w.x + w.width - kPad * z - trackW, w.y + kHeader * z * 0.5f - 0.6f * kEm * z, trackW,
               1.2f * kEm * z};
-  // The resize handle: a fixed size on screen, just inside the band the rim is
-  // grabbed by, so the two never want the same pixel.
-  constexpr float kHandle = 14.0f;
-  p.corner = {w.x + w.width - kRimGrabInside - kHandle, w.y + w.height - kRimGrabInside - kHandle,
-              kHandle, kHandle};
+  // The resize grip, every window's (grip.h).
+  p.corner = GripRect(w);
   // The model's name, first in the header: pressing it opens the menu.
   const float em = kEm * z;
   const float nameX = w.x + kPad * z;
@@ -1427,12 +1425,7 @@ void ChatPanel::DrawWindow(std::size_t index, const Viewport& viewport, FontStor
 
   // The resize handle and the rim, when the window is being reached for.
   if (hovered) {
-    const Rectangle& h = p.corner;
-    for (int k = 1; k <= 3; ++k) {
-      const float o = h.width * static_cast<float>(k) / 3.0f;
-      DrawLineEx({h.x + h.width, h.y + h.height - o}, {h.x + h.width - o, h.y + h.height}, 1.5f,
-                 Fade(kCodeFg, 0.45f));
-    }
+    DrawGrip(p.corner, Fade(kCodeFg, 0.45f));
   }
 }
 

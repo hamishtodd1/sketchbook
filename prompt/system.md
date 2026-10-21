@@ -55,7 +55,7 @@ A box is GLSL. It need not be a whole program: the app supplies the scaffolding 
 - What it takes and gives decides how it is drawn: `float -> float` plot and field; `vec2 -> vec3`, `vec2 -> Color`, `vec2 -> Complex`, and `Complex -> ...` pictures; `vec2 -> float` surface; `vec3 -> float` or `vec3 -> Complex` volume.
 - A box of nothing but `Samples(float, 40);` and a loop `for (int i = 0; i < sbCount; ++i) pick(10.0 * (sbRand(i) - 0.5));` says how a type's inputs are spread out when a function of it is fed. With none, reals are spread evenly over $[-4, 4]$.
 
-**Sharing.** Functions and free values are visible across the whole canvas: any box can call a function or read a free value defined in another. Derived values are not shared. A name defined in two boxes is an error in both.
+**Sharing.** Functions and free values are visible across the whole canvas: any box can call a function or read a free value defined in another -- a function of any number of arguments, though only one of one argument is drawn. Derived values are not shared. A name defined in two boxes is an error in both.
 
 **Types.**
 - `Color` is a `vec3` that means a colour; `hsv(h, s, v)` makes one, hue in turns. A free colour has a picker.
@@ -83,12 +83,17 @@ A viz of a value has GLSL functions with standard names; anything else in the bo
 - `void mesh()` lays the geometry down once with `emit(p, n)` or `emit(p, n, uv)`, three calls to a triangle.
 - `void vert(T v, inout vec3 p, inout vec3 n)` places each vertex for the value `v`, in the window's own space.
 - `vec4 frag(T v, vec3 p, vec3 n, vec2 uv)` colours it (optional: without it a 3D window lights it and a flat one tints it).
+- `T example()` chooses the value a new `T p;` is given: `rand()` in it starts from the variable's name, and `sbLimitsMin`/`sbLimitsMax` are the window's walls. One per type, in any one of its viz boxes.
 - `vec3 position(T v)` is where wires attach; `float grab(T v)` is how many pixels the pointer is from it; `T drag(T v)` is the value the pointer is asking for. Without `grab` it cannot be pointed at; without `drag` it cannot be dragged.
 - Pieces number up to four: `mesh2`, `vert2`, `frag2`, `position2`. A piece a value does not want is folded away by its `vert` setting every vertex to one point.
 - A mesh can be a model file instead of code: `void mesh2() { model("cupped_hands_pair.obj"); }` reads a Wavefront OBJ (beside the vizes sketch, or beside the canvas), scaled to fit the unit sphere.
 - Given: `sbPointer`, `sbScreen(p)`, `sbRayOrigin`/`sbRayDir` (the pointer as a ray), `sbEye`, `sbSize`, `sbAcross()`/`sbUpward()` (screen directions), `sbPixel`, `sbTint` (the variable's colour), and `sbUncut`, which `vert` sets for something not cut by a space window's walls.
 
-A viz of a function, `Viz(RToR, "Plot")` and the like, is a `vec4 frag(vec2 at)` (and optional `float grab(vec2 at)`) where `value(x)` is the function being drawn.
+**A viz box is a box**: a free value in it, even inside `mesh` or `vert`, gets a knob, and dragging it restyles the viz live; its functions of one argument are drawn as anywhere. `Tri self;` in a `Tri` viz is drawn by that very viz.
+
+**A viz sees what its sketch shares**: a function or free value in an ordinary box beside it can be called or read from any viz box (a built-in viz uses its own vizes sketch's). A helper two vizes need goes in an ordinary box; a viz box's own functions are its own.
+
+A viz of a function, `Viz(RToR, "Plot")` and the like, is a `vec4 frag(vec2 at)` (and optional `float grab(vec2 at)`) where `value(x)` is the function being drawn. It sees its sketch and has knobs like any viz. Its `float example(float x)` (shaped as the type) is the body a function nobody wrote runs -- `float u(float x);` -- with `rand()` started from the function's name.
 
 # What does not exist yet
 

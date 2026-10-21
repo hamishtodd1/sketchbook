@@ -235,7 +235,8 @@ void Viewport::GlideTo(Vector2 worldCentre, float zoom, float seconds) {
   gliding_ = true;
 }
 
-void Viewport::Update(bool interactive, bool pointerFree, bool panFree, bool deckSwipes) {
+void Viewport::Update(bool interactive, bool pointerFree, bool wheelFree, bool panFree,
+                      bool deckSwipes) {
   if (gliding_) {
     // Moving the canvas yourself wins. Being carried somewhere you did not ask
     // to go, with no way to stop, is the worst thing a camera can do.
@@ -291,7 +292,7 @@ void Viewport::Update(bool interactive, bool pointerFree, bool panFree, bool dec
     touchCount_ = touch::Count();
     if (touchCount_ > 0) touchCooldown_ = 8;
   }
-  UpdateMouse(pointerFree, panFree);
+  UpdateMouse(wheelFree, panFree);
 }
 
 }  // namespace sb

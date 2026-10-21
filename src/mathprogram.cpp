@@ -239,13 +239,35 @@ std::vector<Drawn> DrawnBy(const std::vector<Function>& fns, const Canvas& canva
   return out;
 }
 
+// What a box draws its functions with, and any viz whose `example` a function
+// it takes from another box was given as its body -- that box chose the body,
+// but the body runs here.
+std::vector<Drawn> Needed(const std::vector<Function>& fns, const Canvas& canvas,
+                          const std::string& taken) {
+  std::vector<Drawn> out = DrawnBy(fns, canvas);
+  for (const auto& [key, viz] : canvas.functionVizes) {
+    if (!viz.example) continue;
+    const std::size_t at = key.find('@');
+    const std::string type = key.substr(0, at);
+    const std::string dw = key.substr(at + 1);
+    if (taken.find(vizglsl::Spliced("example", type, dw)) == std::string::npos) continue;
+    const bool there = std::any_of(out.begin(), out.end(), [&](const Drawn& d) {
+      return d.type == type && d.dw == dw;
+    });
+    if (!there) out.push_back({type, dw, {}});
+  }
+  return out;
+}
+
 // What a box draws its functions with, as a key: a box whose vizes change has
 // to be built again, exactly as one whose imports do.
-std::string VizzesKey(const std::vector<Function>& fns, const Canvas& canvas) {
+std::string VizzesKey(const std::vector<Function>& fns, const Canvas& canvas,
+                      const std::string& taken) {
   std::string key;
-  for (const Drawn& drawn : DrawnBy(fns, canvas)) {
+  for (const Drawn& drawn : Needed(fns, canvas, taken)) {
     const FunctionViz& viz = canvas.functionVizes.at(drawn.type + "@" + drawn.dw);
     key += drawn.type + "@" + drawn.dw + (viz.grab ? "+" : "") + ":" + viz.text + ";";
+    for (const Literal& knob : viz.knobs) key += knob.uniform + ",";
   }
   return key;
 }
@@ -253,8 +275,9 @@ std::string VizzesKey(const std::vector<Function>& fns, const Canvas& canvas) {
 // The vizes a box's functions are drawn with, compiled into its shader: for
 // each, which function `value` is -- the one `sbIndex` names -- then the app's
 // helpers, then the viz itself.
-std::string VizzesSource(const std::vector<Function>& fns, const Canvas& canvas) {
-  const std::vector<Drawn> drawn = DrawnBy(fns, canvas);
+std::string VizzesSource(const std::vector<Function>& fns, const Canvas& canvas,
+                         const std::string& taken) {
+  const std::vector<Drawn> drawn = Needed(fns, canvas, taken);
   if (drawn.empty()) return {};
   std::string out;
   bool paintReal = false, paintColour = false, paintComplex = false;
@@ -473,7 +496,8 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
                            const std::string& seed,
                            const std::vector<std::string>& functionNames,
                            const std::vector<Function>& defined, bool complex, bool colour,
-                           const Canvas& canvas, int* lines, int* functionsAt, int* sharedAt) {
+                           const Canvas& canvas, const std::string& taken, int* lines,
+                           int* functionsAt, int* sharedAt) {
   // One shader, three modes. A box used to build three -- one to draw its
   // picture, one to report its values, one to draw its functions -- from the
   // same lines with different ends. They are the same shader with a uniform
@@ -523,7 +547,7 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
       "float randChanging() {\n"
       "  sbRandChangingState = sbHash(sbRandChangingState);\n"
       "  return float(sbRandChangingState >> 8u) / 16777216.0;\n"
-      "}\n";
+      "}\n" + vizglsl::ExampleRandom();
   // Feeding a function: the spread of inputs goes in, the answers come out. Two
   // buffers rather than a pixel each, because an answer is a whole multivector
   // as readily as it is one number.
@@ -596,7 +620,7 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
   *functionsAt = static_cast<int>(std::count(out.begin(), out.end(), '\n'));
   out += functions;
   // How each of its functions is drawn: the vizes of their types.
-  out += VizzesSource(defined, canvas);
+  out += VizzesSource(defined, canvas, taken);
   out +=
       "void main() {\n"
       // Seeded by the pixel, so neighbouring pixels differ. Not when reporting:
@@ -722,11 +746,12 @@ Taken Take(const Canvas& canvas, const std::vector<std::string>& wanted, const P
       break;
     }
     if (found) continue;
+    // Every function of the name: one can be overloaded, `emit(p, n)` beside
+    // `emit(p, n, uv)`.
     for (const SharedFunction& fn : canvas.functions) {
       if (fn.name != name || fn.home == self) continue;
       taken.functions.push_back(&fn);
       for (std::string& more : Identifiers(fn.text)) queue.push_back(std::move(more));
-      break;
     }
   }
   return taken;
@@ -826,6 +851,16 @@ Canvas Gather(const std::vector<const Program*>& programs) {
     for (const SharedFunction& fn : program->sharedFunctions()) colour(fn.name);
   }
 
+  std::map<std::string, int> examples;
+  for (const Program* program : programs) {
+    if (!program->writesExample()) continue;
+    const std::string& viz = program->vizType();
+    ++examples[viz.substr(0, viz.find('@'))];
+  }
+  for (const auto& [type, count] : examples) {
+    if (count > 1) canvas.exampleTwice.push_back(type);
+  }
+
   for (const Program* program : programs) {
     for (const std::string& name : program->definedNames()) {
       bool shared = false;
@@ -845,10 +880,20 @@ Canvas Gather(const std::vector<const Program*>& programs) {
   return canvas;
 }
 
+std::string Program::ExampleKey(const Canvas& canvas) const {
+  if (!writesExample_) return {};
+  const std::string type = vizType_.substr(0, vizType_.find('@'));
+  return std::find(canvas.exampleTwice.begin(), canvas.exampleTwice.end(), type) !=
+                 canvas.exampleTwice.end()
+             ? "example-twice;"
+             : "";
+}
+
 bool Program::ImportsStale(const Canvas& canvas) const {
-  const Taken taken = Take(canvas, wanted_, this, definedNames_);
+  const Taken taken = Take(canvas, wanted_, this, ownNames_);
   return KeyOf(canvas, taken, definedNames_, saysAlgebra_,
-               DerivedElsewhere(canvas, wanted_, this)) + VizzesKey(functions_, canvas) !=
+               DerivedElsewhere(canvas, wanted_, this)) + VizzesKey(functions_, canvas, importedSource_) +
+             ExampleKey(canvas) !=
          importKey_;
 }
 
@@ -856,6 +901,13 @@ void Program::PullImports(const Canvas& canvas) {
   for (Literal& literal : imported_) {
     const auto home = canvas.uniformHome.find(literal.uniform);
     if (home == canvas.uniformHome.end() || home->second == nullptr || home->second == this) {
+      // A knob a function's viz reads, as it is this frame.
+      if (const auto viz = canvas.vizKnobs.find(literal.uniform); viz != canvas.vizKnobs.end()) {
+        literal.value = viz->second.value;
+        if (viz->second.components.size() == literal.components.size()) {
+          literal.components = viz->second.components;
+        }
+      }
       continue;
     }
     if (const Literal* there = home->second->FindLiteral(literal.uniform); there != nullptr) {
@@ -865,11 +917,66 @@ void Program::PullImports(const Canvas& canvas) {
   }
 }
 
+// Declared in the prologue, before the box's own functions: the knobs as
+// uniforms, the values as globals (given their values at the top of `main`, in
+// `seed`), then every function's declaration -- so functions from different
+// boxes can call each other whichever order they are written in -- and then the
+// functions themselves. Keeps the knobs' numbers across a rebuild.
+std::string Program::WriteImports(const std::vector<const SharedValue*>& values,
+                                  const std::vector<const SharedFunction*>& functions,
+                                  std::string* seed) {
+  std::string imports;
+  std::vector<Literal> kept = std::move(imported_);
+  imported_.clear();
+  const auto knob = [&](const std::string& uniform, int width, bool array) {
+    Literal literal;
+    literal.uniform = uniform;
+    literal.array = array;
+    if (width > 1) literal.components.assign(static_cast<std::size_t>(width), 0.0f);
+    for (const Literal& was : kept) {
+      if (was.uniform != uniform) continue;
+      literal.value = was.value;
+      if (was.components.size() == literal.components.size()) {
+        literal.components = was.components;
+      }
+    }
+    imported_.push_back(literal);
+    if (array) {
+      imports += "uniform float " + uniform + "[" + std::to_string(width) + "];\n";
+    } else {
+      imports += std::string(width == 3 ? "uniform vec3 " : "uniform float ") + uniform + ";\n";
+    }
+  };
+  importedSource_.clear();
+  importedNames_.clear();
+  for (const SharedValue* value : values) importedNames_.push_back(value->name);
+  for (const SharedFunction* fn : functions) importedNames_.push_back(fn->name);
+  for (const SharedValue* value : values) {
+    if (!value->uniform.empty()) knob(value->uniform, value->width, value->array);
+    imports += value->type + " " + value->name + ";\n";
+    *seed += "  " + value->name + " = " + value->init + ";\n";
+    importedSource_ += value->type + " " + value->name + " = " + value->init + ";\n";
+  }
+  for (const SharedFunction* fn : functions) {
+    for (const std::string& uniform : fn->uniforms) knob(uniform, 1, false);
+  }
+  for (const SharedFunction* fn : functions) imports += fn->declaration + "\n";
+  for (const SharedFunction* fn : functions) {
+    imports += fn->text;
+    importedSource_ += fn->text;
+  }
+  return imports;
+}
+
 void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canvas) {
   // What was running, so that a rebuild which comes out the same can say so
   // rather than being compiled again.
   const std::string runningGlsl = glsl_;
+  const std::string runningViz = vizGlsl_;
   const bool        running = (state_ == State::ShaderReady);
+  vizGlsl_.clear();
+  writesExample_ = false;
+  injectedBodies_.clear();
 
   // Remember what the knobs were set to, so an edit does not reset them. A
   // colour's and a multivector's are several numbers each.
@@ -934,45 +1041,67 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   }
   std::vector<std::string> algebraTypes = clifford::TypesMentioned(joined, signature);
 
-  // **A viz box is assembled whole, and apart.** It has no variables, grows no
-  // windows, offers the canvas nothing and takes nothing from it: its lines are
-  // GLSL functions with standard names, and they become the three programs that
-  // run it (`vizglsl.*`).
+  // **A viz box is a box.** Its values get knobs and windows, and its functions
+  // are drawn, as in any box -- built below, as any box is -- and then its
+  // three programs (`vizglsl.*`) are made from the same lines, so a knob is the
+  // same uniform in both. A viz of a *function* is the exception: its lines run
+  // inside the box drawing the function, against a `value` only that box has,
+  // so it is assembled here, alone. Neither offers the canvas anything; both
+  // take what the sketch shares, as any box does.
+  // **A new value is chosen by its type's viz** -- its `example` -- and only
+  // when there is nothing to keep: no value from before this edit, none saved.
+  // Without one, the type's own generator here chooses.
+  const auto chosen = [&](const std::string& type, const std::string& name, std::size_t count,
+                          std::vector<float>* out) {
+    std::vector<float> made;
+    if (!canvas.example || !canvas.example(signature, type, name, &made) || made.size() != count) {
+      return false;
+    }
+    *out = std::move(made);
+    return true;
+  };
+  const auto chosenReal = [&](const std::string& name) {
+    std::vector<float> made;
+    return chosen("float", name, 1, &made) ? made[0] : types::ExampleReal(name);
+  };
+
+  std::string vizOf;   // the type a viz of a value draws, and in which window
+  std::string vizIn;
+  const auto  fail = [&](int line, std::string message) {
+    glsl_.clear();
+    state_ = State::Failed;
+    error_ = {};
+    error_.present = true;
+    error_.line = line + 1;
+    error_.message = std::move(message);
+  };
   if (!vizType_.empty()) {
-    variables_.clear();
-    probed_.clear();
-    functions_.clear();
-    functionNames_.clear();
-    tracedSlots_.clear();
-    sharedFunctions_.clear();
-    sharedValues_.clear();
-    definedNames_.clear();
-    wanted_.clear();
-    imported_.clear();
-    importedNames_.clear();
-    importedSource_.clear();
-    derivedElsewhere_.clear();
-    importKey_ = KeyOf(canvas, Taken{}, definedNames_, saysAlgebra_, derivedElsewhere_);
+    const std::vector<std::string> vizNames = vizglsl::FunctionNames(lines);
+    writesExample_ =
+        std::find(vizNames.begin(), vizNames.end(), "example") != vizNames.end();
     {
       const std::string key =
-          saysAlgebra_ ? ("Cl" + std::to_string(saidAlgebra_.p) + std::to_string(saidAlgebra_.q) +
-                          std::to_string(saidAlgebra_.r))
-                       : std::string();
+          (saysAlgebra_ ? ("Cl" + std::to_string(saidAlgebra_.p) + std::to_string(saidAlgebra_.q) +
+                           std::to_string(saidAlgebra_.r))
+                        : std::string()) +
+          (writesExample_ ? "example" : "");
       if (key != sharedKey_ || sharedVersion_ == 0) {
         sharedKey_ = key;
         sharedVersion_ = NextSharedVersion();
       }
     }
-
-    const auto fail = [&](int line, std::string message) {
-      glsl_.clear();
-      state_ = State::Failed;
-      error_ = {};
-      error_.present = true;
-      error_.line = line + 1;
-      error_.message = std::move(message);
+    const auto clear = [&]() {
+      variables_.clear();
+      probed_.clear();
+      functions_.clear();
+      functionNames_.clear();
+      tracedSlots_.clear();
+      sharedFunctions_.clear();
+      sharedValues_.clear();
+      definedNames_.clear();
     };
     if (vizAgain >= 0) {
+      clear();
       fail(vizAgain, "a box is one viz, and this one already said `" +
                          lines[static_cast<std::size_t>(vizLine)] +
                          "` -- take this line out, or move it to a box of its own");
@@ -981,32 +1110,152 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
     const std::size_t at = vizType_.find('@');
     const std::string type = vizType_.substr(0, at);
     const std::string dw = (at == std::string::npos) ? std::string() : vizType_.substr(at + 1);
-    if (dw.empty()) {
-      fail(vizLine, "a viz names the window it is drawn in, `Viz(" + type + ", \"Space\");` -- " +
-                        "the windows are " + vizglsl::KnownWindows());
+    if (dw.empty() || vizUnquoted || !vizglsl::KnownWindow(dw)) {
+      clear();
+      fail(vizLine, dw.empty() ? "a viz names the window it is drawn in, `Viz(" + type +
+                                     ", \"Space\");` -- the windows are " +
+                                     vizglsl::KnownWindows()
+                    : vizUnquoted ? "a window's name goes in quotes: `Viz(" + type + ", \"" + dw +
+                                        "\");`"
+                                  : "there is no window called `" + dw +
+                                        "` -- the windows are " + vizglsl::KnownWindows());
       return;
     }
-    if (vizUnquoted) {
-      fail(vizLine, "a window's name goes in quotes: `Viz(" + type + ", \"" + dw + "\");`");
+    if (!ExampleKey(canvas).empty()) {
+      clear();
+      wanted_.clear();
+      ownNames_.clear();
+      derivedElsewhere_.clear();
+      importKey_ = KeyOf(canvas, Taken{}, definedNames_, saysAlgebra_, derivedElsewhere_) +
+                   ExampleKey(canvas);
+      int at = 0;
+      const std::vector<std::pair<int, int>> vizSpans = vizglsl::FunctionSpans(lines);
+      for (std::size_t i = 0; i < vizNames.size() && i < vizSpans.size(); ++i) {
+        if (vizNames[i] == "example") at = vizSpans[i].first;
+      }
+      fail(at, "another viz box of `" + type + "` writes an `example` too -- a type has one");
       return;
     }
-    if (!vizglsl::KnownWindow(dw)) {
-      fail(vizLine, "there is no window called `" + dw + "` -- the windows are " +
-                        vizglsl::KnownWindows());
+    if (!vizglsl::FunctionType(type, nullptr, nullptr)) {
+      vizOf = type;
+      vizIn = dw;
+    } else {
+      clear();
+      wanted_.clear();
+      derivedElsewhere_.clear();
+      ownNames_ = vizglsl::FunctionNames(lines);
+      ownNames_.push_back("value");
+
+      // **Its own knobs**: a free real in it, wherever it is written, as in any
+      // box. Inside a function it stays that function's local, given its knob;
+      // at the top it is the knob itself, wherever it is mentioned.
+      std::vector<std::string>           made = lines;
+      std::map<std::string, std::string> renames;
+      std::vector<Variable>              knobs;
+      const std::vector<std::pair<int, int>> fnSpans = vizglsl::FunctionSpans(lines);
+      for (std::size_t i = 0; i < lines.size(); ++i) {
+        const std::string&   raw = lines[i];
+        const mathline::Line line = mathline::Parse(raw, signature);
+        float      typed = 0.0f;
+        const bool typedNumber =
+            line.hasInitialiser && !IsConstDeclaration(raw) && WrittenNumber(raw, &typed);
+        if (line.kind != mathline::Kind::Declaration || (line.hasInitialiser && !typedNumber) ||
+            mathline::GlslTypeName(line.type) != "float" ||
+            mathline::IsMultivectorType(line.type, signature)) {
+          continue;
+        }
+        const int at = static_cast<int>(i);
+        bool      inside = false;
+        for (const auto& [first, last] : fnSpans) inside = inside || (at > first && at <= last);
+        Variable variable;
+        variable.declaredLine = at;
+        variable.name = line.name;
+        variable.type = line.type;
+        variable.latexName = mathline::NameToLatex(line.name);
+        variable.kind = Kind::Real;
+        variable.free = true;
+        variable.known = true;
+        variable.local = inside;
+        variable.written = typedNumber;
+        bool kept = typedNumber;
+        variable.value = typed;
+        if (!kept) {
+          if (auto was = previous.find(line.name); was != previous.end()) {
+            variable.value = was->second;
+            kept = true;
+          } else {
+            for (const auto& [name, value] : restore_) {
+              if (name == line.name) { variable.value = value; kept = true; break; }
+            }
+          }
+        }
+        if (!kept) variable.value = chosenReal(line.name);
+        variable.example = variable.value;
+        Literal literal;
+        literal.line = at;
+        literal.uniform = line.name + "_" + std::to_string(at) + "_" + std::to_string(id_);
+        literal.value = variable.value;
+        literal.written = typedNumber;
+        variable.literals.push_back(literal);
+        if (inside) {
+          const std::size_t indent = raw.find_first_not_of(" \t");
+          made[i] = raw.substr(0, indent == std::string::npos ? 0 : indent) + "float " +
+                    line.name + " = " + literal.uniform + ";";
+        } else {
+          made[i].clear();
+          renames[line.name] = "(" + literal.uniform + ")";
+          ownNames_.push_back(line.name);
+        }
+        knobs.push_back(std::move(variable));
+      }
+
+      for (std::string& name : Identifiers(joined)) {
+        if (std::find(ownNames_.begin(), ownNames_.end(), name) == ownNames_.end()) {
+          wanted_.push_back(std::move(name));
+        }
+      }
+      const Taken taken = Take(canvas, wanted_, this, ownNames_);
+      std::string unseeded;
+      WriteImports(taken.values, taken.functions, &unseeded);
+      // What it takes travels with it, renamed as it is: a function as a copy
+      // of its own, a value as the knob behind it.
+      std::string imports;
+      for (const SharedFunction* fn : taken.functions) imports += fn->declaration + "\n";
+      for (const SharedFunction* fn : taken.functions) imports += fn->text;
+      for (const SharedFunction* fn : taken.functions) {
+        renames[fn->name] = vizglsl::Spliced(fn->name, type, dw);
+      }
+      for (const SharedValue* value : taken.values) renames[value->name] = "(" + value->init + ")";
+      std::string uniforms;
+      const auto declare = [&](const Literal& literal) {
+        if (literal.array) {
+          uniforms += "uniform float " + literal.uniform + "[" +
+                      std::to_string(literal.components.size()) + "];\n";
+        } else {
+          uniforms += std::string(literal.components.size() == 3 ? "uniform vec3 "
+                                                                 : "uniform float ") +
+                      literal.uniform + ";\n";
+        }
+      };
+      for (const Literal& literal : imported_) declare(literal);
+      for (const Variable& variable : knobs) declare(variable.literals.front());
+      importKey_ = KeyOf(canvas, taken, definedNames_, saysAlgebra_, derivedElsewhere_) +
+                   VizzesKey(functions_, canvas, importedSource_) + ExampleKey(canvas);
+      viz_ = vizglsl::AssembleFunctionViz(made, type, dw, imports, renames, uniforms);
+      variables_ = std::move(knobs);
+      if (!viz_.error.empty()) {
+        fail(viz_.errorLine, viz_.error);
+        return;
+      }
+      glslLines_ = {viz_.bodyAt, viz_.bodyAt, static_cast<int>(lines.size()), viz_.sharedAt,
+                    viz_.bodyAt};
+      // Compared whole, so an edit that leaves it as it was compiles nothing,
+      // like any other box.
+      glsl_ = viz_.standalone;
+      error_ = {};
+      state_ = (running && glsl_ == runningGlsl) ? State::ShaderReady : State::Shading;
       return;
     }
-    viz_ = vizglsl::Assemble(lines, type, dw, signature, algebraTypes);
-    if (!viz_.error.empty()) {
-      fail(viz_.errorLine, viz_.error);
-      return;
-    }
-    glslLines_ = {viz_.bodyAt, viz_.bodyAt, static_cast<int>(lines.size())};
-    // Compared whole, so an edit that leaves all three as they were compiles
-    // nothing, like any other box.
-    glsl_ = viz_.function ? viz_.standalone : viz_.compute + viz_.vertex + viz_.fragment;
-    error_ = {};
-    state_ = (running && glsl_ == runningGlsl) ? State::ShaderReady : State::Shading;
-    return;
   }
 
   // Every function the box defines, and where each one begins and ends. Found
@@ -1024,6 +1273,34 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
     }
     return false;
   });
+  // A viz's own standard functions -- `position`, `grab`, `drag` -- are what the
+  // window asks of it, about the pointer and the camera; they are not drawn as
+  // functions of their own.
+  if (!vizOf.empty()) {
+    std::erase_if(spans, [](const Span& span) { return vizglsl::IsStandardName(span.head.name); });
+  }
+  // Every other function -- one of two arguments, or none, or a viz's `mesh` --
+  // is hoisted whole, as written: GLSL, compiled, never drawn.
+  std::vector<std::pair<int, int>> otherSpans;
+  std::vector<std::string>         otherNames;
+  {
+    const std::vector<std::pair<int, int>> all = vizglsl::FunctionSpans(lines);
+    const std::vector<std::string>         names = vizglsl::FunctionNames(lines);
+    for (std::size_t i = 0; i < all.size() && i < names.size(); ++i) {
+      if (SpanAt(spans, all[i].first) >= 0) continue;
+      otherSpans.push_back(all[i]);
+      otherNames.push_back(names[i]);
+    }
+  }
+  const auto otherAt = [&](int line) {
+    for (std::size_t i = 0; i < otherSpans.size(); ++i) {
+      if (line >= otherSpans[i].first && line <= otherSpans[i].second) return static_cast<int>(i);
+    }
+    return -1;
+  };
+  // A mesh that is a model file is not GLSL at all.
+  const std::vector<bool> modelLine =
+      vizOf.empty() ? std::vector<bool>(lines.size(), false) : vizglsl::ModelLines(lines);
   functions_.clear();
   for (const Span& span : spans) {
     Function fn;
@@ -1058,7 +1335,9 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   // and no variables to have them, so their declarations stay the locals they
   // were written as. Known here rather than at the end because the loop below
   // has to emit one or the other as it goes.
-  const bool ordinary = vizType_.empty() && samplerType_.empty();
+  const bool ordinary = samplerType_.empty();
+  // A viz box is built as one, and offers nothing: its functions are its own.
+  const bool shares = ordinary && vizType_.empty();
 
   std::vector<Variable> variables;
   std::string shaderBody;
@@ -1109,6 +1388,64 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   // be handed to other boxes exactly as this one compiles it.
   std::vector<std::string> hoisted(lines.size());
 
+  // **A free real inside a function gets a knob, as one outside does.**
+  // `float k;` with no value is the same abstract statement wherever it is
+  // written, and the same injected literal answers it: a uniform, which a
+  // hoisted function can see as readily as `main` can. It stays a local of its
+  // function -- it is not one of the box's globals -- and nothing traces it,
+  // since the one number it can be is the number its knob chose.
+  //
+  // A *derived* one is different, and deliberately left without a window:
+  // `float m = sqrt(ip);` inside a function has a different value for every
+  // input the function is called with, so there is no one number for a marker
+  // to show.
+  const auto knobInside = [&](const std::string& raw, const mathline::Line& line, int thisLine,
+                              std::string* written) {
+    float typedHere = 0.0f;
+    const bool typedNumber = line.hasInitialiser && !IsConstDeclaration(raw) &&
+                             WrittenNumber(raw, &typedHere);
+    if (line.kind != mathline::Kind::Declaration || (line.hasInitialiser && !typedNumber) ||
+        mathline::GlslTypeName(line.type) != "float" ||
+        mathline::IsMultivectorType(line.type, signature)) {
+      return;
+    }
+    Variable variable;
+    variable.declaredLine = thisLine;
+    variable.name = line.name;
+    variable.type = line.type;
+    variable.latexName = mathline::NameToLatex(line.name);
+    variable.kind = Kind::Real;
+    variable.free = true;
+    variable.local = true;
+    variable.known = true;
+    variable.written = typedNumber;
+    if (typedNumber) {
+      // Typed, so the text is the value.
+      variable.example = typedHere;
+      variable.value = typedHere;
+    } else {
+      bool kept = false;
+      if (auto was = previous.find(line.name); was != previous.end()) {
+        variable.value = was->second;
+        kept = true;
+      } else {
+        for (const auto& [name, value] : restore_) {
+          if (name == line.name) { variable.value = value; kept = true; break; }
+        }
+      }
+      if (!kept) variable.value = chosenReal(line.name);
+      variable.example = variable.value;
+    }
+    Literal injected;
+    injected.line = thisLine;
+    injected.uniform = uniformFor(variable.name, thisLine);
+    injected.value = variable.value;
+    injected.written = typedNumber;
+    variable.literals.push_back(injected);
+    variables.push_back(variable);
+    *written = "float " + line.name + " = " + injected.uniform + ";";
+  };
+
   for (const std::string& raw : lines) {
     const int thisLine = lineIndex++;
     (void)thisLine;
@@ -1123,10 +1460,23 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
 
     const mathline::Line line = mathline::Parse(raw, signature);
     // So does the line that says what this box draws, and the line that says
-    // how its space is spread out.
-    if (line.kind == mathline::Kind::Viz || line.kind == mathline::Kind::Samples) {
+    // how its space is spread out -- and a mesh that is a model file.
+    if (line.kind == mathline::Kind::Viz || line.kind == mathline::Kind::Samples ||
+        modelLine[static_cast<std::size_t>(thisLine)]) {
       shaderBody += "\n";
       shaderFunctions += "\n";
+      continue;
+    }
+    // A function that is not an arrow from one space to another: hoisted as
+    // written, with a knob for each free real in it.
+    if (const int other = otherAt(thisLine); other >= 0) {
+      std::string written = raw;
+      if (thisLine != otherSpans[static_cast<std::size_t>(other)].first) {
+        knobInside(raw, line, thisLine, &written);
+      }
+      hoisted[static_cast<std::size_t>(thisLine)] = written;
+      shaderFunctions += written + "\n";
+      shaderBody += "\n";
       continue;
     }
     // A prototype that is not a span of its own is one the box defines below,
@@ -1145,15 +1495,35 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
       const Span& found = spans[static_cast<std::size_t>(span)];
       if (!found.head.body) {
         // Nobody said what this function does, so the app does -- the same move
-        // as injecting `= 0.2385` into `float a;`, made for a function.
-        hoisted[static_cast<std::size_t>(thisLine)] =
-            mathline::GlslTypeName(found.head.returnType) + " " + found.head.name + "(" +
-            mathline::GlslTypeName(found.head.paramType) + " " + found.head.paramName +
-            ") { return " +
-            types::realfunction::ExampleFunctionBody(found.head.returnType, found.head.paramType,
-                                                     found.head.paramName, found.head.name,
-                                                     signature) +
-            "; }";
+        // as injecting `= 0.2385` into `float a;`, made for a function. **Its
+        // type's viz chooses**, with its `example`, from a state set to the
+        // function's name; without one, the generator here does.
+        const std::string ret = mathline::GlslTypeName(found.head.returnType);
+        const std::string param = mathline::GlslTypeName(found.head.paramType);
+        const std::string fnType = vizglsl::FunctionTypeOf(param, ret);
+        std::string       chooser;
+        for (const auto& [key, viz] : canvas.functionVizes) {
+          if (viz.example && !fnType.empty() && key.rfind(fnType + "@", 0) == 0) {
+            const std::size_t at = key.find('@');
+            chooser = vizglsl::Spliced("example", key.substr(0, at), key.substr(at + 1));
+          }
+        }
+        if (!chooser.empty()) {
+          hoisted[static_cast<std::size_t>(thisLine)] =
+              ret + " " + chooser + "(" + param + " x); " + ret + " " + found.head.name + "(" +
+              param + " " + found.head.paramName + ") { sbExampleState = " +
+              std::to_string(types::NameSeed(found.head.name)) + "u; return " + chooser + "(" +
+              found.head.paramName + "); }";
+          injectedBodies_[thisLine] = " { return example(" + found.head.paramName + "); }";
+        } else {
+          const std::string body = types::realfunction::ExampleFunctionBody(
+              found.head.returnType, found.head.paramType, found.head.paramName,
+              found.head.name, signature);
+          hoisted[static_cast<std::size_t>(thisLine)] =
+              ret + " " + found.head.name + "(" + param + " " + found.head.paramName +
+              ") { return " + body + "; }";
+          injectedBodies_[thisLine] = " { return " + body + "; }";
+        }
         shaderFunctions += hoisted[static_cast<std::size_t>(thisLine)] + "\n";
       } else {
         // A declaration inside a function is widened like one at the top level:
@@ -1167,57 +1537,7 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
           written = WidenedReturns(written, found.head.returnType);
         }
 
-        // **A free real inside a function gets a knob, as one outside does.**
-        // `float k;` with no value is the same abstract statement wherever it is
-        // written, and the same injected literal answers it: a uniform, which a
-        // hoisted function can see as readily as `main` can. It stays a local
-        // of its function -- it is not one of the box's globals -- and nothing
-        // traces it, since the one number it can be is the number its knob chose.
-        //
-        // A *derived* one is different, and deliberately left without a window:
-        // `float m = sqrt(ip);` inside a function has a different value for
-        // every input the function is called with, so there is no one number for
-        // a marker to show.
-        float typedHere = 0.0f;
-        const bool typedNumber = line.hasInitialiser && !IsConstDeclaration(raw) &&
-                                 WrittenNumber(raw, &typedHere);
-        if (line.kind == mathline::Kind::Declaration && (!line.hasInitialiser || typedNumber) &&
-            thisLine != found.first && mathline::GlslTypeName(line.type) == "float" &&
-            !mathline::IsMultivectorType(line.type, signature)) {
-          Variable variable;
-          variable.declaredLine = thisLine;
-          variable.name = line.name;
-          variable.type = line.type;
-          variable.latexName = mathline::NameToLatex(line.name);
-          variable.kind = Kind::Real;
-          variable.free = true;
-          variable.local = true;
-          variable.known = true;
-          variable.written = typedNumber;
-          if (typedNumber) {
-            // Typed, so the text is the value.
-            variable.example = typedHere;
-            variable.value = typedHere;
-          } else {
-            variable.example = types::ExampleReal(line.name);
-            variable.value = variable.example;
-            if (auto was = previous.find(line.name); was != previous.end()) {
-              variable.value = was->second;
-            } else {
-              for (const auto& [name, value] : restore_) {
-                if (name == line.name) { variable.value = value; break; }
-              }
-            }
-          }
-          Literal injected;
-          injected.line = thisLine;
-          injected.uniform = uniformFor(variable.name, thisLine);
-          injected.value = variable.value;
-          injected.written = typedNumber;
-          variable.literals.push_back(injected);
-          variables.push_back(variable);
-          written = "float " + line.name + " = " + injected.uniform + ";";
-        }
+        if (thisLine != found.first) knobInside(raw, line, thisLine, &written);
         hoisted[static_cast<std::size_t>(thisLine)] =
             thisLine == found.first ? GlslSignature(raw, found.head) : written;
         shaderFunctions += hoisted[static_cast<std::size_t>(thisLine)] + "\n";
@@ -1263,8 +1583,14 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
                                                        was->second.size() == 3) {
           rgb = was->second;
         } else {
-          types::color::ExampleValue(line.name, rgb.data());
           const char* const parts[] = {"r", "g", "b"};
+          bool              saved = false;
+          for (const auto& [name, value] : restore_) {
+            saved = saved || name.rfind(line.name + ".", 0) == 0;
+          }
+          if (saved || !chosen(types::color::kName, line.name, 3, &rgb)) {
+            types::color::ExampleValue(line.name, rgb.data());
+          }
           for (int i = 0; i < 3; ++i) {
             for (const auto& [name, value] : restore_) {
               if (name == line.name + "." + parts[i]) rgb[static_cast<std::size_t>(i)] = value;
@@ -1293,9 +1619,15 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
         const std::vector<std::string> members =
             clifford::MemberNames(line.type, signature);
         std::vector<float> parts = clifford::ExampleComponents(line.type, line.name, signature);
+        bool saved = false;
+        for (const auto& [name, value] : restore_) {
+          saved = saved || name.rfind(line.name + ".", 0) == 0;
+        }
         if (auto was = previousColour.find(line.name);
             was != previousColour.end() && was->second.size() == parts.size()) {
           parts = was->second;
+        } else if (!saved && chosen(line.type, line.name, parts.size(), &parts)) {
+          // Its viz chose it.
         } else if (members.size() == parts.size()) {
           for (std::size_t i = 0; i < members.size(); ++i) {
             for (const auto& [name, value] : restore_) {
@@ -1325,18 +1657,19 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
         continue;
       }
 
-      variable.example = types::ExampleReal(line.name);
       auto found = previous.find(line.name);
       if (found != previous.end()) {
         variable.value = found->second;
       } else {
         // Nothing on screen for it: fall back to a loaded value, then to the
-        // example the type generated.
-        variable.value = variable.example;
+        // example its type chooses.
+        bool saved = false;
         for (const auto& [name, value] : restore_) {
-          if (name == line.name) { variable.value = value; break; }
+          if (name == line.name) { variable.value = value; saved = true; break; }
         }
+        if (!saved) variable.value = chosenReal(line.name);
       }
+      variable.example = variable.value;
       // The literal the app injects, standing behind a uniform of its own.
       Literal injected;
       injected.line = thisLine;
@@ -1487,7 +1820,14 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
     }
 
     // Anything else is passed through verbatim: it is either GLSL already, or
-    // it is the user's mistake to see reported.
+    // it is the user's mistake to see reported. In a viz it stays at the top,
+    // where its functions -- and its three programs -- can see it: a constant,
+    // a struct.
+    if (!vizOf.empty()) {
+      shaderFunctions += raw + "\n";
+      shaderBody += "\n";
+      continue;
+    }
     shaderBody += "  " + raw + "\n";
     shaderFunctions += "\n";
   }
@@ -1504,7 +1844,7 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
       definedNames_.push_back(name);
     }
   };
-  if (ordinary) {
+  if (shares) {
     for (const Span& span : spans) {
       SharedFunction fn;
       fn.name = span.head.name;
@@ -1527,6 +1867,40 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
       }
       sharedFunctions_.push_back(std::move(fn));
       define(span.head.name);
+    }
+    // **A function of any other shape is shared too** -- called from any box,
+    // drawn by none. Its declaration is its head, up to the bracket that closes
+    // what it takes.
+    for (std::size_t k = 0; k < otherSpans.size(); ++k) {
+      const auto [first, last] = otherSpans[k];
+      const std::string& head = lines[static_cast<std::size_t>(first)];
+      const std::size_t  open = head.find('(');
+      std::size_t        close = std::string::npos;
+      int                depth = 0;
+      for (std::size_t i = open; open != std::string::npos && i < head.size(); ++i) {
+        if (head[i] == '(') ++depth;
+        if (head[i] == ')' && --depth == 0) { close = i; break; }
+      }
+      if (close == std::string::npos) continue;   // a head over several lines: kept home
+      SharedFunction fn;
+      fn.name = otherNames[k];
+      fn.home = this;
+      const std::size_t start = head.find_first_not_of(" \t");
+      std::string declaration = head.substr(start, close + 1 - start) + ";";
+      glslops::Rewrite(declaration, &fn.declaration, nullptr);
+      if (fn.declaration.empty()) fn.declaration = declaration;
+      std::string text;
+      for (int i = first; i <= last; ++i) text += hoisted[static_cast<std::size_t>(i)] + "\n";
+      fn.text = text;
+      glslops::Rewrite(text, &fn.text, nullptr);
+      for (const Variable& variable : variables) {
+        if (!variable.local || variable.declaredLine < first || variable.declaredLine > last) {
+          continue;
+        }
+        for (const Literal& literal : variable.literals) fn.uniforms.push_back(literal.uniform);
+      }
+      sharedFunctions_.push_back(std::move(fn));
+      define(otherNames[k]);
     }
     for (const Variable& variable : variables) {
       if (variable.local || variable.kind == Kind::Function) continue;
@@ -1593,56 +1967,43 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
       }
     }
   }
-  const Taken taken = Take(canvas, wanted_, this, definedNames_);
+  ownNames_ = definedNames_;
+  if (!shares) {
+    // A viz defines no names on the canvas, but its own are still its own.
+    for (std::string& name : vizglsl::FunctionNames(lines)) ownNames_.push_back(std::move(name));
+    for (const Variable& variable : variables) ownNames_.push_back(variable.name);
+  }
+  const Taken taken = Take(canvas, wanted_, this, ownNames_);
   derivedElsewhere_ = DerivedElsewhere(canvas, wanted_, this);
   importKey_ = KeyOf(canvas, taken, definedNames_, saysAlgebra_, derivedElsewhere_) +
-               VizzesKey(functions_, canvas);
+               VizzesKey(functions_, canvas, importedSource_) + ExampleKey(canvas);
 
-  // Declared in the prologue, before this box's own functions: the knobs as
-  // uniforms, the values as globals, then every function's declaration -- so
-  // functions from different boxes can call each other whichever order they
-  // are written in -- and then the functions themselves.
-  std::string imports;
   std::string importSeed;
-  {
-    std::vector<Literal> kept = std::move(imported_);
-    imported_.clear();
-    const auto knob = [&](const std::string& uniform, int width, bool array) {
-      Literal literal;
-      literal.uniform = uniform;
-      literal.array = array;
-      if (width > 1) literal.components.assign(static_cast<std::size_t>(width), 0.0f);
-      for (const Literal& was : kept) {
-        if (was.uniform != uniform) continue;
-        literal.value = was.value;
-        if (was.components.size() == literal.components.size()) {
-          literal.components = was.components;
-        }
+  std::string imports = WriteImports(taken.values, taken.functions, &importSeed);
+  // And the knobs of the vizes it draws its functions with, declared once
+  // however many of them read one.
+  for (const Drawn& drawn : Needed(functions_, canvas, importedSource_)) {
+    for (const Literal& knob : canvas.functionVizes.at(drawn.type + "@" + drawn.dw).knobs) {
+      // Its own already, or taken already: declared once.
+      bool had = std::any_of(imported_.begin(), imported_.end(),
+                             [&](const Literal& was) { return was.uniform == knob.uniform; });
+      for (const Variable& variable : variables) {
+        for (const Literal& literal : variable.literals) had = had || literal.uniform == knob.uniform;
+      }
+      if (had) continue;
+      Literal literal = knob;
+      if (const auto now = canvas.vizKnobs.find(knob.uniform); now != canvas.vizKnobs.end()) {
+        literal = now->second;
       }
       imported_.push_back(literal);
-      if (array) {
-        imports += "uniform float " + uniform + "[" + std::to_string(width) + "];\n";
+      if (literal.array) {
+        imports += "uniform float " + literal.uniform + "[" +
+                   std::to_string(literal.components.size()) + "];\n";
       } else {
-        imports += std::string(width == 3 ? "uniform vec3 " : "uniform float ") + uniform + ";\n";
+        imports += std::string(literal.components.size() == 3 ? "uniform vec3 "
+                                                              : "uniform float ") +
+                   literal.uniform + ";\n";
       }
-    };
-    importedSource_.clear();
-    importedNames_.clear();
-    for (const SharedValue* value : taken.values) importedNames_.push_back(value->name);
-    for (const SharedFunction* fn : taken.functions) importedNames_.push_back(fn->name);
-    for (const SharedValue* value : taken.values) {
-      if (!value->uniform.empty()) knob(value->uniform, value->width, value->array);
-      imports += value->type + " " + value->name + ";\n";
-      importSeed += "  " + value->name + " = " + value->init + ";\n";
-      importedSource_ += value->type + " " + value->name + " = " + value->init + ";\n";
-    }
-    for (const SharedFunction* fn : taken.functions) {
-      for (const std::string& uniform : fn->uniforms) knob(uniform, 1, false);
-    }
-    for (const SharedFunction* fn : taken.functions) imports += fn->declaration + "\n";
-    for (const SharedFunction* fn : taken.functions) {
-      imports += fn->text;
-      importedSource_ += fn->text;
     }
   }
   for (std::string& type : clifford::TypesMentioned(importedSource_, signature)) {
@@ -1709,9 +2070,77 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   }
 
 
+  // **A viz's three programs are made from the lines as this build made them**:
+  // its functions hoisted, with their knobs behind the same uniforms the box's
+  // own shader has, and every line that gives a value at the top moved into the
+  // top of each program's `main`, after what the sketch shares.
+  const auto assembleViz = [&]() {
+    const auto split = [&](const std::string& text) {
+      std::vector<std::string> out;
+      std::size_t              from = 0;
+      while (from < text.size()) {
+        const std::size_t end = text.find('\n', from);
+        out.push_back(text.substr(from, (end == std::string::npos ? text.size() : end) - from));
+        if (end == std::string::npos) break;
+        from = end + 1;
+      }
+      out.resize(lines.size());
+      return out;
+    };
+    std::string run;
+    for (const std::string& line : split(shaderBody)) {
+      if (line.find_first_not_of(" \t") != std::string::npos) run += line + "\n";
+    }
+    std::string runRewritten = run;
+    glslops::Rewrite(run, &runRewritten, nullptr);
+    // The box's own knobs, and its values -- globals, as in its shader.
+    std::string declared;
+    for (const Variable& variable : variables) {
+      for (const Literal& literal : variable.literals) {
+        if (literal.array) {
+          declared += "uniform float " + literal.uniform + "[" +
+                      std::to_string(literal.components.size()) + "];\n";
+        } else {
+          declared += std::string(variable.kind == Kind::Color ? "uniform vec3 " : "uniform float ") +
+                      literal.uniform + ";\n";
+        }
+      }
+      if (variable.local) continue;
+      if (variable.kind == Kind::Real) declared += "float " + variable.name + ";\n";
+      else if (variable.kind == Kind::Color) declared += "Color " + variable.name + ";\n";
+      else if (variable.kind == Kind::Multivector) declared += variable.type + " " + variable.name + ";\n";
+    }
+    // A model's lines are kept from the box's own shader, which cannot read
+    // them; the viz's build is what knows what they mean.
+    std::vector<std::string> made = split(shaderFunctions);
+    for (std::size_t i = 0; i < made.size(); ++i) {
+      if (modelLine[i]) made[i] = lines[i];
+    }
+    viz_ = vizglsl::Assemble(made, vizOf, vizIn, signature, algebraTypes, imports + declared,
+                             importSeed + runRewritten);
+    if (!viz_.error.empty()) {
+      variables_ = std::move(variables);
+      fail(viz_.errorLine, viz_.error);
+      return false;
+    }
+    vizLines_ = {viz_.bodyAt, viz_.bodyAt, static_cast<int>(lines.size()), viz_.sharedAt,
+                 viz_.bodyAt};
+    vizGlsl_ = viz_.compute + viz_.vertex + viz_.fragment;
+    return true;
+  };
+
   // A box of nothing but function definitions is still a box worth building:
   // it defines machines, and a machine can be fed and drawn even though it
-  // declares no value of its own.
+  // declares no value of its own. A viz with neither is only its programs.
+  if (variables.empty() && functions_.empty() && !vizOf.empty()) {
+    variables_.clear();
+    probed_.clear();
+    glsl_.clear();
+    if (!assembleViz()) return;
+    error_ = {};
+    state_ = (running && vizGlsl_ == runningViz) ? State::ShaderReady : State::Shading;
+    return;
+  }
   if (variables.empty() && functions_.empty()) {
     variables_.clear();
     state_ = State::Empty;
@@ -1764,9 +2193,10 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   const bool colour = joined.find(types::color::kName) != std::string::npos ||
                       importedSource_.find(types::color::kName) != std::string::npos;
   const std::string head =
-      ShaderPrologue(variables, signature, algebraTypes, imports, functions, seed,
-                     functionNames_, functions_, complex, colour, canvas, &prologueLines,
-                     &functionsAt, &sharedAt);
+      ShaderPrologue(variables, signature, algebraTypes,
+                     vizOf.empty() ? imports : vizglsl::Stubs() + imports, functions, seed,
+                     functionNames_, functions_, complex, colour, canvas, importedSource_,
+                     &prologueLines, &functionsAt, &sharedAt);
   // The box's lines appear twice: hoisted above main, and again inside it.
   glslLines_ = {functionsAt, prologueLines, static_cast<int>(lines.size()), sharedAt,
                 functionsAt};
@@ -1803,6 +2233,7 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   }
 
   glsl_ = head + traced + ProbeEpilogue(probed_, functions_, signature);
+  if (!vizOf.empty() && !assembleViz()) return;
 
   variables_ = std::move(variables);
   // **A number typed in is not a reason to compile.** Every number a variable is
@@ -1810,7 +2241,7 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   // exactly the shader already running -- and the new numbers reach it as
   // uniforms on the next frame, which is what a knob does too. Compiling it
   // again would be a fifth of a second of nothing on a box with an algebra in it.
-  if (running && glsl_ == runningGlsl) {
+  if (running && glsl_ == runningGlsl && vizGlsl_ == runningViz) {
     state_ = State::ShaderReady;
     error_ = {};
     return;
@@ -1832,7 +2263,7 @@ int Program::FunctionAt(int line) const {
   return -1;
 }
 
-void Program::ShaderCompiled(bool ok, const std::string& log) {
+void Program::ShaderCompiled(bool ok, const std::string& log, bool viz) {
   if (state_ != State::Shading) return;
   if (ok) {
     state_ = State::ShaderReady;
@@ -1841,7 +2272,7 @@ void Program::ShaderCompiled(bool ok, const std::string& log) {
   }
 
   state_ = State::Failed;
-  error_ = compiler::ParseGlslLog(log, glslLines_);
+  error_ = compiler::ParseGlslLog(log, viz ? vizLines_ : glslLines_);
 
   // **A derived value is not shared**, and the driver can only say the name is
   // undeclared -- true, and no help. So a complaint about a name another box

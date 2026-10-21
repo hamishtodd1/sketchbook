@@ -240,7 +240,16 @@ folding them took `realfunction` from 43.8 ms to 4.5 and `glsl` from 20.4 to 8.7
 - **A box's lines appear twice**: hoisted above `main` (functions, padded to one
   line per line) and again inside it. Mapping a driver's line back takes two
   starts (`compiler::ShaderLines`), plus a range for shared code (`sharedAt`); the
-  body is tried first.
+  body is tried first. Each start is the count of lines *before* the box, so its
+  line n is `start + n` -- the range check was off by one, and only a fallback
+  hid it. **A second error outside the box is dropped**: it is the app's own
+  lines (end of `main`, the probe) choking on the first mistake, and once read
+  as "line 7" of a two-line box.
+- **Only Mesa gives a column.** NVIDIA's `0(149) : error C0000: ...` has none,
+  so the parser keeps the token the message names (`at token ";"`, or else the
+  first quoted thing, `undefined variable "qq"`) and the balloon's red caret
+  goes under its first appearance on the line, or under the line's first
+  character.
 - **`mathprogram` knows nothing about GL.** It assembles and stops in
   `State::Shading`; the host compiles on the GL thread and calls
   `ShaderCompiled`. Driver logs come in two shapes, both parsed in
@@ -407,7 +416,10 @@ so a blanket rewrite is safe on ordinary code (`glslops::BuiltinOverloads`).
   it *took* changed (`ImportsStale`, comparing an `importKey`). Only those are
   rebuilt, and only a different shader is compiled.
 - A box **takes** what it mentions and does not define, and whatever that mentions
-  (`Take`). Values arrive as a uniform and a global set where drawing starts;
+  (`Take`) -- every function of a name, since one can be overloaded. A function
+  of any shape is offered: one the reader cannot read as an arrow is declared by
+  its head up to the bracket that closes it (a head over several lines stays
+  home). Values arrive as a uniform and a global set where drawing starts;
   functions arrive as declarations first, then text, so functions in different
   boxes can call each other in any order.
 - Knob values are copied across each frame (`PullImports`).
@@ -435,6 +447,7 @@ helper visible to that window's own functions.
 | `vec3 position(T v)` | where wires attach |
 | `float grab(T v)` | pixels from the pointer |
 | `T drag(T v)` | the value the pointer asks for |
+| `T example()` | a new value; `rand()` seeded by the variable's name, the walls in `sbLimitsMin`/`Max` |
 
 **A model piece**: a `meshN` whose whole body is `model("file.obj");`
 (`vizglsl::Assemble` finds it by regex) names `Sources::model[k]`; its lines are
@@ -455,6 +468,77 @@ Handed to every stage: `sbPointer` (pixels from the window's corner),
 dw space), `sbPixel` (a chrome pixel in dw units, in a flat dw), `sbTint` (the
 fragment stage), and `sbUncut`, which `vert` sets for something not in the space
 the walls cut.
+
+**A viz box is built as a box** (`Program::Rebuild`): the whole ordinary build
+runs on it -- knobs, globals, the trace, fed functions -- and then `assembleViz`
+makes its three programs from the *same* lines as that build left them:
+`shaderFunctions` (every function hoisted, knobs already behind their uniforms,
+model lines put back) as the viz's lines, and each non-blank line of
+`shaderBody` (what runs at the top, rewritten) seeded into every `main`, with
+the box's uniforms and globals declared beside what it takes. So a knob is one
+uniform in both, and `VizGpu` sets the box's own literals as it sets imported
+ones (`EachKnob`). In the box's own shader, what only a viz has stands in as
+`vizglsl::Stubs()` (`emit` does nothing, the pointer is zero). A viz's standard
+functions are taken out of `spans`, so nothing feeds or shares them. The viz's
+programs are compared as `vizGlsl_` beside `glsl_`, so an edit that changes
+neither compiles nothing; `ShaderCompiled(..., viz)` reads a log from the viz's
+programs with `vizLines_`. `CompileShader` builds the viz first and then the
+box's shader, unless the box has nothing for a window or is a built-in
+(`SetLibrary`). A function's viz keeps the old path: it is assembled alone.
+
+**A function's viz** (`vizglsl::AssembleFunctionViz`): its own free reals are
+found in `Rebuild` (a function's local becomes `float k = <uniform>;`, a top-level
+one is blanked and renamed to its uniform), and what it takes is written in as
+declarations and text, renamed with the rest (`Spliced`), a shared value renamed
+to `(<its init>)`. The knobs -- its own literals and `imported_` -- go out on
+`FunctionViz::knobs` (`VizStore::FunctionVizes`, which also fills a map of their
+numbers this frame, `Canvas::vizKnobs`, set every frame outside the regather).
+A box declares each knob of the vizes it needs once, skipping its own and what
+it took (`imported_`), and `PullImports` reads them from `vizKnobs` -- so a drag
+compiles nothing. Built-ins' numbers are their sketch's, fetched with
+`PullImports(library->canvas)`. **`example`** in a function viz is spliced with
+the rest, its `rand()` renamed to `sbExampleRand`, whose state (`ExampleRandom`,
+in every box's prologue) a chosen body sets to the function's `NameSeed`:
+`ret sbExample_T_W(param x); ret u(param p) { sbExampleState = Nu; return
+sbExample_T_W(p); }`, with a forward declaration since the viz text comes after
+the box's functions. The type is `FunctionTypeOf(param, ret)` -- input first. A
+box taking such a body from another box needs that viz too (`Needed`: what it
+draws with, plus any viz whose spliced `example` appears in `importedSource_`).
+The page reads the body from `Program::InjectedBody`. A type with no viz example
+(a function of multivectors) keeps `types::realfunction::ExampleFunctionBody`.
+
+**`example`** runs in the compute program as `sbMode` 3, writing one value
+where the answers go (`VizGpu::Example`: a buffer the size of one value, a
+dispatch, a read -- a stall, so only for a new variable). `rand()` and its state
+are in every stage, seeded by `sbSeed` (`types::NameSeed` of the name) in
+`example` and by the vertex or pixel elsewhere. `Program::Rebuild` asks
+`Canvas::example` (set by the app, `App::ExampleSource`, to `VizStore::Example`)
+only where a value is new; `VizStore::Example` reads the built-ins for the
+asking box's algebra if it has not yet, since a canvas being opened is built
+before the first `Sync`. A box opened or pasted is given its canvas before it is
+built (`SetCanvas`), or it would build against an empty one with no examples.
+Two vizes of one type writing `example` are found in `Gather`
+(`Canvas::exampleTwice`) and refused in both (`ExampleKey`, also in the import
+key, so the error comes and goes as the second one does). The walls come from
+`SpacePanel::ExampleFrame`.
+
+**Any function is hoisted** (`otherSpans`, from `vizglsl::FunctionSpans`): one
+the reader cannot read as an arrow -- two arguments, none -- goes above `main` as
+written, with knobs for its free reals (`knobInside`), instead of landing inside
+`main`, where GLSL cannot have it. In a viz box, anything else at the top level
+(a constant, a struct) stays at the top too, where its functions can see it.
+
+**What its sketch shares** (`Program::Rebuild`'s viz branch): a viz takes what
+it mentions and does not define itself (`vizglsl::FunctionNames`, kept in
+`ownNames_` so `ImportsStale` asks what the build asked), written by the same
+`WriteImports` as an ordinary box. The imports go after the padded prologue, so
+they sit on the same lines of all three programs (`Sources::sharedAt`, mapped as
+"in something shared"); the shared values' globals are seeded at the top of each
+`main`. A knob it takes is a uniform `VizGpu` sets on every run (`Slots::knobs`,
+from `Program::imported()`); `Refresh`, from `VizStore::Find`, lays the meshes
+down again when a knob has moved since, and `VizPane::Settle` counts the knobs
+among what the answers depend on. A built-in viz fetches its knobs from its own
+library's canvas (`PullImports(library->canvas)`) -- as saved.
 
 **Three programs per window**: a compute program running `mesh` and the questions
 (`sbMode` 0 mesh, 1 position and grab for every value, 2 drag one value), and a
@@ -655,6 +739,11 @@ shown. The canvas file records each window's points.
   A window standing for a value needs both, or the light goes one way only: the
   colour and space windows had only the first, so hovering a colour's name lit
   nothing. A new dw that shows values adds its `MarkerFor` to that list.
+- **What is lit blinks everywhere it is shown**: the app hands the whole lit set
+  (`active_`) to every window that shows values (`SetLit`), and each adds it to
+  what it lit itself. Each window used to blink only what was under its own
+  pointer or being dragged, so a name pointed at in the code got its wire but
+  its value did not blink. A new dw that shows values takes `SetLit` too.
 - **A wire's side** is one bool per held value, frozen while held (`WireAnchor`).
   Continuous geometry was tried and undone as a second mechanism for the same
   problem. Wiring is meant to stay simple: the smallest fix, and revert growth.
@@ -680,6 +769,27 @@ shown. The canvas file records each window's points.
   has faded at least halfway in; `SnapToGrid` in `grid.*`; every box placement
   goes through `App::PlaceBlock`. Drawing the dots at 1920x1080 costs half a
   millisecond, only while they are up.
+- **The grip** (`grip.h`, `App::HandleGrip`): asked before the rims and the text,
+  since it sits just inside both. A drag becomes one scale -- the pointer's
+  travel along the window's diagonal (`GripScale`) -- snapped for pictures and
+  prose (`SnapResizeScale`), applied about the window's top-left as it was at the
+  press; a box's overlaps are resolved on release. A picture's grip is its fourth
+  crop corner (`MediaPanel::GripOf`). **The wheel has its own flag** in
+  `Viewport::Update`, apart from `pointerFree`: a hovered picture or rim claims
+  the pointer but not the wheel, which zooms unless a conversation or a window
+  with its own wheel (`DwUnder`'s kind) is under it. Dev: `--dev-keys
+  "grip:dx,dy"` drags the dev box's grip by that many world units.
+- **A display window's grip** (`Resizable`, in `grip.h`): every panel says how
+  many windows it has, where each is on screen, how to loosen one
+  (`LoosenWindow`: its screen top-left becomes its `worldPos`, `docked` false)
+  and its `size` -- a multiple of where its kind starts, used only while loose
+  (`RectFor`), saved last on its record and read only if there. The app asks the
+  panels in draw order after the pictures and before the boxes, and draws their
+  grips itself, over all of them, with `DrawGripOnAnything` since a window's
+  inside can be any colour. A number line loosened by its grip keeps the width it
+  had docked (`NumberLine::looseWidth`, world units, saved after its size); one
+  carried away still takes the standard loose width. Dev: `"dwgrip:kind,index,dx,dy"` (kind in `Resizables()`
+  order: axes, plots, pictures, colours, surfaces, volumes, spaces).
 - **Undo** (`TrackUndo`): a step is the canvas text without the camera (4 KB, a
   tenth of a millisecond for the demo deck), taken once nothing is held and a
   moment has passed since the last click, key or wheel. Restoring keeps a box whose
@@ -734,7 +844,12 @@ shown. The canvas file records each window's points.
   box, puts the caret in it and plays named keys through the calls `HandleInput`
   makes (`CodeBlock::DevKeys`), then logs its lines as `DEVKEYS:` -- the way to
   test editing without sending keystrokes to the desktop. `paste:a|b` pastes
-  without touching the clipboard.
+  without touching the clipboard. `wait:N` spreads the rest over frames, so a
+  compile can come back: `blur` and `focus` move the caret out and in,
+  `compile`, `click-balloon` and `state` (logged as `DEVKEYS-STATE`) test the
+  error balloon. `set:name=value` moves a knob as a drag does.
+- **`--vizes <folder>`** reads the built-in vizes from there instead of the repo's
+  `vizes/`: the way to test a change to them while Hamish has one open.
 
 ---
 
@@ -826,7 +941,7 @@ handles sit inside the rim's grab band and clear of the transport.
   or its being still in flight changes. Drawing scales the layout by the zoom and
   typesets only the formulas in view, at the current size, from a bounded cache.
   While a reply streams, a formula whose closing `$` has not arrived is held back.
-- **Wiring**: the panel is asked for the pointer before the wheel-resize and
+- **Wiring**: the panel is asked for the pointer before the grip and
   every other window, since it is drawn over them; `hover::SetCovered` makes
   `hover::Pointer()` nowhere for everything else while the pointer is on one, and
   the panel itself reads `hover::TopPointer()`. With the caret in one it takes
@@ -948,7 +1063,7 @@ handles sit inside the rim's grab band and clear of the transport.
 | `selection.h` | the lasso, and the eight things every panel does with a selection |
 | `dock.h` | where a window a box makes goes before anybody moves it |
 | `hover.h`, `carry.h`, `windowname.h` | what the pointer is over; what a carried window follows; the name above a dw |
-| `grid.*`, `resize.*` | the dots and snapping; the wheel-resize rule |
+| `grid.*`, `resize.*`, `grip.h` | the dots and snapping; the resize grip and how a drag becomes a scale |
 | `fontstore.*`, `text.*`, `tex/` | fonts, plain text, the TeX engine |
 | `highlight.*` | Monokai colouring for a line of GLSL |
 | `ui.*`, `recent.*`, `settings.*` | the Escape menu; recent canvases; fullscreen |

@@ -593,16 +593,19 @@ Rectangle AxisPanel::RectFor(std::size_t index, const Viewport& viewport,
   const NumberLine& line = lines_[index];
   const float boxWidth =
       (line.dock != nullptr) ? line.dock->DockWidth(viewport, fonts) : kFloatWidth * zoom;
-  const float width = line.docked ? std::max(boxWidth, 200.0f * zoom) : kFloatWidth * zoom;
+  const float loose = line.docked ? 1.0f : line.size;
+  const float width =
+      line.docked ? std::max(boxWidth, 200.0f * zoom)
+                  : (line.looseWidth > 0.0f ? line.looseWidth : kFloatWidth) * zoom * loose;
 
   // A row being carried follows the pointer but keeps its place in the stack.
   if (drag_ == Drag::Move && dragMoved_ && index == dragLine_) {
-    return {dragScreenPos_.x, dragScreenPos_.y, width, kRowHeight * zoom};
+    return {dragScreenPos_.x, dragScreenPos_.y, width, kRowHeight * zoom * loose};
   }
 
   if (!line.docked || line.dock == nullptr) {
     const Vector2 topLeft = viewport.ToScreen(line.worldPos);
-    return {topLeft.x, topLeft.y, kFloatWidth * zoom, kRowHeight * zoom};
+    return {topLeft.x, topLeft.y, width, kRowHeight * zoom * loose};
   }
 
   // Docked rows stack under their own box, in order.
@@ -1202,6 +1205,7 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts, VizStore& vizes
   // things saying "this one" all say it about the same one.
   std::vector<ActiveValue> active;
   ActiveVariables(viewport, fonts, &active);
+  active.insert(active.end(), lit_.begin(), lit_.end());
   const auto inUse = [&active](const AxisRef& ref) {
     for (const ActiveValue& value : active) {
       if (value.block == ref.block && value.name == ref.name) return true;

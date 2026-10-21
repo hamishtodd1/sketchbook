@@ -163,6 +163,8 @@ class CodeBlock {
   const Geometry& Measure(const Viewport& viewport, FontStore& fonts) const;
 
   bool    Contains(Vector2 screenPoint, const Viewport& viewport, FontStore& fonts) const;
+  // Where its resize grip is on screen (grip.h).
+  Rectangle Grip(const Viewport& viewport, FontStore& fonts) const;
   // The grab band around the edge, which moves the whole window.
   bool    OnRim(Vector2 screenPoint, const Viewport& viewport, FontStore& fonts) const;
   void    SetDragging(bool dragging) { dragging_ = dragging; }
@@ -196,7 +198,7 @@ class CodeBlock {
   void    SetJustification(Justify value) { justify_ = value; }
 
   // --- resizing --------------------------------------------------------------
-  // The wheel resizes a box uniformly, which for a box of type means the type
+  // Its grip resizes a box uniformly, which for a box of type means the type
   // gets bigger. `anchorWorld` is the corner that must not move.
   Rectangle WorldBounds(const Viewport& viewport, FontStore& fonts) const;
   void      Scale(float factor, Vector2 anchorWorld);
@@ -265,13 +267,18 @@ class CodeBlock {
   // skips the newest for the one after it. Every edit then happens at every
   // caret. Escape goes back to one (DropOtherCarets, true if there were others).
   void AddNextOccurrence(bool skip);
+  // The name (or word) the caret is on or beside, highlighted -- a double click,
+  // and Ctrl+D with nothing highlighted. False if the caret touches none.
+  bool SelectWordAtCaret();
   bool DropOtherCarets();
   // Alt+D over several carets: the first highlight's number or letter, counted
   // on at each caret after it -- 4 4 4 into 4 5 6, a a a into a b c.
   void IncrementSelections();
   // Dev: named keys, space-separated, done as HandleInput does them --
   // `caret:L,C` `anchor:L,C` `ctrl+d` `ctrl+shift+d` `alt+d` `type:abc` `backspace` `left`
-  // `end` `esc` `paste:a|b` (`|` a newline; the clipboard is not touched).
+  // `end` `esc` `paste:a|b` (`|` a newline; the clipboard is not touched),
+  // `compile`, `click-balloon` (not its copy button), `state` (logged) and
+  // `set:name=value` (a knob moved, as a drag moves it).
   void DevKeys(const std::string& keys);
 
   // --- cut, copy and paste, in the text ------------------------------------
@@ -442,6 +449,10 @@ class CodeBlock {
   const std::string& VizType() const { return program_.vizType(); }
   // The viz this box is, compiled and ready to draw -- or null.
   const VizGpu*      VizProgram() const { return viz_.Ready() ? &viz_ : nullptr; }
+  // A viz's mesh made again if a knob it takes from the sketch has moved.
+  void               RefreshViz() { viz_.Refresh(); }
+  // One of the built-in vizes' boxes: built for its viz alone, never drawn.
+  void               SetLibrary(bool value) { library_ = value; }
   // A viz of a function compiled standing alone, against a stand-in function:
   // one that has is one a box can compile in.
   bool               FunctionVizReady() const { return functionVizOk_; }
@@ -586,6 +597,11 @@ class CodeBlock {
   // every box, so that a neighbouring card can never be on top of it.
   void DrawChrome(const Viewport& viewport, FontStore& fonts) const;
   void DrawOverlay(const Viewport& viewport, FontStore& fonts) const;
+  // A click on the error balloon: on its copy button, the messages go to the
+  // clipboard and the button becomes a tick; anywhere else, the balloon goes
+  // away, red caret and all, until the next compile or until the caret leaves
+  // the box. True if the point was on it.
+  bool ClickError(Vector2 screenPoint);
 
  private:
   // Per line: its mathematical reading, and the typeset form at the current
@@ -790,7 +806,6 @@ class CodeBlock {
   void PositionOf(int offset, int* line, int* col) const;
   bool CaretRangeInRow(const OtherCaret& caret, const Row& row, std::size_t* from,
                        std::size_t* to) const;
-  bool SelectWordAtCaret();
   void PasteString(const std::string& text);
   void PasteAll(const std::string& text);
   // Whether the caret has ever been put somewhere on purpose. Until it has,
@@ -800,6 +815,13 @@ class CodeBlock {
   // from outside every frame, like the highlights: it is a fact about where the
   // pointer is, not something to remember.
   bool   insertCaret_ = false;
+  // Where the error balloon was last drawn (empty when it was not), and which
+  // error was clicked away: message, place and second message, as one string.
+  mutable Rectangle errorBalloon_{};
+  mutable Rectangle errorCopy_{};
+  std::string       dismissedError_;
+  std::string       copiedError_;
+  std::string       ErrorKey() const;
   double blinkAnchor_ = 0.0;
   bool   dirty_ = false;
   // Resolved during Draw, before the geometry that depends on it is measured.
@@ -829,6 +851,7 @@ class CodeBlock {
   bool                                  haveShader_ = false;
   // A viz box's programs and meshes.
   VizGpu                                viz_;
+  bool                                  library_ = false;
   bool                                  functionVizOk_ = false;
   std::vector<std::pair<std::string, int>> uniforms_;
   std::vector<Play>                     playing_;

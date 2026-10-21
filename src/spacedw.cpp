@@ -315,7 +315,7 @@ Rectangle SpacePanel::RectFor(std::size_t index, const Viewport& viewport,
                               FontStore& fonts) const {
   const float        zoom = viewport.Zoom();
   const SpaceWindow& window = windows_[index];
-  const float        tall = kFlankSide * zoom;
+  const float        tall = kFlankSide * zoom * window.size;
   const float        wide = tall * kSpaceAspect;
 
   if (dragging_ && dragMoved_ && index == dragView_) {
@@ -736,6 +736,14 @@ VizFrame SpacePanel::FrameFor(std::size_t index, Rectangle rect, Vector2 pointer
   return frame;
 }
 
+VizFrame SpacePanel::ExampleFrame() {
+  VizFrame frame;
+  frame.cut = true;
+  frame.limitsMin = {-kLimitX, -kLimitY, -kLimitZ};
+  frame.limitsMax = {kLimitX, kLimitY, kLimitZ};
+  return frame;
+}
+
 SpacePanel::Hit SpacePanel::Nearest(std::size_t index, bool samples, float reach) const {
   // Each type's viz says how near the pointer is to its own; the nearest of
   // those is the one under it, whichever type it is.
@@ -787,7 +795,10 @@ void SpacePanel::Prepare(std::size_t index, Rectangle rect, const std::string& t
     int          count = 0;
     const float* parts = PartsOf(*variable, &count);
     if (parts == nullptr || count != n) continue;
-    const bool on = lit.block == ref.block && lit.name == ref.name;
+    bool on = lit.block == ref.block && lit.name == ref.name;
+    for (const ActiveValue& value : lit_) {
+      on = on || (value.block == ref.block && value.name == ref.name);
+    }
     pane->Add({ref.block, ref.name}, Blink(ref.block->VariableColor(ref.name), on), parts, n);
   }
   if (window.home && window.dock != nullptr && window.dock->Samples().Live()) {

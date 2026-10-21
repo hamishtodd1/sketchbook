@@ -21,6 +21,7 @@
 #include "text.h"
 #include "busy.h"
 #include "hover.h"
+#include "grip.h"
 #include "theme.h"
 #include "grid.h"
 #include "types/examples.h"
@@ -503,10 +504,7 @@ std::string CodeBlock::Injection(int line) const {
     }
     for (const mathprogram::Function& fn : program_.functions()) {
       if (fn.name != head.name || fn.firstLine != line) continue;
-      return " { return " +
-             types::realfunction::ExampleFunctionBody(head.returnType, head.paramType,
-                                                      head.paramName, head.name, Algebra()) +
-             "; }";
+      return program_.InjectedBody(line);
     }
     return {};
   }
@@ -1310,6 +1308,10 @@ float CodeBlock::DockWidth(const Viewport& viewport, FontStore& fonts) const {
   return Measure(viewport, fonts).rect.width;
 }
 
+Rectangle CodeBlock::Grip(const Viewport& viewport, FontStore& fonts) const {
+  return GripRect(Measure(viewport, fonts).rect);
+}
+
 bool CodeBlock::Contains(Vector2 point, const Viewport& viewport, FontStore& fonts) const {
   return CheckCollisionPointRec(point, Measure(viewport, fonts).rect);
 }
@@ -1557,6 +1559,9 @@ bool CodeBlock::EraseSelection() {
 }
 
 void CodeBlock::SetFocused(bool focused) {
+  // Leaving a box is what builds it, so it brings back a balloon put away --
+  // even when nothing was edited and so nothing is built.
+  if (focused_ && !focused) dismissedError_.clear();
   focused_ = focused;
   others_.clear();
   blinkAnchor_ = GetTime();
@@ -1900,6 +1905,20 @@ void CodeBlock::DevKeys(const std::string& keys) {
       });
     } else if (key == "esc") {
       DropOtherCarets();
+    } else if (key.rfind("set:", 0) == 0) {
+      const std::size_t equals = key.find('=');
+      if (equals != std::string::npos) {
+        SetVariableValue(key.substr(4, equals - 4), std::stof(key.substr(equals + 1)), true);
+      }
+    } else if (key == "compile") {
+      RequestCompile();
+    } else if (key == "click-balloon") {
+      ClickError({errorBalloon_.x + 4.0f, errorBalloon_.y + errorBalloon_.height - 4.0f});
+    } else if (key == "state") {
+      TraceLog(LOG_INFO, "DEVKEYS-STATE balloon %d failed %d line %d: %s",
+               errorBalloon_.width > 0.0f ? 1 : 0,
+               program_.state() == mathprogram::State::Failed ? 1 : 0, program_.error().line,
+               program_.error().message.c_str());
     } else if (key.rfind("paste:", 0) == 0) {
       std::string text = key.substr(6);
       std::replace(text.begin(), text.end(), '|', '\n');
@@ -2132,7 +2151,7 @@ void CodeBlock::InsertNewline(bool indentToo) {
 // How far one Tab moves a line. Spaces rather than a tab character: a typeset
 // row's indentation is measured off its own code in monospaced cells, and one
 // space is one cell where a tab is a guess.
-constexpr int kIndentWidth = 4;
+constexpr int kIndentWidth = 2;
 
 // How much whitespace a line has at `from`.
 int LeadingSpaces(const std::string& line, int from) {
@@ -2650,6 +2669,10 @@ bool CodeBlock::HandleChrome(const Viewport& viewport, FontStore& fonts) {
 
 void CodeBlock::RequestCompile() {
   dirty_ = false;
+  // A balloon put away stays away only until the next compile: the same error
+  // coming back from it is shown again, with its copy button fresh.
+  dismissedError_.clear();
+  copiedError_.clear();
   // A text box is not a program. Nothing about words compiles, and trying
   // would put a diagnostic on a sentence.
   static const mathprogram::Canvas kAlone;
@@ -2915,10 +2938,17 @@ void CodeBlock::CompileShader() {
     program_.ShaderCompiled(functionVizOk_, log);
     return;
   }
+  // A viz of a value is three programs, and running its `mesh` once is part of
+  // building them. It is a box too, with knobs and windows of its own, and
+  // those come from its own shader, built after -- unless it has nothing for a
+  // window, or it is a built-in, whose windows nobody sees.
   if (!program_.vizType().empty()) {
-    const bool ok = viz_.Build(program_.viz(), &log);
-    program_.ShaderCompiled(ok, log);
-    return;
+    const bool ok = viz_.Build(program_.viz(), &program_, &log);
+    if (!ok || program_.glslSource().empty() || library_) {
+      program_.ShaderCompiled(ok, log, /*viz=*/true);
+      return;
+    }
+    log.clear();
   }
 
   // A sampler box lays a spread of points down, so like a viz's `mesh` it is
@@ -3329,6 +3359,11 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
     }
   }
 
+  // The grip, while the box is pointed at.
+  if (!absorbed_ && (rimHot_ || CheckCollisionPointRec(hover::Pointer(), g.rect))) {
+    DrawGrip(GripRect(g.rect), Fade(asWords ? kSlideInk : kCodeFg, 0.45f));
+  }
+
   // A text box being written in has no card to say so, so its rim does.
   if (rimHot_ || dragging_ || selected_ || (asWords && focused_)) {
     DrawRim(g.rect, g.zoom, dragging_ || selected_ || focused_);
@@ -3533,7 +3568,11 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
   // What the driver said, shown against the character it pointed at. The
   // second error comes with it: one mistake usually has another right behind
   // it, and seeing both saves a round trip.
+  errorBalloon_ = {};
+  errorCopy_ = {};
   if (program_.state() != mathprogram::State::Failed || !program_.error().present) return;
+  // Clicked away: the caret under the character goes with the balloon.
+  if (ErrorKey() == dismissedError_) return;
   const bool         failed = true;
   const int          errorLine = program_.error().line;
   const int          errorColumn = program_.error().column;
@@ -3550,7 +3589,16 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
     const int lineCount = static_cast<int>(lines_.size());
     const int line = std::clamp(errorLine, 1, lineCount) - 1;
     const std::string& text = lines_[static_cast<std::size_t>(line)];
-    const int column = std::clamp(errorColumn, 1, static_cast<int>(text.size()) + 1) - 1;
+    int column = std::clamp(errorColumn, 1, static_cast<int>(text.size()) + 1) - 1;
+    if (!program_.error().columnKnown) {
+      // No column from the driver: the token it gave up at, if it is on the
+      // line, or else where the line's writing starts.
+      const std::string& token = program_.error().token;
+      const std::size_t  found = token.empty() ? std::string::npos : text.find(token);
+      const std::size_t  start = text.find_first_not_of(" \t");
+      column = static_cast<int>(found != std::string::npos ? found
+                                : start != std::string::npos ? start : 0);
+    }
 
     anchorX = g.textLeftTop.x +
               text::Measure(fonts, Face::Mono,
@@ -3589,16 +3637,68 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
     width = std::max(width, text::Measure(fonts, Face::MainRegular, line, messageEm));
   }
 
+  // The copy button sits in the top-right corner, a line high.
+  const float icon = lineHeight * 0.8f;
+  const float iconGap = pad;
+
   // Top-left corner just below the character that the error points at.
-  const Rectangle box = {anchorX, anchorBottom + 2.0f * g.zoom, width + 2.0f * pad,
+  const Rectangle box = {anchorX, anchorBottom + 2.0f * g.zoom,
+                         width + 2.0f * pad + iconGap + icon,
                          lineHeight * static_cast<float>(wrapped.size()) + 2.0f * pad};
   DrawCard(box, g.zoom, kErrorBg, kErrorCaret, 1.0f);
+  errorBalloon_ = box;
+
+  // Two pages, one over the other -- or, once copied, a tick.
+  const Rectangle button = {box.x + box.width - pad - icon, box.y + pad + (lineHeight - icon) * 0.5f,
+                            icon, icon};
+  errorCopy_ = button;
+  const bool  hot = CheckCollisionPointRec(hover::Pointer(), button);
+  const Color ink = Fade(kErrorFg, hot ? 0.9f : 0.45f);
+  const float stroke = std::max(1.0f, icon * 0.09f);
+  if (copiedError_ == ErrorKey()) {
+    DrawLineEx({button.x + icon * 0.12f, button.y + icon * 0.55f},
+               {button.x + icon * 0.40f, button.y + icon * 0.82f}, stroke * 1.4f, ink);
+    DrawLineEx({button.x + icon * 0.40f, button.y + icon * 0.82f},
+               {button.x + icon * 0.90f, button.y + icon * 0.20f}, stroke * 1.4f, ink);
+  } else {
+    const float     page = icon * 0.68f;
+    const Rectangle back = {button.x + icon - page, button.y, page, page};
+    const Rectangle front = {button.x, button.y + icon - page, page, page};
+    DrawRectangleRoundedLinesEx(back, 0.25f, 6, stroke, ink);
+    DrawRectangleRounded(front, 0.25f, 6, kErrorBg);
+    DrawRectangleRoundedLinesEx(front, 0.25f, 6, stroke, ink);
+  }
 
   float baseline = box.y + pad + ascent;
   for (const std::string& line : wrapped) {
     text::Draw(fonts, Face::MainRegular, line, {box.x + pad, baseline}, messageEm, kErrorFg);
     baseline += lineHeight;
   }
+}
+
+std::string CodeBlock::ErrorKey() const {
+  const compiler::Diagnostic& error = program_.error();
+  return error.message + "\n" + std::to_string(error.line) + ":" + std::to_string(error.column) +
+         "\n" + error.secondary;
+}
+
+bool CodeBlock::ClickError(Vector2 screenPoint) {
+  if (errorBalloon_.width <= 0.0f || !CheckCollisionPointRec(screenPoint, errorBalloon_)) {
+    return false;
+  }
+  if (CheckCollisionPointRec(screenPoint, errorCopy_)) {
+    // What the balloon says, as it says it: both errors, each on its line.
+    const compiler::Diagnostic& error = program_.error();
+    const std::string text = error.secondary.empty()
+                                 ? error.message
+                                 : error.message + "\n" + error.secondary;
+    SetClipboardText(text.c_str());
+    copiedError_ = ErrorKey();
+    return true;
+  }
+  dismissedError_ = ErrorKey();
+  errorBalloon_ = {};
+  return true;
 }
 
 // ------------------------------------------------------------------- maths

@@ -65,4 +65,10 @@ block 120 -200 20 0 0 0 0 0 0
 >   vec3 to = sbRayOrigin + sbRayDir * t;
 >   return Tri(to.z, to.y, to.x, 1.0);
 > }
+> 
+> // A new point: one you can see, somewhere inside the walls, with weight 1.
+> Tri example() {
+>   vec3 p = mix(sbLimitsMin, sbLimitsMax, vec3(0.1) + 0.8 * vec3(rand(), rand(), rand()));
+>   return e123 + p.x * e023 + p.y * e013 + p.z * e012;
+> }
 end

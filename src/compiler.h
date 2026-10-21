@@ -14,6 +14,10 @@ struct Diagnostic {
   bool        present = false;
   int         line = 1;    // 1-based
   int         column = 1;  // 1-based, in bytes
+  // Only Mesa says which column. Without one, the token the driver names
+  // (`at token ";"`) is looked for on the line instead.
+  bool        columnKnown = false;
+  std::string token;
   std::string message;     // just the text, with the file/line prefix stripped
   // The next error after that one, if there was one, said with its own line.
   // One mistake usually has another right behind it -- a missing semicolon
@@ -25,10 +29,11 @@ struct Diagnostic {
 // Where the box's lines ended up in the assembled shader. A box's text appears
 // *twice*: once as the functions hoisted above main -- GLSL has nowhere else to
 // put a function -- and once as the body inside it. So mapping a driver's line
-// back to the line that was written needs both starts, not one offset.
+// back to the line that was written needs both starts, not one offset. The
+// box's line n is the shader's line `functionsAt + n`, and `bodyAt + n`.
 struct ShaderLines {
-  int functionsAt = 0;   // first line of the hoisted block
-  int bodyAt = 0;        // first line of main's body
+  int functionsAt = 0;   // the line before the hoisted block
+  int bodyAt = 0;        // the line before main's body
   int count = 0;         // how many lines the box has
   // What other boxes share, compiled into this one: lines after `sharedAt` up
   // to and including `sharedEnd`. None when they are equal.

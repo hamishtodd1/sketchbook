@@ -1,4 +1,5 @@
 #include "app.h"
+#include "grip.h"
 
 #include <algorithm>
 #include <cctype>
@@ -34,6 +35,8 @@ std::string KeyTail(const std::string& key) {
 
 // A press that moves less than this is a click, not a drag.
 constexpr float kClickSlop = 6.0f;
+// How soon a second press is the same click again. Windows' own default.
+constexpr double kDoubleClickSeconds = 0.5;
 
 
 // Bumped whenever the on-disk shape changes.
@@ -46,6 +49,11 @@ bool App::Init(const std::string& assetDir, std::string* error) {
   options_.apiKeyTail = KeyTail(settings::ApiKey());
   // Every message to Claude carries the canvas as it is when it is sent.
   chats_.SetCanvasViewer([this]() { return ViewCanvas(); });
+  canvas_.example = ExampleSource();
+  // A viz choosing an example is told where its window's walls are.
+  vizes_.SetExampleFrames([](const std::string& dw) {
+    return (dw == "Space" || dw == "Spacetime") ? SpacePanel::ExampleFrame() : VizFrame{};
+  });
   chats_.SetPointedWindow([this](Rectangle* world, std::string* kind) {
     return DwUnder(devPointed_ ? devPointer_ : GetMousePosition(), world, kind);
   });
@@ -271,6 +279,7 @@ bool App::HandleBlockDrag() {
 void App::RemoveBlock(CodeBlock* block) {
   if (block == nullptr) return;
   if (focus_ == block) focus_ = nullptr;
+  if (devKeysBlock_ == block) devKeysBlock_ = nullptr;
   if (dragBlock_ == block) dragBlock_ = nullptr;
   if (textBlock_ == block) {
     textBlock_ = nullptr;
@@ -520,6 +529,7 @@ void App::PasteClipboard() {
     block->SetTextWidth(clip.textWidth);
     block->SetShowSource(clip.showSource);
     block->RestoreValues(clip.values);
+    block->SetCanvas(&canvas_);
     block->RequestCompile();
     // Selected as they arrive, so the paste can be moved straight where it is
     // wanted without hunting for it.
@@ -652,45 +662,116 @@ void App::HandleSelection() {
   }
 }
 
-bool App::HandleResize() {
-  const float wheel = GetMouseWheelMoveV().y;
-  if (wheel == 0.0f) return false;
-
+bool App::HandleGrip() {
   const Vector2 pointer = GetMousePosition();
-  // Pictures are drawn over the boxes, so they are asked first.
-  const int  item = media_.ItemAt(pointer, viewport_);
+
+  // --- under way ---------------------------------------------------------------
+  if (Gripping()) {
+    const bool alive =
+        grip_.block == nullptr ||
+        std::any_of(codeBlocks_.begin(), codeBlocks_.end(),
+                    [&](const std::unique_ptr<CodeBlock>& b) { return b.get() == grip_.block; });
+    if (!alive || (grip_.item >= 0 && grip_.item >= static_cast<int>(media_.Items().size())) ||
+        (grip_.panel != nullptr && grip_.index >= grip_.panel->GripCount())) {
+      grip_ = {};
+      return false;
+    }
+    MoveGrip(viewport_.ToWorld(pointer));
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) EndGrip();
+    return true;
+  }
+
+  // --- starting --------------------------------------------------------------
+  if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return false;
+  // Pictures are drawn over the display windows and they over the boxes, so
+  // they are asked in that order.
+  const int item = media_.ItemAt(pointer, viewport_);
+  if (item < 0) {
+    std::vector<Resizable*> panels = Resizables();
+    for (auto panel = panels.rbegin(); panel != panels.rend(); ++panel) {
+      for (int i = (*panel)->GripCount(); i-- > 0;) {
+        const Rectangle window = (*panel)->GripWindow(i, viewport_, fonts_);
+        if (!CheckCollisionPointRec(pointer, window)) continue;
+        if (!CheckCollisionPointRec(pointer, GripRect(window))) return false;   // on it, not its grip
+        StartDwGrip(*panel, i, viewport_.ToWorld(pointer));
+        return true;
+      }
+    }
+  }
   CodeBlock* block = (item >= 0) ? nullptr : BlockAt(pointer);
-  if (item < 0 && block == nullptr) return false;
+  if (item >= 0 && !CheckCollisionPointRec(pointer, media_.GripOf(item, viewport_))) return false;
+  if (item < 0 && (block == nullptr || block->Absorbed() ||
+                   !CheckCollisionPointRec(pointer, block->Grip(viewport_, fonts_)))) {
+    return false;
+  }
+  StartGrip(block, item, viewport_.ToWorld(pointer));
+  return true;
+}
 
-  const Rectangle mine =
-      (item >= 0) ? media_.WorldBounds(item) : block->WorldBounds(viewport_, fonts_);
-  const float   asked = std::pow(kResizeStep, wheel);
-  const Vector2 anchor = NearestCorner(mine, viewport_.ToWorld(pointer));
-
+void App::StartGrip(CodeBlock* block, int item, Vector2 fromWorld) {
+  grip_ = {};
+  grip_.block = block;
+  grip_.item = item;
+  grip_.start = (item >= 0) ? media_.WorldBounds(item) : block->WorldBounds(viewport_, fonts_);
+  grip_.from = fromWorld;
+  grip_.startEm = (block != nullptr) ? block->Em() : 0.0f;
   // A picture or a piece of prose snaps to the size of what is near it. A code
   // box does not: "the same size as that one" says something about two pictures
   // side by side and nothing at all about two programs.
-  float scale = asked;
-  if (item >= 0 || block->IsText()) {
-    std::vector<Rectangle> neighbours;
+  grip_.snaps = item >= 0 || block->IsText();
+  if (grip_.snaps) {
     for (int i = 0; i < static_cast<int>(media_.Items().size()); ++i) {
-      if (i != item) neighbours.push_back(media_.WorldBounds(i));
+      if (i != item) grip_.neighbours.push_back(media_.WorldBounds(i));
     }
     for (const std::unique_ptr<CodeBlock>& other : codeBlocks_) {
-      if (other.get() != block) neighbours.push_back(other->WorldBounds(viewport_, fonts_));
+      if (other.get() != block) grip_.neighbours.push_back(other->WorldBounds(viewport_, fonts_));
     }
-    scale = SnapResizeScale(mine, asked, neighbours);
   }
+}
 
-  if (item >= 0) {
-    media_.Scale(item, scale, anchor);
-  } else {
-    block->Scale(scale, anchor);
-    // A box that just grew may be sitting on its neighbour, and boxes do not
-    // overlap however they came to.
-    ResolveOverlaps(block);
+void App::StartDwGrip(Resizable* panel, int index, Vector2 fromWorld) {
+  // **Resizing a docked window takes it out of its box's slots**: docking is a
+  // row of slots of one size, and a window of another size has no slot.
+  panel->Loosen(index, viewport_, fonts_);
+  grip_ = {};
+  grip_.panel = panel;
+  grip_.index = index;
+  grip_.startSize = panel->WindowSize(index);
+  const Rectangle screen = panel->GripWindow(index, viewport_, fonts_);
+  const Vector2   a = viewport_.ToWorld({screen.x, screen.y});
+  const Vector2   b = viewport_.ToWorld({screen.x + screen.width, screen.y + screen.height});
+  grip_.start = {a.x, a.y, b.x - a.x, b.y - a.y};
+  grip_.from = fromWorld;
+  // It snaps to its neighbours, as a picture does.
+  grip_.snaps = true;
+  for (const Rectangle& other : WindowRects()) {
+    const bool self = std::abs(other.x - grip_.start.x) < 0.01f &&
+                      std::abs(other.y - grip_.start.y) < 0.01f &&
+                      std::abs(other.width - grip_.start.width) < 0.01f;
+    if (!self) grip_.neighbours.push_back(other);
   }
-  return true;
+}
+
+void App::MoveGrip(Vector2 world) {
+  float wanted = GripScale(grip_.start, grip_.from, world);
+  if (grip_.snaps) wanted = SnapResizeScale(grip_.start, wanted, grip_.neighbours);
+  const Vector2 anchor = {grip_.start.x, grip_.start.y};
+  if (grip_.panel != nullptr) {
+    // Its top-left is where it is loose at, so a new size grows it from there.
+    grip_.panel->SetWindowSize(grip_.index, grip_.startSize * wanted);
+  } else if (grip_.block != nullptr) {
+    grip_.block->Scale(wanted / (grip_.block->Em() / grip_.startEm), anchor);
+  } else {
+    const Rectangle now = media_.WorldBounds(grip_.item);
+    media_.Scale(grip_.item, wanted / (now.width / grip_.start.width), anchor);
+  }
+}
+
+void App::EndGrip() {
+  // A box that just grew may be sitting on its neighbour, and boxes do not
+  // overlap however they came to.
+  if (grip_.block != nullptr) ResolveOverlaps(grip_.block);
+  grip_ = {};
 }
 
 void App::HandleDroppedFiles() {
@@ -838,6 +919,15 @@ void App::ConverseNext() {
   }
 }
 
+std::function<bool(const clifford::Signature&, const std::string&, const std::string&,
+                   std::vector<float>*)>
+App::ExampleSource() {
+  return [this](const clifford::Signature& algebra, const std::string& type,
+                const std::string& name, std::vector<float>* out) {
+    return vizes_.Example(codeBlocks_, algebra, type, name, out);
+  };
+}
+
 void App::DevKeys(const std::string& box, const std::string& keys) {
   std::vector<std::string> lines(1);
   for (char c : box) {
@@ -847,8 +937,66 @@ void App::DevKeys(const std::string& box, const std::string& keys) {
   CodeBlock* block = NewBlockAtCentre();
   block->RestoreLines(lines);
   SetFocus(block);
-  block->DevKeys(keys);
-  for (const std::string& line : block->Lines()) TraceLog(LOG_INFO, "DEVKEYS: %s", line.c_str());
+  devKeysBlock_ = block;
+  devKeysLeft_ = keys;
+  DevKeysStep();
+}
+
+void App::DevKeysStep() {
+  if (devKeysBlock_ == nullptr) return;
+  if (devKeysWait_ > 0) {
+    --devKeysWait_;
+    return;
+  }
+  while (!devKeysLeft_.empty()) {
+    std::size_t space = devKeysLeft_.find(' ');
+    if (space == std::string::npos) space = devKeysLeft_.size();
+    const std::string key = devKeysLeft_.substr(0, space);
+    devKeysLeft_.erase(0, std::min(space + 1, devKeysLeft_.size()));
+    if (key.rfind("wait:", 0) == 0) {
+      devKeysWait_ = std::atoi(key.c_str() + 5);
+      return;
+    }
+    if (key == "blur") SetFocus(nullptr);
+    else if (key == "focus") SetFocus(devKeysBlock_);
+    else if (key.rfind("dwgrip:", 0) == 0) {
+      // Display window `index` of kind `kind` (Resizables() order) dragged by its
+      // grip by (dx, dy) world units, and let go.
+      int     kind = 0;
+      int     index = 0;
+      Vector2 by{};
+      std::sscanf(key.c_str() + 7, "%d,%d,%f,%f", &kind, &index, &by.x, &by.y);
+      std::vector<Resizable*> panels = Resizables();
+      if (kind >= 0 && kind < static_cast<int>(panels.size()) && index < panels[kind]->GripCount()) {
+        Resizable*      panel = panels[static_cast<std::size_t>(kind)];
+        const Rectangle was = panel->GripWindow(index, viewport_, fonts_);
+        const Vector2   corner = viewport_.ToWorld({was.x + was.width, was.y + was.height});
+        StartDwGrip(panel, index, corner);
+        MoveGrip({corner.x + by.x, corner.y + by.y});
+        EndGrip();
+        const Rectangle now = panel->GripWindow(index, viewport_, fonts_);
+        TraceLog(LOG_INFO, "DEVKEYS-DWGRIP %.0f,%.0f %.0fx%.0f -> %.0f,%.0f %.0fx%.0f size %.3f",
+                 was.x, was.y, was.width, was.height, now.x, now.y, now.width, now.height,
+                 panel->WindowSize(index));
+      }
+    } else if (key.rfind("grip:", 0) == 0) {
+      // Its grip dragged by (dx, dy) world units, and let go.
+      Vector2 by{};
+      std::sscanf(key.c_str() + 5, "%f,%f", &by.x, &by.y);
+      const Rectangle was = devKeysBlock_->WorldBounds(viewport_, fonts_);
+      StartGrip(devKeysBlock_, -1, {was.x + was.width, was.y + was.height});
+      MoveGrip({was.x + was.width + by.x, was.y + was.height + by.y});
+      EndGrip();
+      const Rectangle now = devKeysBlock_->WorldBounds(viewport_, fonts_);
+      TraceLog(LOG_INFO, "DEVKEYS-GRIP %.1f,%.1f %.1fx%.1f -> %.1f,%.1f %.1fx%.1f", was.x, was.y,
+               was.width, was.height, now.x, now.y, now.width, now.height);
+    }
+    else devKeysBlock_->DevKeys(key);
+  }
+  for (const std::string& line : devKeysBlock_->Lines()) {
+    TraceLog(LOG_INFO, "DEVKEYS: %s", line.c_str());
+  }
+  devKeysBlock_ = nullptr;
 }
 
 void App::DevChat(const std::string& actions) {
@@ -1642,7 +1790,9 @@ void App::ShareAcrossCanvas() {
   }
 
   // And how the functions on it are drawn: vizes, which a box compiles in.
-  std::map<std::string, mathprogram::FunctionViz> drawnWith = vizes_.FunctionVizes(codeBlocks_);
+  std::unordered_map<std::string, mathprogram::Literal> vizKnobs;
+  std::map<std::string, mathprogram::FunctionViz> drawnWith =
+      vizes_.FunctionVizes(codeBlocks_, &vizKnobs);
 
   // Nothing any box offers has changed -- the answer nearly every frame.
   if (now != sharedFrom_ || drawnWith != canvas_.functionVizes) {
@@ -1652,6 +1802,7 @@ void App::ShareAcrossCanvas() {
     for (const auto& [program, version] : sharedFrom_) programs.push_back(program);
     canvas_ = mathprogram::Gather(programs);
     canvas_.functionVizes = std::move(drawnWith);
+    canvas_.example = ExampleSource();
 
     // Only a box whose share of it changed is built again, and a build that
     // comes out the same is not compiled -- so an edit costs the boxes that use
@@ -1664,6 +1815,10 @@ void App::ShareAcrossCanvas() {
       if (block->ImportsStale(canvas_)) block->RequestCompile();
     }
   }
+
+  // The numbers of the function vizes' knobs, every frame: moving one moves
+  // every box drawn with it, and rebuilds nothing.
+  canvas_.vizKnobs = std::move(vizKnobs);
 
   // A knob in one box moves every box that reads it: its number is fetched
   // here, while the canvas it is fetched through is fresh.
@@ -1784,8 +1939,23 @@ bool App::HandleTextGesture() {
     }
   }
 
+  // A second press soon after the first, in the same place, is a double click:
+  // it highlights the whole name there, as an editor does.
+  const double now = GetTime();
+  const bool   twice = hit == lastPressBlock_ && now - lastPressTime_ < kDoubleClickSeconds &&
+                     std::hypot(pointer.x - lastPressAt_.x, pointer.y - lastPressAt_.y) <=
+                         kClickSlop;
+  lastPressBlock_ = hit;
+  lastPressTime_ = now;
+  lastPressAt_ = pointer;
+
   SetFocus(hit);
   hit->BeginSelection(pointer, viewport_, fonts_);
+  if (twice && hit->SelectWordAtCaret()) {
+    textDrag_ = TextDrag::None;
+    textBlock_ = nullptr;
+    return true;
+  }
   textDrag_ = TextDrag::Selecting;
   textBlock_ = hit;
   return true;
@@ -1990,6 +2160,15 @@ void App::Update() {
       !grabbingSelection) {
     ClearSelection();
   }
+  // An error balloon is drawn over everything but the conversations, so a click
+  // on one is the balloon's -- its copy button, or putting it away -- and
+  // nothing under it is touched.
+  if (canvasActive && !consumed && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+      chats_.ItemAt(GetMousePosition(), viewport_) < 0) {
+    for (auto it = codeBlocks_.rbegin(); it != codeBlocks_.rend() && !consumed; ++it) {
+      consumed = (*it)->ClickError(GetMousePosition());
+    }
+  }
   // Two fingers on two values mean something neither means alone, so this is
   // asked before anything that could move one of them.
   if (canvasActive && !consumed) consumed = HandleCompose();
@@ -2028,10 +2207,9 @@ void App::Update() {
     if (chats_.Editing() && focus_ != nullptr) SetFocus(nullptr);
   }
 
-  // The wheel resizes whatever it is over. It is asked early, before the rims
-  // start claiming the pointer, because a wheel event is never ambiguous: no
-  // drag can be in flight while one arrives.
-  if (canvasActive && !consumed) consumed = HandleResize();
+  // A window's grip resizes it. Asked before the rims and the text, which would
+  // otherwise take the press: the grip sits just inside both.
+  if (canvasActive && !consumed) consumed = HandleGrip();
 
   // Otherwise input goes to the innermost thing first: a box's buttons -- the
   // ones on a focused code box, and the ones a text box shows whenever you
@@ -2115,6 +2293,7 @@ void App::Update() {
   chats_.Update();
   ServeTools();
   ConverseNext();
+  DevKeysStep();
   if (chats_.TakeChanged()) ScheduleAutosave();
   if (std::string canvas; chats_.TakeCanvasRewind(&canvas)) RestoreCanvas(canvas);
   // What each function being read is fed with, before the boxes are polled --
@@ -2170,7 +2349,7 @@ void App::Update() {
   // everything on the way.
   bool held = lassoActive_ || selectionDrag_ || compose_ != Compose::None ||
               pull_.from != PullFrom::None || fingerCarry_ ||
-              textDrag_ != TextDrag::None || dragBlock_ != nullptr ||
+              textDrag_ != TextDrag::None || dragBlock_ != nullptr || Gripping() ||
               (media_.Busy() && !media_.Editing()) || chats_.Busy() || axes_.Dragging() ||
               plots_.Dragging() ||
               shaders_.Dragging() || colours_.Dragging() || surfaces_.Dragging() ||
@@ -2279,6 +2458,11 @@ void App::Update() {
   // and one cable is the point.
   for (ActiveValue& value : active) value.wired = CanWire(value);
   active_ = active;
+  // Every window showing one of them blinks it, wherever it was lit from.
+  axes_.SetLit(active_);
+  plots_.SetLit(active_);
+  colours_.SetLit(active_);
+  spaces_.SetLit(active_);
 
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     std::vector<ActiveValue> mine;
@@ -2296,7 +2480,18 @@ void App::Update() {
   // elsewhere the deck is not what the gesture would be about, and elsewhere
   // two fingers are still the pan and the pinch.
   const bool onSlide = slides_.SlideAtCamera(viewport_, options_.slideAspect) >= 0;
-  viewport_.Update(canvasActive, !consumed,
+  // The wheel zooms the canvas over anything but a conversation, which scrolls,
+  // and a window with a camera or a scale of its own, which takes it.
+  bool ownWheel = chats_.ItemAt(GetMousePosition(), viewport_) >= 0;
+  {
+    Rectangle   under{};
+    std::string kind;
+    if (DwUnder(GetMousePosition(), &under, &kind)) {
+      ownWheel = ownWheel || kind == "space" || kind == "volume" || kind == "surface" ||
+                 kind == "picture";
+    }
+  }
+  viewport_.Update(canvasActive, !consumed, canvasActive && !ownWheel && !Gripping(),
                    !axes_.Scrolling() && !spaces_.Orbiting() && !surfaces_.Orbiting() &&
                        !volumes_.Orbiting() && !colours_.Orbiting(),
                    onSlide);
@@ -2320,7 +2515,7 @@ void App::Update() {
                         plots_.Carrying() || shaders_.Carrying() || colours_.Carrying() ||
                         surfaces_.Carrying() ||
                         volumes_.Carrying() || spaces_.Carrying() ||
-                        media_.Carrying() || chats_.Carrying();
+                        media_.Carrying() || chats_.Carrying() || Gripping();
   // The wheel over a conversation scrolls it, which places nothing.
   const bool scrolling = chats_.ItemAt(GetMousePosition(), viewport_) >= 0;
   const bool scaling =
@@ -2405,6 +2600,14 @@ void App::DrawCanvas(bool look) {
   surfaces_.Draw(viewport_, fonts_);
   volumes_.Draw(viewport_, fonts_);
   spaces_.Draw(viewport_, fonts_, vizes_);
+  if (!look) {
+    for (Resizable* panel : Resizables()) {
+      for (int i = 0; i < panel->GripCount(); ++i) {
+        const Rectangle window = panel->GripWindow(i, viewport_, fonts_);
+        if (CheckCollisionPointRec(hover::Pointer(), window)) DrawGripOnAnything(GripRect(window));
+      }
+    }
+  }
   media_.Draw(viewport_, fonts_);
 
   // A look is of the canvas itself: no controls, no conversations, and no wires
@@ -2591,7 +2794,8 @@ void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView
 
   for (const NumberLine& line : axes_.Lines()) {
     file << "axis " << (line.docked ? 1 : 0) << " " << line.worldPos.x << " " << line.worldPos.y
-         << " " << line.centre << " " << line.span << " " << indexOf(line.dock) << "\n";
+         << " " << line.centre << " " << line.span << " " << indexOf(line.dock) << " "
+         << line.size << " " << line.looseWidth << "\n";
     for (const AxisRef& ref : line.refs) {
       file << "ref " << indexOf(ref.block) << " " << ref.name << "\n";
     }
@@ -2606,12 +2810,13 @@ void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView
   for (const ColorView& view : colours_.Views()) {
     file << "colour " << (view.docked ? 1 : 0) << " " << view.worldPos.x << " "
          << view.worldPos.y << " " << indexOf(view.block) << " "
-         << static_cast<int>(view.shape) << " " << view.yaw << " " << view.pitch << "\n";
+         << static_cast<int>(view.shape) << " " << view.yaw << " " << view.pitch << " "
+         << view.size << "\n";
   }
   for (const ShaderView& view : shaders_.Views()) {
     file << "shader " << (view.docked ? 1 : 0) << " " << view.worldPos.x << " "
          << view.worldPos.y << " " << indexOf(view.block) << " " << view.centre.x << " "
-         << view.centre.y << " " << view.span << "\n";
+         << view.centre.y << " " << view.span << " " << view.size << "\n";
   }
 
   // Where you were looking from is part of what you set up, so the orbit goes
@@ -2620,13 +2825,13 @@ void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView
     file << "surface " << (view.docked ? 1 : 0) << " " << view.worldPos.x << " "
          << view.worldPos.y << " " << indexOf(view.block) << " " << view.centre.x << " "
          << view.centre.y << " " << view.span << " " << view.orbit.x << " " << view.orbit.y
-         << " " << view.orbit.z << "\n";
+         << " " << view.orbit.z << " " << view.size << "\n";
   }
   for (const VolumeView& view : volumes_.Views()) {
     file << "volume " << (view.docked ? 1 : 0) << " " << view.worldPos.x << " "
          << view.worldPos.y << " " << indexOf(view.block) << " " << view.centre.x << " "
          << view.centre.y << " " << view.span << " " << view.orbit.x << " " << view.orbit.y
-         << " " << view.orbit.z << "\n";
+         << " " << view.orbit.z << " " << view.size << "\n";
   }
 
   // Where you were looking from is part of what you set up, so the orbit is
@@ -2636,7 +2841,7 @@ void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView
          << (window.docked ? 1 : 0) << " " << window.worldPos.x << " " << window.worldPos.y
          << " " << indexOf(window.dock) << " " << window.yaw << " " << window.pitch << " "
          << window.dist << " " << (window.cullOutside ? 1 : 0) << " " << (window.home ? 1 : 0)
-         << "\n";
+         << " " << window.size << "\n";
     // Which points it holds, since a point can have been pulled out of its box's
     // window or merged into another box's.
     for (const PointRef& ref : window.refs) {
@@ -2657,7 +2862,7 @@ void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView
   for (const Plot& plot : plots_.Plots()) {
     file << "plot " << (plot.docked ? 1 : 0) << " " << plot.worldPos.x << " " << plot.worldPos.y
          << " " << plot.centre.x << " " << plot.centre.y << " " << plot.span << " "
-         << indexOf(plot.dock) << "\n";
+         << indexOf(plot.dock) << " " << plot.size << "\n";
     for (const CurveRef& ref : plot.refs) {
       file << "curve " << indexOf(ref.block) << " " << ref.name << "\n";
     }
@@ -2747,6 +2952,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   };
   struct LoadedShader {
     bool    docked = true;
+    float   size = 1.0f;
     Vector2 worldPos{};
     int     block = -1;
     Vector2 centre{};
@@ -2756,6 +2962,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   // default to, so one shape carries both.
   struct LoadedTurned {
     bool    docked = true;
+    float   size = 1.0f;
     Vector2 worldPos{};
     int     block = -1;
     Vector2 centre{};
@@ -2764,6 +2971,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   };
   struct LoadedSpace {
     int     kind = 0;
+    float   size = 1.0f;
     bool    docked = true;
     Vector2 worldPos{};
     int     block = -1;
@@ -2776,6 +2984,8 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   };
   struct LoadedAxis {
     bool                                     docked = true;
+    float                                    size = 1.0f;
+    float                                    looseWidth = 0.0f;
     Vector2                                  worldPos{};
     float                                    centre = 0.0f;
     float                                    span = 4.0f;
@@ -2785,6 +2995,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   };
   struct LoadedPlot {
     bool                                     docked = true;
+    float                                    size = 1.0f;
     Vector2                                  worldPos{};
     Vector2                                  centre{};
     float                                    span = 6.0f;
@@ -2919,6 +3130,9 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       ColorView view;
       stream >> docked >> view.worldPos.x >> view.worldPos.y >> block >> shape >> view.yaw >>
           view.pitch;
+      // How big it was made, absent from canvases written before windows had a
+      // grip.
+      if (!(stream >> view.size)) view.size = 1.0f;
       view.docked = (docked != 0);
       view.shape = static_cast<ColorShape>(std::clamp(shape, 0, 2));
       colourViews.emplace_back(block, view);
@@ -2929,6 +3143,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       // The patch of the plane on show, absent from canvases written before a
       // picture had one. Whatever is missing keeps its default.
       stream >> view.centre.x >> view.centre.y >> view.span;
+      if (!(stream >> view.size)) view.size = 1.0f;
       view.docked = (docked != 0);
       shaderViews.push_back(view);
     } else if (keyword == "surface" || keyword == "volume") {
@@ -2936,6 +3151,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       int          docked = 1;
       stream >> docked >> view.worldPos.x >> view.worldPos.y >> view.block >> view.centre.x >>
           view.centre.y >> view.span >> view.orbit.x >> view.orbit.y >> view.orbit.z;
+      if (!(stream >> view.size)) view.size = 1.0f;
       view.docked = (docked != 0);
       (keyword == "surface" ? surfaceViews : volumeViews).push_back(view);
     } else if (keyword == "space") {
@@ -2951,6 +3167,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       int home = 1;
       if (!(stream >> home)) home = 1;
       window.home = (home != 0);
+      if (!(stream >> window.size)) window.size = 1.0f;
       spaceWindows.push_back(window);
     } else if (keyword == "point" && !spaceWindows.empty()) {
       int         index = -1;
@@ -2964,6 +3181,8 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       int docked = 1;
       stream >> docked >> axis.worldPos.x >> axis.worldPos.y >> axis.centre >> axis.span >>
           axis.dock;
+      if (!(stream >> axis.size)) axis.size = 1.0f;
+      if (!(stream >> axis.looseWidth)) axis.looseWidth = 0.0f;
       axis.docked = (docked != 0);
       axes.push_back(std::move(axis));
     } else if (keyword == "ref" && !axes.empty()) {
@@ -2981,6 +3200,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       int docked = 1;
       stream >> docked >> plot.worldPos.x >> plot.worldPos.y >> plot.centre.x >> plot.centre.y >>
           plot.span >> plot.dock;
+      if (!(stream >> plot.size)) plot.size = 1.0f;
       plot.docked = (docked != 0);
       plots.push_back(std::move(plot));
     } else if (keyword == "curve" && !plots.empty()) {
@@ -3144,6 +3364,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       }
     } else {
       block->RestoreValues(std::move(loaded.values));
+      block->SetCanvas(&canvas_);
       block->RequestCompile();
     }
     codeBlocks_.push_back(std::move(block));
@@ -3157,6 +3378,8 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   for (const LoadedAxis& loaded : axes) {
     NumberLine line;
     line.docked = loaded.docked;
+    line.size = loaded.size;
+    line.looseWidth = loaded.looseWidth;
     line.worldPos = loaded.worldPos;
     line.centre = loaded.centre;
     line.span = loaded.span;
@@ -3182,6 +3405,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
   for (const LoadedPlot& loaded : plots) {
     Plot plot;
     plot.docked = loaded.docked;
+    plot.size = loaded.size;
     plot.worldPos = loaded.worldPos;
     plot.centre = loaded.centre;
     plot.span = loaded.span;
@@ -3202,6 +3426,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
     ShaderView view;
     view.block = codeBlocks_[static_cast<std::size_t>(loaded.block)].get();
     view.docked = loaded.docked;
+    view.size = loaded.size;
     view.worldPos = loaded.worldPos;
     view.centre = loaded.centre;
     view.span = loaded.span;
@@ -3223,6 +3448,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
     SurfaceView view;
     view.block = codeBlocks_[static_cast<std::size_t>(loaded.block)].get();
     view.docked = loaded.docked;
+    view.size = loaded.size;
     view.worldPos = loaded.worldPos;
     view.centre = loaded.centre;
     view.span = loaded.span;
@@ -3237,6 +3463,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
     VolumeView view;
     view.block = codeBlocks_[static_cast<std::size_t>(loaded.block)].get();
     view.docked = loaded.docked;
+    view.size = loaded.size;
     view.worldPos = loaded.worldPos;
     view.centre = loaded.centre;
     view.span = loaded.span;
@@ -3253,6 +3480,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
     window.dock = codeBlocks_[static_cast<std::size_t>(loaded.block)].get();
     window.docked = loaded.docked;
     window.worldPos = loaded.worldPos;
+    window.size = loaded.size;
     window.yaw = loaded.yaw;
     window.pitch = loaded.pitch;
     window.dist = loaded.dist;

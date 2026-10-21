@@ -68,7 +68,7 @@ Rectangle ShaderPanel::RectFor(std::size_t index, const Viewport& viewport,
                                FontStore& fonts) const {
   const float       zoom = viewport.Zoom();
   const ShaderView& view = views_[index];
-  const float       side = kFlankSide * zoom;
+  const float       side = kFlankSide * zoom * view.size;
 
   if (dragging_ && dragMoved_ && index == dragView_) {
     return {dragScreenPos_.x, dragScreenPos_.y, side, side};
@@ -191,8 +191,8 @@ bool ShaderPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
     const bool onRim = PointOnRim(rect, pointer);
     if (!CheckCollisionPointRec(pointer, rect) && !onRim) continue;
 
-    // The wheel over a picture is the picture's own scale, the way it is over a
-    // plot. Only inside it: over the rim the wheel resizes the window.
+    // The wheel over a picture is the picture's own scale. Only inside it: over
+    // the rim it is the canvas's.
     if (!onRim) {
       const float wheel = GetMouseWheelMove();
       if (wheel != 0.0f) {

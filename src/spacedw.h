@@ -18,6 +18,8 @@
 // 3D viewport to itself and leaves the rest of the app exactly as it was.
 #pragma once
 
+#include <algorithm>
+
 #include <map>
 #include <memory>
 #include <string>
@@ -28,6 +30,7 @@
 #include "dock.h"
 #include "fontstore.h"
 #include "glext.h"
+#include "grip.h"
 #include "raylib.h"
 #include "touch.h"
 #include "viewport.h"
@@ -50,6 +53,9 @@ struct PointRef {
 };
 
 struct SpaceWindow {
+  // How big it is when it is not docked, as a multiple of where every window of
+  // its kind starts. Its grip sets it (grip.h).
+  float size = 1.0f;
   SpaceKind             kind = SpaceKind::Space;
   bool                  docked = true;
   Vector2               worldPos{};
@@ -85,9 +91,13 @@ struct SpaceWindow {
   bool                     feeding = false;
 };
 
-class SpacePanel : public Flanking {
+class SpacePanel : public Flanking, public Resizable {
  public:
   using Blocks = std::vector<std::unique_ptr<CodeBlock>>;
+
+  // What a viz is told when it chooses an example: where the walls are, which
+  // are the same in every space window.
+  static VizFrame ExampleFrame();
 
   ~SpacePanel() override;
 
@@ -117,6 +127,9 @@ class SpacePanel : public Flanking {
 
   // The point under the pointer, and the one being dragged: what lights up,
   // and where its wire leaves from -- the viz's `position`.
+  // What the rest of the canvas has lit this frame -- a name pointed at in the
+  // code, a value held in another window -- so the same value blinks here too.
+  void SetLit(std::vector<ActiveValue> lit) { lit_ = std::move(lit); }
   void ActiveVariables(const Viewport& viewport, FontStore& fonts,
                        std::vector<ActiveValue>* out) const;
 
@@ -170,6 +183,20 @@ class SpacePanel : public Flanking {
   const std::vector<SpaceWindow>& Windows() const { return windows_; }
   void Clear();
   void Adopt(std::vector<SpaceWindow> windows);
+
+  // The grip (grip.h).
+  int       GripCount() const override { return static_cast<int>(windows_.size()); }
+  Rectangle GripWindow(int index, const Viewport& viewport, FontStore& fonts) const override {
+    return RectFor(static_cast<std::size_t>(index), viewport, fonts);
+  }
+  void Loosen(int index, const Viewport& viewport, FontStore& fonts) override {
+    LoosenWindow(windows_[static_cast<std::size_t>(index)], GripWindow(index, viewport, fonts),
+                 viewport);
+  }
+  float WindowSize(int index) const override { return windows_[static_cast<std::size_t>(index)].size; }
+  void  SetWindowSize(int index, float size) override {
+    windows_[static_cast<std::size_t>(index)].size = std::clamp(size, kMinWindowSize, kMaxWindowSize);
+  }
 
  private:
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
@@ -253,6 +280,7 @@ class SpacePanel : public Flanking {
   int             limitsMaxLoc_ = -1;
   int             atInfinityLoc_ = -1;
   int             cullLoc_ = -1;
+  std::vector<ActiveValue> lit_;
 };
 
 }  // namespace sb

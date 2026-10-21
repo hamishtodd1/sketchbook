@@ -1,5 +1,5 @@
 sketchbook 3
-view 1530.03 878.138 0.917999
+view 592.525 1007.8 1.30648
 aspect 1.5
 block 345.946 499.699 7.35982 0 0 0 0 0 0
 > Cl(2,2,0);
@@ -25,7 +25,7 @@ block 345.946 499.699 7.35982 0 0 0 0 0 0
 > 
 >     float numLightRays = 43.76;
 >     float l = -0.3741;
->     float eoCurvature = 0.5177;
+>     float eoCurvature = 0.2205;
 >     float eInfCurvature = 0.5121;
 >     float multiplier = 0.25*6.2831853 / eInfCurvature;
 >     

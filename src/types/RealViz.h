@@ -18,6 +18,8 @@
 // Each line zooms and pans on its own, independently of the canvas.
 #pragma once
 
+#include <algorithm>
+
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -26,6 +28,7 @@
 
 #include "blocks.h"
 #include "fontstore.h"
+#include "grip.h"
 #include "raylib.h"
 #include "viewport.h"
 #include "viz.h"
@@ -38,6 +41,13 @@ struct AxisRef {
 };
 
 struct NumberLine {
+  // How big it is when it is not docked, as a multiple of where every window of
+  // its kind starts. Its grip sets it (grip.h).
+  float size = 1.0f;
+  // How wide it was when its grip loosened it, in world units: a docked row is
+  // as wide as its box, and coming loose should not change that. Zero for the
+  // width a loose row starts at.
+  float looseWidth = 0.0f;
   std::vector<AxisRef> refs;
   // Functions living on the same scale, drawn as an opacity field behind the
   // markers rather than as points on the line -- a function has no one place to
@@ -66,7 +76,7 @@ struct NumberLine {
   mutable int          id = 0;
 };
 
-class AxisPanel {
+class AxisPanel : public Resizable {
  public:
   using Blocks = std::vector<std::unique_ptr<CodeBlock>>;
 
@@ -97,6 +107,9 @@ class AxisPanel {
   // is a **promise about the press**. Lighting every value on the row would
   // promise all of them when the press is about to be about one, and over the
   // bare axis it would promise a value where a press makes a new one instead.
+  // What the rest of the canvas has lit this frame -- a name pointed at in the
+  // code, a value held in another window -- so the same value blinks here too.
+  void SetLit(std::vector<ActiveValue> lit) { lit_ = std::move(lit); }
   void ActiveVariables(const Viewport& viewport, FontStore& fonts,
                        std::vector<ActiveValue>* out) const;
 
@@ -196,6 +209,22 @@ class AxisPanel {
     lines_ = std::move(lines);
     // A canvas that was written down keeps the scale it was saved at.
     for (NumberLine& line : lines_) line.framed = true;
+  }
+
+  // The grip (grip.h).
+  int       GripCount() const override { return static_cast<int>(lines_.size()); }
+  Rectangle GripWindow(int index, const Viewport& viewport, FontStore& fonts) const override {
+    return RectFor(static_cast<std::size_t>(index), viewport, fonts);
+  }
+  void Loosen(int index, const Viewport& viewport, FontStore& fonts) override {
+    NumberLine&     line = lines_[static_cast<std::size_t>(index)];
+    const Rectangle rect = GripWindow(index, viewport, fonts);
+    if (line.docked) line.looseWidth = rect.width / viewport.Zoom();
+    LoosenWindow(line, rect, viewport);
+  }
+  float WindowSize(int index) const override { return lines_[static_cast<std::size_t>(index)].size; }
+  void  SetWindowSize(int index, float size) override {
+    lines_[static_cast<std::size_t>(index)].size = std::clamp(size, kMinWindowSize, kMaxWindowSize);
   }
 
  private:
@@ -311,6 +340,7 @@ class AxisPanel {
   // the pointer as you pick this one up.
   Vector2     dragScreenPos_{};
   bool        dragMoved_ = false;
+  std::vector<ActiveValue> lit_;
 };
 
 }  // namespace sb

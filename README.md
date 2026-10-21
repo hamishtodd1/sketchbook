@@ -40,7 +40,8 @@ it, then use the arrow keys.
 | --- | --- |
 | Right-drag (or middle-drag) | Pan |
 | Drag one finger | Pan |
-| Wheel, trackpad pinch, two-finger pinch | Zoom -- or, over a window, resize it |
+| Wheel, trackpad pinch, two-finger pinch | Zoom -- over a conversation, scroll it; inside a picture, surface, volume or space window, that window's own zoom |
+| Drag a window's bottom-right grip | Resize it, keeping its shape (a conversation: width and height apart) |
 | Type with nothing selected | Start a new box where you are looking |
 | Click a box | Put the caret there; the box turns into code |
 | Click away | Put it back; rebuild if the text changed |
@@ -52,6 +53,7 @@ it, then use the arrow keys.
 | Right-drag a number line | Scroll that axis |
 | Right-drag, or two-finger drag, a 3D window | Turn it |
 | Drag across a box's text | Highlight it |
+| Double-click a name | Highlight the whole name |
 | Drag highlighted text out of the box | That variable gets a number line of its own |
 | `Ctrl`+drag a marker, curve or point | Pull it out into a window of its own |
 | Hover any window's edge, drag the rim | Move it; drop on another of its kind to merge |
@@ -70,7 +72,7 @@ it, then use the arrow keys.
 | `Home` with no caret | Frame everything on screen |
 | Click a slide's rim | Go to that slide |
 | `left` / `right`, or a two-finger swipe, on a slide | Previous / next slide |
-| Drag a picture's corner | Crop it |
+| Drag a picture's other corners | Crop it |
 | Drop a file on the window | A picture, a video, or a canvas to open |
 | `Ctrl`+`S` / `Ctrl`+`O` | Save / open a canvas |
 | `Esc` | The menu: new canvas, recent canvases, slides, files, fullscreen |

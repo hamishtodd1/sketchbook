@@ -850,6 +850,13 @@ bool ParseFunctionHead(std::string_view source, FunctionHead* out,
   ++index;
   if (tokens[index].kind != Tok::LParen) return false;
   ++index;
+  // `in` and `const` change nothing about what the function is, so they are
+  // read past. `out` and `inout` are not: a function that writes back into its
+  // argument is not an arrow from one space to another.
+  while (tokens[index].kind == Tok::Ident &&
+         (tokens[index].text == "in" || tokens[index].text == "const")) {
+    ++index;
+  }
   if (tokens[index].kind != Tok::Ident || !IsKnownType(tokens[index].text, sig)) return false;
   const std::string parameterType = tokens[index].text;
   ++index;

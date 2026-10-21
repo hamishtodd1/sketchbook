@@ -23,7 +23,7 @@ const char* const kWindows[] = {"Space",   "Spacetime", "Axis",   "Plot",    "Pi
 enum class Stage { Compute, Vertex, Fragment };
 
 struct Standard {
-  std::string base;    // mesh, vert, frag, position, grab, drag
+  std::string base;    // mesh, vert, frag, position, grab, drag, example
   int         piece = 0;
   Stage       stage = Stage::Compute;
 };
@@ -31,7 +31,8 @@ struct Standard {
 // `mesh`, `vert3`, `grab`... or nothing, for a helper. `bad` is set for a name
 // that is standard but numbered out of range.
 bool StandardName(const std::string& name, Standard* out, std::string* bad) {
-  static const char* const kBases[] = {"mesh", "vert", "frag", "position", "grab", "drag"};
+  static const char* const kBases[] = {"mesh", "vert",  "frag",   "position",
+                                       "grab", "drag", "example"};
   for (const char* base : kBases) {
     const std::size_t n = std::char_traits<char>::length(base);
     if (name.compare(0, n, base) != 0) continue;
@@ -44,7 +45,7 @@ bool StandardName(const std::string& name, Standard* out, std::string* bad) {
     if (!rest.empty()) {
       const int number = std::stoi(rest);
       const std::string b = base;
-      if (b == "grab" || b == "drag") {
+      if (b == "grab" || b == "drag" || b == "example") {
         *bad = "there is one `" + b + "` per viz, not one per piece";
         return false;
       }
@@ -93,6 +94,13 @@ std::string HeadName(std::string_view line) {
   return name;
 }
 
+// A piece whose mesh is a model file.
+const std::regex& ModelPattern() {
+  static const std::regex kModel(
+      R"re(void\s+\w+\s*\(\s*\)\s*\{\s*model\s*\(\s*"([^"]+)"\s*\)\s*;\s*\})re");
+  return kModel;
+}
+
 struct Span {
   std::string name;
   int         first = 0;
@@ -131,6 +139,66 @@ std::vector<Span> Functions(const std::vector<std::string>& lines) {
   }
   return out;
 }
+
+}  // namespace
+
+std::vector<std::string> FunctionNames(const std::vector<std::string>& lines) {
+  std::vector<std::string> out;
+  for (const Span& span : Functions(lines)) out.push_back(span.name);
+  return out;
+}
+
+std::vector<std::pair<int, int>> FunctionSpans(const std::vector<std::string>& lines) {
+  std::vector<std::pair<int, int>> out;
+  for (const Span& span : Functions(lines)) out.emplace_back(span.first, span.last);
+  return out;
+}
+
+std::string Stubs() {
+  return
+      "uniform vec2 sbPointer;\n"
+      "uniform vec2 sbSize;\n"
+      "uniform mat4 sbViewProj;\n"
+      "uniform vec3 sbEye;\n"
+      "uniform vec3 sbRayOrigin;\n"
+      "uniform vec3 sbRayDir;\n"
+      "uniform vec3 sbLimitsMin;\n"
+      "uniform vec3 sbLimitsMax;\n"
+      "bool sbUncut = false;\n"
+      "vec4 sbTint = vec4(1.0);\n"
+      "void emit(vec3 p, vec3 n, vec2 uv) {}\n"
+      "void emit(vec3 p, vec3 n) {}\n"
+      "vec2 sbScreen(vec3 p) { return vec2(0.0); }\n"
+      "vec3 sbAcross() { return vec3(1.0, 0.0, 0.0); }\n"
+      "vec3 sbUpward() { return vec3(0.0, 1.0, 0.0); }\n"
+      "vec4 sbLit(vec3 p, vec3 n) { return sbTint; }\n";
+}
+
+bool IsStandardName(const std::string& name) {
+  Standard    found;
+  std::string bad;
+  return StandardName(name, &found, &bad) || !bad.empty();
+}
+
+std::vector<bool> ModelLines(const std::vector<std::string>& lines) {
+  std::vector<bool> out(lines.size(), false);
+  for (const Span& span : Functions(lines)) {
+    Standard    found;
+    std::string bad;
+    if (!StandardName(span.name, &found, &bad) || found.base != "mesh") continue;
+    std::string text;
+    for (int i = span.first; i <= span.last && i < static_cast<int>(lines.size()); ++i) {
+      text += lines[static_cast<std::size_t>(i)] + "\n";
+    }
+    if (!std::regex_search(text, ModelPattern())) continue;
+    for (int i = span.first; i <= span.last && i < static_cast<int>(lines.size()); ++i) {
+      out[static_cast<std::size_t>(i)] = true;
+    }
+  }
+  return out;
+}
+
+namespace {
 
 int CountLines(const std::string& text) {
   return static_cast<int>(std::count(text.begin(), text.end(), '\n'));
@@ -234,7 +302,9 @@ std::string GlobalName(std::string_view line) {
 }
 
 Sources AssembleFunction(const std::vector<std::string>& lines, const std::string& type,
-                         const std::string& dw) {
+                         const std::string& dw, const std::string& imports,
+                         const std::map<std::string, std::string>& renames,
+                         const std::string& uniforms) {
   Sources out;
   out.function = true;
   std::string in, ret;
@@ -255,6 +325,7 @@ Sources AssembleFunction(const std::vector<std::string>& lines, const std::strin
   for (const Span& span : Functions(lines)) {
     if (span.name == "frag") frag = true;
     else if (span.name == "grab") out.grab = true;
+    else if (span.name == "example") out.example = true;
     else if (span.name == "mesh" || span.name == "vert" || span.name == "position" ||
              span.name == "drag") {
       out.error = "a viz of a function is drawn in its fragments: it has `frag`, and `grab`, "
@@ -273,16 +344,30 @@ Sources AssembleFunction(const std::vector<std::string>& lines, const std::strin
     return out;
   }
   to["value"] = Spliced("value", type, dw);
+  // What it takes from its sketch travels with it, renamed as its own names
+  // are -- a function as a copy of its own, a value as the knob behind it.
+  for (const auto& [from, into] : renames) to[from] = into;
 
+  // `rand()` in `example` starts from the name of the function it is choosing,
+  // so it has a state of its own.
+  std::vector<bool> inExample(lines.size(), false);
+  for (const Span& span : Functions(lines)) {
+    if (span.name != "example") continue;
+    for (int i = span.first; i <= span.last && i < static_cast<int>(lines.size()); ++i) {
+      inExample[static_cast<std::size_t>(i)] = true;
+    }
+  }
   std::string joined;
-  for (const std::string& line : lines) {
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    const std::string& line = lines[i];
     const bool sigil = mathline::Parse(line).kind == mathline::Kind::Viz ||
                        clifford::ParseAlgebra(line, nullptr);
-    joined += (sigil ? std::string() : line) + "\n";
+    if (sigil) { joined += "\n"; continue; }
+    joined += (inExample[i] ? Rename(line, {{"rand", "sbExampleRand"}}) : line) + "\n";
   }
   std::string rewritten;
   if (!glslops::Rewrite(joined, &rewritten, nullptr) || rewritten.empty()) rewritten = joined;
-  out.spliced = Rename(rewritten, to);
+  out.spliced = Rename(imports, to) + Rename(rewritten, to);
 
   // Standing alone, against a function that is always nought: enough to find
   // every mistake the window can make by itself, on its own lines.
@@ -297,13 +382,16 @@ Sources AssembleFunction(const std::vector<std::string>& lines, const std::strin
       FunctionUniforms() + glslops::BuiltinOverloads();
   if (complex) head += types::complexnum::GlslPrologue();
   if (colour) head += types::color::GlslPrologue();
+  head += ExampleRandom() + uniforms;
   head += ret + " " + Spliced("value", type, dw) + "(" + in + " x) { return " + ZeroOf(ret) +
           "; }\n";
   head += FunctionHelpers(ret == "float", ret == "vec3", ret == "Complex", dw == "Surface",
                           dw == "Volume");
   head += "vec4 sbTint;\n";
+  out.sharedAt = CountLines(head);
+  head += Rename(imports, to);
   out.bodyAt = CountLines(head);
-  out.standalone = head + out.spliced +
+  out.standalone = head + Rename(rewritten, to) +
                    "void main() {\n"
                    "  sbTint = fragColor;\n"
                    "  vec2 sbHere = " + AtOf(dw) + ";\n"
@@ -533,10 +621,32 @@ std::string FunctionHelpers(bool paintReal, bool paintColour, bool paintComplex,
   return out;
 }
 
+Sources AssembleFunctionViz(const std::vector<std::string>& lines, const std::string& type,
+                            const std::string& dw, const std::string& imports,
+                            const std::map<std::string, std::string>& renames,
+                            const std::string& uniforms) {
+  return AssembleFunction(lines, type, dw, imports, renames, uniforms);
+}
+
+std::string ExampleRandom() {
+  return
+      "uint sbExampleState;\n"
+      "uint sbExampleHash(uint h) {\n"
+      "  h = h * 747796405u + 2891336453u;\n"
+      "  h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;\n"
+      "  return (h >> 22u) ^ h;\n"
+      "}\n"
+      "float sbExampleRand() {\n"
+      "  sbExampleState = sbExampleHash(sbExampleState);\n"
+      "  return float(sbExampleState >> 8u) / 16777216.0;\n"
+      "}\n";
+}
+
 Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
                  const std::string& dw, const clifford::Signature& sig,
-                 const std::vector<std::string>& algebraTypes) {
-  if (FunctionType(type, nullptr, nullptr)) return AssembleFunction(lines, type, dw);
+                 const std::vector<std::string>& algebraTypes, const std::string& imports,
+                 const std::string& seed) {
+  if (FunctionType(type, nullptr, nullptr)) return AssembleFunction(lines, type, dw, {}, {}, {});
   Sources out;
   const std::vector<std::string> parts = Parts(type, sig);
   if (parts.empty()) {
@@ -568,6 +678,7 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
     if (found.base == "position" && found.piece == 0) out.position = true;
     if (found.base == "grab") out.grab = true;
     if (found.base == "drag") out.drag = true;
+    if (found.base == "example") out.example = true;
   }
   if (!mesh[0]) {
     out.error = "a viz lays its geometry down in `void mesh()`";
@@ -606,10 +717,8 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
     for (int i = span.first; i <= span.last && i < static_cast<int>(lines.size()); ++i) {
       text += lines[static_cast<std::size_t>(i)] + "\n";
     }
-    static const std::regex kModel(
-        R"re(void\s+\w+\s*\(\s*\)\s*\{\s*model\s*\(\s*"([^"]+)"\s*\)\s*;\s*\})re");
     std::smatch match;
-    if (!std::regex_search(text, match, kModel)) continue;
+    if (!std::regex_search(text, match, ModelPattern())) continue;
     out.model[found.piece] = match[1].str();
     for (int i = span.first; i <= span.last && i < static_cast<int>(lines.size()); ++i) {
       modelLine[static_cast<std::size_t>(i)] = true;
@@ -682,7 +791,25 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
       "uniform float sbPixel;\n"
       // Set by `vert` for something that is not *in* the space being cut, like a
       // point at infinity.
-      "bool sbUncut = false;\n";
+      "bool sbUncut = false;\n"
+      // The walls, for a dw that has them: what falls outside is cut away, and
+      // what `example` puts a new value inside.
+      "uniform vec3 sbLimitsMin;\n"
+      "uniform vec3 sbLimitsMax;\n"
+      // Random numbers, as a box has them: each call moves the state on. In
+      // `example` the state starts from the variable's name, so a variable gets
+      // the same example every time.
+      "uniform int sbSeed;\n"
+      "uint sbRandState;\n"
+      "uint sbHash(uint h) {\n"
+      "  h = h * 747796405u + 2891336453u;\n"
+      "  h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;\n"
+      "  return (h >> 22u) ^ h;\n"
+      "}\n"
+      "float rand() {\n"
+      "  sbRandState = sbHash(sbRandState);\n"
+      "  return float(sbRandState >> 8u) / 16777216.0;\n"
+      "}\n";
   common += glslops::BuiltinOverloads();
   // The algebra, two ways. The whole of it -- every type the window names, and
   // every product between them and what those products make -- is a hundred
@@ -780,8 +907,6 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
     return
       "#version 430\n"
       "uniform int sbPiece;\n"
-      "uniform vec3 sbLimitsMin;\n"
-      "uniform vec3 sbLimitsMax;\n"
       "uniform float sbCut;\n"
       "flat in int sbInstanceV;\n"
       "flat in vec4 sbTintV;\n"
@@ -808,9 +933,13 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
 
   // Every prologue padded to the longest, so the window's first line is the
   // same line of all three and one map reads a diagnostic from any of them.
-  out.bodyAt = std::max({CountLines(compute), CountLines(vertex), CountLines(fragment)});
+  // What the sketch shares goes after the padding, so it too is on the same
+  // lines of all three.
+  out.sharedAt = std::max({CountLines(compute), CountLines(vertex), CountLines(fragment)});
+  out.bodyAt = out.sharedAt + CountLines(imports);
   const auto padded = [&](const std::string& head) {
-    return head + std::string(static_cast<std::size_t>(out.bodyAt - CountLines(head)), '\n');
+    return head + std::string(static_cast<std::size_t>(out.sharedAt - CountLines(head)), '\n') +
+           imports;
   };
 
   const auto numbered = [](const char* base, int k) {
@@ -820,7 +949,9 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
   // --- the compute program: the mesh, and the questions ---------------------
   std::string computeMain =
       "void main() {\n"
-      "  int i = int(gl_WorkGroupID.x);\n"
+      "  sbRandState = sbHash(uint(sbSeed));\n" + seed +
+      "  int i = int(gl_WorkGroupID.x);\n" +
+      (out.example ? "  if (sbMode == 3) { sbPut(0, example()); return; }\n" : "") +
       "  if (sbMode == 0) {\n";
   for (int k = 0; k < out.pieces; ++k) {
     // A model's piece is filled from its file, so there is nothing to run.
@@ -850,6 +981,7 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
   // --- the drawing ------------------------------------------------------------
   std::string vertexMain =
       "void main() {\n"
+      "  sbRandState = sbHash(uint(gl_VertexID) + 7919u * uint(gl_InstanceID));\n" + seed +
       "  int b = gl_VertexID * 8;\n"
       "  vec3 p = vec3(sbMeshV[b], sbMeshV[b + 1], sbMeshV[b + 2]);\n"
       "  vec3 n = vec3(sbMeshV[b + 3], sbMeshV[b + 4], sbMeshV[b + 5]);\n"
@@ -872,6 +1004,7 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
 
   std::string fragmentMain =
       "void main() {\n"
+      "  sbRandState = sbHash(uint(gl_FragCoord.x) + 7919u * uint(gl_FragCoord.y));\n" + seed +
       "  sbTint = sbTintV;\n"
       // The dw's cut: what falls outside its walls is not there.
       "  bool outside = any(lessThan(sbPV, sbLimitsMin)) || any(greaterThan(sbPV, sbLimitsMax));\n"
@@ -891,9 +1024,10 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
   if (out.lean) {
     // Not padded: a lean build that fails is never reported -- the whole one is
     // built and reported instead -- so its line numbers are nobody's business.
-    out.leanCompute = computeHead(lean + tail) + bodyFor(Stage::Compute) + computeMain;
-    out.leanVertex = vertexHead(lean + tail) + bodyFor(Stage::Vertex) + vertexMain;
-    out.leanFragment = fragmentHead(lean + tail) + bodyFor(Stage::Fragment) + fragmentMain;
+    out.leanCompute = computeHead(lean + tail) + imports + bodyFor(Stage::Compute) + computeMain;
+    out.leanVertex = vertexHead(lean + tail) + imports + bodyFor(Stage::Vertex) + vertexMain;
+    out.leanFragment =
+        fragmentHead(lean + tail) + imports + bodyFor(Stage::Fragment) + fragmentMain;
   }
   return out;
 }

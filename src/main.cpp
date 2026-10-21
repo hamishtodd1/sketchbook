@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "app.h"
+#include "viz.h"
 #include "claude.h"
 #include "crash.h"
 #include "recent.h"
@@ -59,6 +60,7 @@ struct Args {
   std::string devBox;
   std::string devKeys;
   std::string saveTo;
+  std::string vizes;
   // Dev only: at the end of a capture, print the canvas as Claude is shown it --
   // which is also the quickest way to see what the compiler made of a box.
   bool        describe = false;
@@ -88,6 +90,7 @@ Args ParseArgs(int argc, char** argv) {
     else if (flag == "--dev-box" && hasValue) args.devBox = argv[++i];
     else if (flag == "--dev-keys" && hasValue) args.devKeys = argv[++i];
     else if (flag == "--save-to" && hasValue) args.saveTo = argv[++i];
+    else if (flag == "--vizes" && hasValue) args.vizes = argv[++i];
     else if (flag == "--describe") args.describe = true;
     else if (flag[0] != '-') args.open = flag;   // a file dropped on the exe
   }
@@ -291,6 +294,7 @@ int main(int argc, char** argv) {
 
   sb::touch::Install();
 
+  if (!args.vizes.empty()) sb::SetVizesFolder(args.vizes);
   sb::App app;
   std::string error;
   if (!app.Init(ResolveAssetDir(), &error)) {

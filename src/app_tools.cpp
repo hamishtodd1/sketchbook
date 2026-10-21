@@ -292,7 +292,7 @@ bool App::StartTool(ToolJob& job) {
   }
 
   if (name == "read_builtin_vizes") {
-    const std::filesystem::path dir = SKETCHBOOK_VIZES_DIR;
+    const std::filesystem::path dir = VizesFolder();
     const clifford::Signature&  sig = canvas_.signature;
     std::string out = "Built-in vizes for types of no algebra (vizes.sketch):\n" +
                       BoxesOfFile(dir / "vizes.sketch");

@@ -4,7 +4,7 @@ aspect 1.5
 block 192.192 -461.261 34 0 1 0 0 1000 0
 > \text Vizes
 end
-block 192.192 -230.63 20 0 0 0 0 0 0
+block -107.808 -230.63 20 0 0 0 0 0 0
 > Viz(float, "Axis");
 > // A real is a ring on the line, where the number is. The ring is chrome
 > // rather than part of the scale, so it is measured in pixels of chrome --
@@ -48,6 +48,11 @@ block 192.192 -230.63 20 0 0 0 0 0 0
 > float drag(float v) {
 >   return sbRayOrigin.x;
 > }
+> 
+> // A new real: a tidy number in [-1, 1), four decimals.
+> float example() {
+>   return floor((rand() * 2.0 - 1.0) * 10000.0) / 10000.0;
+> }
 end
 block 1268.47 -230.63 20 0 0 0 0 0 0
 > Viz(RToR, "Plot");
@@ -68,8 +73,13 @@ block 1268.47 -230.63 20 0 0 0 0 0 0
 > float grab(vec2 at) {
 >   return gap(at) / sbPixel;
 > }
+> // A function nobody wrote: a shape of the input, for each part of the answer.
+> float example(float x) {
+>   float d = x;
+>   return shape(d, rand(), rand());
+> }
 end
-block 1383.78 499.699 20 0 0 0 0 0 0
+block 1383.78 650 20 0 0 0 0 0 0
 > Viz(RToR, "Axis");
 > // And a field along a number line: nothing at zero, opaque green at +1 and
 > // opaque yellow at -1, clamped beyond -- so a colour means the same number
@@ -81,38 +91,63 @@ block 1383.78 499.699 20 0 0 0 0 0 0
 >   return vec4(c, abs(v) * sbTint.a);
 > }
 end
-block 1383.78 884.083 20 0 0 0 0 0 0
+block 1383.78 1170 20 0 0 0 0 0 0
 > Viz(R2ToR3, "Picture");
 > // A function of the plane is a picture: each pixel is the answer there, and
 > // a vec3 is a colour.
 > vec4 frag(vec2 at) {
 >   return sbPaint(value(at));
 > }
+> // A function nobody wrote: a shape of how far out the point is, for each part of the answer.
+> vec3 example(vec2 p) {
+>   float d = length(p);
+>   return vec3(shape(d, rand(), rand()), shape(d, rand(), rand()), shape(d, rand(), rand()));
+> }
 end
-block 1383.78 1153.15 20 0 0 0 0 0 0
+block 1383.78 1730 20 0 0 0 0 0 0
 > Viz(R2ToC, "Picture");
 > // A complex answer is domain colouring: hue for its argument, lightness for
 > // its size.
 > vec4 frag(vec2 at) {
 >   return sbPaint(value(at));
 > }
+> // A function nobody wrote: a shape of how far out the point is, for each part of the answer.
+> Complex example(vec2 p) {
+>   float d = length(p);
+>   return Complex(shape(d, rand(), rand()), shape(d, rand(), rand()));
+> }
 end
-block 1383.78 1383.78 20 0 0 0 0 0 0
+block 1383.78 2290 20 0 0 0 0 0 0
 > Viz(CToC, "Picture");
 > vec4 frag(vec2 at) {
 >   return sbPaint(value(Complex(at.x, at.y)));
 > }
+> // A function nobody wrote: a shape of how far out z is, for each part of the answer.
+> Complex example(Complex z) {
+>   float d = cabs(z);
+>   return Complex(shape(d, rand(), rand()), shape(d, rand(), rand()));
+> }
 end
-block 1383.78 1575.97 20 0 0 0 0 0 0
+block 1383.78 2770 20 0 0 0 0 0 0
 > Viz(CToR3, "Picture");
 > vec4 frag(vec2 at) {
 >   return sbPaint(value(Complex(at.x, at.y)));
 > }
+> // A function nobody wrote: a shape of how far out z is, for each part of the answer.
+> vec3 example(Complex z) {
+>   float d = cabs(z);
+>   return vec3(shape(d, rand(), rand()), shape(d, rand(), rand()), shape(d, rand(), rand()));
+> }
 end
-block 1383.78 1806.6 20 0 0 0 0 0 0
+block 1383.78 3250 20 0 0 0 0 0 0
 > Viz(CToR, "Picture");
 > vec4 frag(vec2 at) {
 >   return sbPaint(value(Complex(at.x, at.y)));
+> }
+> // A function nobody wrote: a shape of how far out z is, for each part of the answer.
+> float example(Complex z) {
+>   float d = cabs(z);
+>   return shape(d, rand(), rand());
 > }
 end
 block 2421.62 -384.384 20 0 0 0 0 0 0
@@ -149,6 +184,11 @@ block 2421.62 -384.384 20 0 0 0 0 0 0
 >   if (sum.a <= 0.0) return vec4(0.0);
 >   return vec4(sum.rgb / sum.a, sum.a * 0.25);
 > }
+> // A function nobody wrote: a shape of how far out the point is, for each part of the answer.
+> float example(vec2 p) {
+>   float d = length(p);
+>   return shape(d, rand(), rand());
+> }
 end
 block 2383.18 691.891 20 0 0 0 0 0 0
 > Viz(R3ToR, "Volume");
@@ -172,6 +212,11 @@ block 2383.18 691.891 20 0 0 0 0 0 0
 >   if (acc.a <= 0.002) return vec4(0.0);
 >   return vec4(acc.rgb / max(acc.a, 0.0001), acc.a);
 > }
+> // A function nobody wrote: a shape of how far out the point is, for each part of the answer.
+> float example(vec3 p) {
+>   float d = length(p);
+>   return shape(d, rand(), rand());
+> }
 end
 block 2383.18 1422.22 20 0 0 0 0 0 0
 > Viz(R3ToC, "Volume");
@@ -192,6 +237,11 @@ block 2383.18 1422.22 20 0 0 0 0 0 0
 >   }
 >   if (acc.a <= 0.002) return vec4(0.0);
 >   return vec4(acc.rgb / max(acc.a, 0.0001), acc.a);
+> }
+> // A function nobody wrote: a shape of how far out the point is, for each part of the answer.
+> Complex example(vec3 p) {
+>   float d = length(p);
+>   return Complex(shape(d, rand(), rand()), shape(d, rand(), rand()));
 > }
 end
 block 3421.02 -1383.78 20 0 0 0 0 0 0
@@ -241,6 +291,11 @@ block 3421.02 -1383.78 20 0 0 0 0 0 0
 > Color drag(Color c) {
 >   vec3 k = hsvOf(c);
 >   return hsv(fract(atan(sbRayOrigin.y, sbRayOrigin.x) / 6.28318), k.y, k.z);
+> }
+> 
+> // A new colour: a bright one, of any hue.
+> Color example() {
+>   return hsv(rand(), 0.7, 0.9);
 > }
 end
 block 3421.02 153.754 20 0 0 0 0 0 0
@@ -340,5 +395,18 @@ block 3382.58 1614.41 20 0 0 0 0 0 0
 >   vec3 q = sbRayOrigin + sbRayDir * dot(where(c) - sbRayOrigin, sbRayDir);
 >   float h = fract(atan(q.z, q.x) / 6.28318);
 >   return hsv(h, length(vec2(q.x, q.z)) / 0.5, q.y + 0.5);
+> }
+end
+block -1300 -230.63 20 0 0 0 0 0 0
+> // What the functions' examples are made of, shared by every viz of a
+> // function here.
+> // One of four shapes a person would know -- a wave, a parabola, a bump, a
+> // line -- and how steep, from two random numbers.
+> float shape(float d, float pick, float steep) {
+>   float k = 0.6 + 0.1 * floor(steep * 12.0);
+>   if (pick < 0.25) return sin(k * d);
+>   if (pick < 0.5) return k * d * d - 1.0;
+>   if (pick < 0.75) return exp(-k * d * d);
+>   return k * d;
 > }
 end

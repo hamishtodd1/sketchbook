@@ -40,6 +40,10 @@ class CodeBlock;
 // Where a model a viz names is looked for, after the built-in vizes' folder: the
 // folder of the canvas open now, so a canvas can carry models of its own.
 void SetCanvasFolder(const std::string& folder);
+// Where the built-in vizes are: the repo's `vizes/`, unless a test says
+// otherwise (`--vizes <folder>`), so it can change them without touching his.
+void               SetVizesFolder(const std::string& folder);
+const std::string& VizesFolder();
 
 // What a dw tells a viz about the frame it is drawn in.
 struct VizFrame {
@@ -60,8 +64,21 @@ struct VizFrame {
 class VizGpu {
  public:
   // Compiles the three programs and runs `mesh`. False, with the driver's log,
-  // if a program would not compile.
-  bool Build(const vizglsl::Sources& sources, std::string* log);
+  // if a program would not compile. `program` is the box's, whose imported
+  // knobs -- what the viz takes from its sketch -- are set on every run.
+  bool Build(const vizglsl::Sources& sources, const mathprogram::Program* program,
+             std::string* log);
+  // Lays the geometry down again if a knob it was laid down with has moved.
+  // Cheap when none has.
+  void Refresh();
+  // A new value of its type, from its `example`, for the variable whose name
+  // gave `seed`: run once on the GPU and read straight back, which is a stall,
+  // and so only done when a variable is first declared. False if it has none.
+  bool HasExample() const { return example_; }
+  bool Example(unsigned int seed, const VizFrame& frame, std::vector<float>* out) const;
+  // The numbers of the knobs it takes, one after another: what an answer about
+  // a value depends on besides the value.
+  std::vector<float> Knobs() const;
   // By hand, like every GPU resource here.
   void Release();
 
@@ -85,10 +102,16 @@ class VizGpu {
   struct Slots {
     int viewProj = -1, eye = -1, size = -1, pointer = -1, rayOrigin = -1, rayDir = -1;
     int stride = -1, count = -1, piece = -1, mode = -1, one = -1;
-    int cut = -1, limitsMin = -1, limitsMax = -1, pixel = -1;
+    int cut = -1, limitsMin = -1, limitsMax = -1, pixel = -1, seed = -1;
+    // The knobs it takes from its sketch: uniform, and where it is.
+    std::vector<std::pair<std::string, int>> knobs;
   };
-  static Slots Find(unsigned int program);
+  Slots        Find(unsigned int program) const;
   void         Set(const VizFrame& frame, const Slots& at, int count) const;
+  void         SetKnobs(const Slots& at) const;
+  // Every knob its programs have: what it takes from the sketch, and its own.
+  void         EachKnob(const std::function<void(const mathprogram::Literal&)>& visit) const;
+  void         Mesh(int piece);
 
   Slots computeAt_;
   Slots drawAt_;
@@ -98,9 +121,13 @@ class VizGpu {
   unsigned int mesh_[vizglsl::kMaxPieces] = {};
   int          meshCount_[vizglsl::kMaxPieces] = {};
   int          pieces_ = 0;
+  bool         model_[vizglsl::kMaxPieces] = {};
+  const mathprogram::Program* program_ = nullptr;
+  std::vector<float>          meshedWith_;   // the knobs when `mesh` last ran
   int          valueFloats_ = 1;
   bool         grab_ = false;
   bool         drag_ = false;
+  bool         example_ = false;
 };
 
 // One dw window's values, on the GPU, and what the viz says back about them.
@@ -226,8 +253,21 @@ class VizStore {
   // The vizes the functions of these boxes are drawn with, by `Type@Window`:
   // the canvas's own where it has one that compiles, else the built-in -- which
   // is checked the first time a box needs it.
+  // `knobs` gets the numbers of every knob they read, as they are now.
   std::map<std::string, mathprogram::FunctionViz> FunctionVizes(
-      const std::vector<std::unique_ptr<CodeBlock>>& blocks);
+      const std::vector<std::unique_ptr<CodeBlock>>& blocks,
+      std::unordered_map<std::string, mathprogram::Literal>* knobs);
+  // **A new value is chosen by its type's viz**: the `example` of whichever viz
+  // box of the type has one -- the canvas's own first, then the built-in. False
+  // if none does, and then the app's own generator chooses.
+  bool Example(const std::vector<std::unique_ptr<CodeBlock>>& blocks,
+               const clifford::Signature& signature, const std::string& type,
+               const std::string& name, std::vector<float>* out);
+  // What a viz is told about its window when it chooses an example, which is
+  // where the walls are: the app's to say, since the windows are its.
+  void SetExampleFrames(std::function<VizFrame(const std::string& dw)> frames) {
+    exampleFrames_ = std::move(frames);
+  }
   void Clear();
   // The built-in boxes' programs, and the one empty vertex array every viz
   // draws through. A destructor cannot free what is on the GPU.
@@ -236,6 +276,8 @@ class VizStore {
  private:
   struct Library;
   void Load(const std::string& path);
+  // The built-in vizes for an algebra, read afresh.
+  void Reload(const clifford::Signature& signature);
 
   std::unordered_map<std::string, CodeBlock*>       local_;
   std::unordered_map<std::string, const CodeBlock*> samplers_;
@@ -243,6 +285,7 @@ class VizStore {
   clifford::Signature                               signature_{};
   bool                                              loaded_ = false;
   double                                            checkedAt_ = -1.0;
+  std::function<VizFrame(const std::string&)>       exampleFrames_;
 };
 
 }  // namespace sb

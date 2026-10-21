@@ -30,6 +30,8 @@
 // The dropdown is where other choices about this window will go too.
 #pragma once
 
+#include <algorithm>
+
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -39,6 +41,7 @@
 #include "blocks.h"
 #include "dock.h"
 #include "fontstore.h"
+#include "grip.h"
 #include "raylib.h"
 #include "viewport.h"
 #include "viz.h"
@@ -48,6 +51,9 @@ namespace sb {
 enum class ColorShape : int { Picker = 0, Cube = 1, Cylinder = 2, kCount = 3 };
 
 struct ColorView {
+  // How big it is when it is not docked, as a multiple of where every window of
+  // its kind starts. Its grip sets it (grip.h).
+  float size = 1.0f;
   CodeBlock*  block = nullptr;
   bool        docked = true;
   Vector2     worldPos{};
@@ -67,7 +73,7 @@ struct ColorView {
   mutable int id = 0;
 };
 
-class ColorPanel : public Flanking {
+class ColorPanel : public Flanking, public Resizable {
  public:
   using Blocks = std::vector<std::unique_ptr<CodeBlock>>;
 
@@ -99,6 +105,9 @@ class ColorPanel : public Flanking {
 
   // The marker under the pointer, or the one being held: the same set that
   // lights its name in the code and gets a wire.
+  // What the rest of the canvas has lit this frame -- a name pointed at in the
+  // code, a value held in another window -- so the same value blinks here too.
+  void SetLit(std::vector<ActiveValue> lit) { lit_ = std::move(lit); }
   void ActiveVariables(const Viewport& viewport, FontStore& fonts,
                        std::vector<ActiveValue>* out) const;
 
@@ -125,6 +134,20 @@ class ColorPanel : public Flanking {
   const std::vector<ColorView>& Views() const { return views_; }
   void Clear() { views_.clear(); drag_ = Drag::None; menuOpen_ = -1; }
   void Adopt(std::vector<ColorView> views) { views_ = std::move(views); }
+
+  // The grip (grip.h).
+  int       GripCount() const override { return static_cast<int>(views_.size()); }
+  Rectangle GripWindow(int index, const Viewport& viewport, FontStore& fonts) const override {
+    return RectFor(static_cast<std::size_t>(index), viewport, fonts);
+  }
+  void Loosen(int index, const Viewport& viewport, FontStore& fonts) override {
+    LoosenWindow(views_[static_cast<std::size_t>(index)], GripWindow(index, viewport, fonts),
+                 viewport);
+  }
+  float WindowSize(int index) const override { return views_[static_cast<std::size_t>(index)].size; }
+  void  SetWindowSize(int index, float size) override {
+    views_[static_cast<std::size_t>(index)].size = std::clamp(size, kMinWindowSize, kMaxWindowSize);
+  }
 
  private:
   enum class Drag { None, Move, Orbit, Value, Hue };
@@ -170,6 +193,7 @@ class ColorPanel : public Flanking {
   std::string dragName_;
   // Which window's dropdown is open, or -1.
   int         menuOpen_ = -1;
+  std::vector<ActiveValue> lit_;
 };
 
 }  // namespace sb
