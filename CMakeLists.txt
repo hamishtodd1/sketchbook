@@ -62,6 +62,8 @@ add_executable(sketchbook
   src/glslops.cpp
   src/grid.cpp
   src/text.cpp
+  src/transition.cpp
+  src/morph.cpp
   src/touch.cpp
   src/touch_win32.cpp
   src/process_win32.cpp

@@ -22,6 +22,7 @@
 #include "raylib.h"
 #include "rlgl.h"
 #include "touch.h"
+#include "transition.h"
 
 namespace {
 
@@ -64,6 +65,9 @@ struct Args {
   // Dev only: at the end of a capture, print the canvas as Claude is shown it --
   // which is also the quickest way to see what the compiler made of a box.
   bool        describe = false;
+  // Dev only: open a window showing a transition between writings and nothing
+  // else (transition.h) -- one line of code, or two formulas.
+  std::vector<std::string> transition;
   int         frames = 0;   // 0 means run until the window is closed
   std::string open;         // a .sketch canvas to load at startup
 };
@@ -92,6 +96,13 @@ Args ParseArgs(int argc, char** argv) {
     else if (flag == "--save-to" && hasValue) args.saveTo = argv[++i];
     else if (flag == "--vizes" && hasValue) args.vizes = argv[++i];
     else if (flag == "--describe") args.describe = true;
+    else if (flag == "--animate_text_transition" && hasValue) {
+      args.transition.push_back(argv[++i]);
+      // A second side, if one follows that is not a flag.
+      if (i + 1 < argc && std::string(argv[i + 1]).rfind("--", 0) != 0) {
+        args.transition.push_back(argv[++i]);
+      }
+    }
     else if (flag[0] != '-') args.open = flag;   // a file dropped on the exe
   }
   if (!args.screenshot.empty() && args.frames <= 0) args.frames = 6;
@@ -286,6 +297,15 @@ int main(int argc, char** argv) {
     TraceLog(LOG_WARNING, "GLEXT: parallel shader compile unavailable (KHR advertised %d, ARB %d)",
              sb::glext::HasExtension("GL_KHR_parallel_shader_compile") ? 1 : 0,
              sb::glext::HasExtension("GL_ARB_parallel_shader_compile") ? 1 : 0);
+  }
+
+  if (!args.transition.empty()) {
+    SetWindowTitle("Sketchbook transition");
+    SetTargetFPS(120);
+    const int code = sb::transition::Run(ResolveAssetDir(), args.transition, args.screenshot,
+                                         args.frames, SaveFrame);
+    CloseWindow();
+    return code;
   }
 
   // Escape opens the options menu, so it must not also close the window.

@@ -185,7 +185,7 @@ Check a new window by magnifying a screenshot with no smoothing.
 
 It is a convenience, not a foundation; keep it extractable.
 
-**raylib-free**: `mathline.*`, `mathprogram.*`, `vizglsl.*`, `compiler.*`,
+**raylib-free**: `mathline.*`, `mathprogram.*`, `vizglsl.*`, `compiler.*`, `morph.*`,
 `process.*`, `selection.h`, `filedialog.*`, `video.*`, `recent.*`, `settings.*`,
 and a type's own file (`types/RealFunction.*`, `types/Clifford.*`,
 `types/Color.*`, `types/examples.h`). The Win32 files (`*_win32.cpp`, `glext`,
@@ -353,6 +353,44 @@ keeps atlases on a size ladder (16/24/32/48/64/96/128 px em) and uses the rung
 nearest the size being drawn. raylib's `fontSize` is a stbtt pixel *height*
 (ascent to descent), not an em, and faces disagree on the ratio, so the store reads
 `head`/`hhea` from each TTF and converts the em it wants into the per-face size.
+
+---
+
+## Text transitions (`morph.*`, `transition.*`)
+
+- **Outlines, not atlases.** An atlas is bitmaps; a morph needs the curves.
+  `FontStore::GlyphContours` reads them from the `glyf` table -- the reader
+  `Stroke` already had, now also taking composite glyphs (parts moved and
+  scaled into place) -- with the quadratics flattened. `tex::ItemContours` gives
+  every layout item's outline: glyphs, a rule's rectangle, a line's quad, a wide
+  accent's band.
+- **Pieces and keys** (`transition.cpp`): code makes one piece per identifier
+  (`id:name`) and per other character (`g:<codepoint>`, with `*` as `⋅`, `-` as
+  `−`, `/` as `rule`); a layout makes one per `\sbref` mark (keyed by the name
+  `mathline` gave it), per run of upright letters (`\sin` is `id:sin`), per
+  unmarked italic letter (`id:a`, so LaTeX written as it stands still matches;
+  `ab` is two variables), and per other glyph or rule. The k-th of a key
+  matches the k-th; everything else fades.
+- **Contours pair up inside a piece** (`morph.cpp`): outline with outline, hole
+  with hole (holes are what is inside an odd number of others, and are turned to
+  run backwards), cheapest first by centroid within the piece's box plus area.
+  One left over shrinks to, or grows from, a point where its counterpart would be.
+- **A pair is made point-for-point alike** by giving each every corner of both, at
+  the same fraction of the way round, so each side is exactly itself at its end
+  and nothing slides along an edge in between. Where round they start is chosen
+  first: the turn of one against the other, of 64 tried, that puts the shapes
+  nearest.
+- **Filling** (`OutlineFill`): a shape's points go into a row of an RGBA32F
+  texture (x, y, and the index its contour starts at, which is where the last
+  point joins back to). A fragment shader over the shape's box counts the
+  winding (non-zero) and the distance to the nearest edge, which is the coverage.
+  Each shape is its own batch: `row` and `count` are uniforms, and a raylib
+  uniform applies to whatever is in the batch when it goes. The cost is pixels of
+  the box times edges, and only while a transition runs.
+- **The window** (`transition::Run`): code is set at 0.8 of the maths em, sized so
+  the wider side fills most of the window. The card's paper turns over the middle
+  of the move and the ink is whichever reads on it, because light-on-dark code
+  and dark-on-light LaTeX faded together pass through the same grey.
 
 ---
 

@@ -121,6 +121,12 @@ class FontStore {
   // face has no simple outline for it. Worked out once and kept.
   const StrokeProfile* Stroke(Face face, int codepoint);
 
+  // A glyph's outline: closed contours, in em units with y up from the baseline,
+  // curves flattened. Filled by the non-zero rule, as TrueType's are, so a hole
+  // runs the other way round from what it is cut out of. Empty for a face with
+  // no glyf table, or a codepoint it lacks.
+  std::vector<std::vector<Vector2>> GlyphContours(Face face, int codepoint) const;
+
  private:
   // One rasterised atlas: a face pinned to a single em pixel size.
   struct Sized {

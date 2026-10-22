@@ -154,6 +154,12 @@ Layout Render(std::string_view source, FontStore& fonts, float emPx, bool displa
 // Draws a laid-out formula with its left edge and baseline at `origin`.
 void DrawLayout(const Layout& layout, FontStore& fonts, Vector2 origin, Color tint);
 
+// What one item covers, as closed outlines in the layout's own coordinates (y
+// down), to be filled by the non-zero rule: a glyph's contours, a rule's
+// rectangle, a line's thin quad, a wide accent's band. What a text transition
+// morphs (transition.h); the ordinary drawing never needs it.
+std::vector<std::vector<Vector2>> ItemContours(const Item& item, FontStore& fonts);
+
 // ---------------------------------------------------------------------------
 // Symbol tables (defined in tex_symbols.cpp).
 

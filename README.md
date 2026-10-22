@@ -88,6 +88,12 @@ justification controls above it.
 
 Video needs `ffmpeg` and `ffprobe` on the path.
 
+`--animate_text_transition "float a = 1.;"` opens a window that shows a line of
+code turning into its LaTeX and back, three times, then closes. Given two lines,
+`--animate_text_transition "float c = a / b;" "$a b^{-1}$"`, it shows one formula
+turning into the other; a side in `$...$` is LaTeX as it stands, and anything
+else is code, read.
+
 ## Licence
 
 The bundled fonts are OFL; see `assets/fonts/LICENSES.md`. raylib is zlib/libpng.

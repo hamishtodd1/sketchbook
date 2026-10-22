@@ -1051,6 +1051,57 @@ a slide is the same live plot.
   the one thing with no gesture. It takes the slide and everything whose middle is
   on it, and the deck closes the gap.
 
+### Transitions
+
+For presenting and for videos, **writing can turn into other writing**, the way
+Manim does it: a line of code into its LaTeX, or one formula into another. Code
+into code is not wanted.
+
+- **It is a capability, not a state.** Nothing on the canvas is kept ready to
+  animate; a transition is made when one is asked for, from the outlines of the
+  two sides.
+- **What is the same thing travels.** A name finds its mention on the other side,
+  a symbol the same symbol (`*` the dot, `/` a fraction's rule), the k-th of each
+  the k-th. On the way, its outline turns into the other's: the code's `a` becomes
+  the italic one.
+- **Everything else fades**: what goes is gone before the travelling settles, and
+  what comes arrives once it is under way, so the two are never on top of each
+  other.
+- **Colour is not part of it.** A transition is outlines; colouring them is
+  fading the colour of some polygons, which the caller does.
+- For now it is reached only from the command line (`--animate_text_transition`,
+  in `README.md`).
+
+### Recording and editing video
+
+*Decided, not yet built.* For videos with the app in them and Hamish in a corner.
+**A recording is what happened, not pixels**: the app keeps the session -- every
+keystroke and click, beside the camera and microphone -- and the video is drawn
+again from it afterwards. That is what lets an edit move what was never moved,
+and render at a size nobody was looking at.
+
+- **Recording files and edit files are separate.** A recording is what happened,
+  and is never changed; an edit says what to make of one.
+- **The editor is a mode of the app**: the same drawing, so what is edited is what
+  is rendered.
+- **The face is pinned** to the picture, not a window on the canvas.
+- **A timeline, with cuts and ripple deletes.** A cut has a transition by default,
+  of a default length: what changed across it moves there. Removing the
+  transition is how a cut snaps.
+- **Everything moves on a sigmoid**, speeding up and then slowing down.
+- **Windows and the camera can be moved in the edit**, from keyframe to keyframe.
+  Such a move is in the picture only: nothing on the canvas steps aside, because
+  nothing on the canvas knows.
+- **On-or-off settings are timelines of blocks.** The pointer is hidden by default.
+  Ticking it in the edit's settings adds a timeline for it, and dragging on that
+  makes a resizable block, inside which the pointer shows. Any other on-or-off
+  setting works the same way.
+- **Audio timelines can be added**, beside the microphone's.
+- **Claude is not asked again**: a replay uses the replies the recording got.
+- **The output is an MP4, 1080p60.**
+- **Streaming is not a feature.** Twitch or Zoom capture the app's window like any
+  other, and the microphone is chosen there.
+
 ### Pictures and video
 
 Neither is mathematics; both are windows, which is nearly the whole design. They
@@ -1238,3 +1289,5 @@ Answered ones move up into the sections above.
 - **Pictures are outside the no-overlap rule** while boxes are not. That seems
   right, but it is two placement rules.
 - **Editability is not shown** now that ring and dot are gone. Does it need to be?
+- **How is a transition asked for on the canvas?** A step of a slide, a key on a
+  box, something a recording drives? Only the command line can now.

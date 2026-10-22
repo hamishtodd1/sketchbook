@@ -453,10 +453,11 @@ struct Point {
   float y = 0.0f;
 };
 
-// A simple glyph's contours, with its quadratic curves flattened into short
-// straight pieces. Empty for a composite glyph, which a one-stroke accent never
-// is.
-std::vector<std::vector<Point>> Contours(const std::vector<unsigned char>& file, int glyph) {
+// A glyph's contours, with its quadratic curves flattened into short straight
+// pieces. A composite glyph -- a letter built from others, as `i` is from a stem
+// and a dot in some faces -- is its parts, each moved and scaled into place.
+std::vector<std::vector<Point>> Contours(const std::vector<unsigned char>& file, int glyph,
+                                         int depth = 0) {
   std::vector<std::vector<Point>> out;
   Reader r{file.data(), file.size()};
   const std::size_t head = FindTable(r, Tag('h', 'e', 'a', 'd'));
@@ -471,6 +472,49 @@ std::vector<std::vector<Point>> Contours(const std::vector<unsigned char>& file,
   if (to <= from) return out;
   std::size_t p = glyf + from;
   const int contours = r.i16(p);
+  if (contours < 0 && depth < 4) {
+    p += 10;
+    for (bool more = true; more;) {
+      const std::uint16_t flags = r.u16(p);
+      const int           part = r.u16(p + 2);
+      p += 4;
+      float dx = 0.0f, dy = 0.0f;
+      if ((flags & 0x0001) != 0) {   // arguments are words
+        dx = r.i16(p);
+        dy = r.i16(p + 2);
+        p += 4;
+      } else {
+        dx = static_cast<std::int8_t>(r.u8(p));
+        dy = static_cast<std::int8_t>(r.u8(p + 1));
+        p += 2;
+      }
+      // Arguments that are point numbers rather than an offset (no 0x0002) are
+      // rare enough to take as no offset at all.
+      if ((flags & 0x0002) == 0) dx = dy = 0.0f;
+      const auto f2dot14 = [&r](std::size_t at) { return static_cast<float>(r.i16(at)) / 16384.0f; };
+      float a = 1.0f, b = 0.0f, c = 0.0f, d = 1.0f;
+      if ((flags & 0x0008) != 0) {
+        a = d = f2dot14(p);
+        p += 2;
+      } else if ((flags & 0x0040) != 0) {
+        a = f2dot14(p);
+        d = f2dot14(p + 2);
+        p += 4;
+      } else if ((flags & 0x0080) != 0) {
+        a = f2dot14(p);
+        b = f2dot14(p + 2);
+        c = f2dot14(p + 4);
+        d = f2dot14(p + 6);
+        p += 8;
+      }
+      for (std::vector<Point>& poly : Contours(file, part, depth + 1)) {
+        for (Point& q : poly) q = {a * q.x + c * q.y + dx, b * q.x + d * q.y + dy};
+        out.push_back(std::move(poly));
+      }
+      more = (flags & 0x0020) != 0;
+    }
+    return out;
+  }
   if (contours <= 0) return out;
   p += 10;
 
@@ -619,6 +663,25 @@ const StrokeProfile* FontStore::Stroke(Face face, int codepoint) {
   }
   profile.width = span * unit;
   return &profile;
+}
+
+std::vector<std::vector<Vector2>> FontStore::GlyphContours(Face face, int codepoint) const {
+  std::vector<std::vector<Vector2>> out;
+  const FaceData& fd = faces_[static_cast<int>(face)];
+  const auto outline = fd.outlines.find(codepoint);
+  if (!fd.loaded || outline == fd.outlines.end()) return out;
+  const float unit = 1.0f / static_cast<float>(metrics_[static_cast<int>(face)].unitsPerEm);
+  for (const std::vector<Point>& poly : Contours(fd.file, outline->second.glyph)) {
+    std::vector<Vector2>& contour = out.emplace_back();
+    contour.reserve(poly.size());
+    for (const Point& q : poly) contour.push_back({q.x * unit, q.y * unit});
+    // The flattening closes a contour by coming back to where it began.
+    if (contour.size() > 1 && contour.front().x == contour.back().x &&
+        contour.front().y == contour.back().y) {
+      contour.pop_back();
+    }
+  }
+  return out;
 }
 
 float FontStore::Advance(Face face, int codepoint, float emPx) {

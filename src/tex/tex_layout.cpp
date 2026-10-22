@@ -894,6 +894,50 @@ Layout Render(std::string_view source, FontStore& fonts, float emPx, bool displa
   return BuildLayout(Parse(source), fonts, emPx, display);
 }
 
+std::vector<std::vector<Vector2>> ItemContours(const Item& it, FontStore& fonts) {
+  std::vector<std::vector<Vector2>> out;
+  switch (it.kind) {
+    case Item::Kind::Glyph:
+      out = fonts.GlyphContours(it.face, it.codepoint);
+      for (std::vector<Vector2>& contour : out) {
+        for (Vector2& p : contour) p = {it.pen.x + p.x * it.emPx, it.pen.y - p.y * it.emPx};
+      }
+      break;
+    case Item::Kind::Rect: {
+      // Wound as the glyphs' outer contours come out once y points down.
+      const Rectangle r = {it.rect.x, it.rect.y, std::max(it.rect.width, 0.0f),
+                           std::max(it.rect.height, 0.75f)};
+      out.push_back({{r.x, r.y}, {r.x + r.width, r.y}, {r.x + r.width, r.y + r.height},
+                     {r.x, r.y + r.height}});
+      break;
+    }
+    case Item::Kind::Line: {
+      const float dx = it.p1.x - it.p0.x, dy = it.p1.y - it.p0.y;
+      const float length = std::sqrt(dx * dx + dy * dy);
+      if (length <= 0.0f) break;
+      const float nx = -dy / length * it.thickness * 0.5f, ny = dx / length * it.thickness * 0.5f;
+      out.push_back({{it.p0.x + nx, it.p0.y + ny}, {it.p1.x + nx, it.p1.y + ny},
+                     {it.p1.x - nx, it.p1.y - ny}, {it.p0.x - nx, it.p0.y - ny}});
+      break;
+    }
+    case Item::Kind::Stroke: {
+      const StrokeProfile* profile = fonts.Stroke(it.face, it.codepoint);
+      if (profile == nullptr || it.emPx <= 0.0f) break;
+      const StrokeEdges edges = WideStroke(*profile, it.rect.width / it.emPx, it.thickness);
+      const float base = it.rect.y + it.rect.height;
+      std::vector<Vector2>& band = out.emplace_back();
+      for (std::size_t i = 0; i < edges.x.size(); ++i) {
+        band.push_back({it.rect.x + edges.x[i] * it.emPx, base - edges.top[i] * it.emPx});
+      }
+      for (std::size_t i = edges.x.size(); i-- > 0;) {
+        band.push_back({it.rect.x + edges.x[i] * it.emPx, base - edges.bottom[i] * it.emPx});
+      }
+      break;
+    }
+  }
+  return out;
+}
+
 void DrawLayout(const Layout& layout, FontStore& fonts, Vector2 origin, Color tint) {
   for (const Item& it : layout.items) {
     switch (it.kind) {
