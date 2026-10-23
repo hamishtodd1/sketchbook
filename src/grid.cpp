@@ -1,4 +1,5 @@
 #include "grid.h"
+#include "screen.h"
 
 #include <algorithm>
 #include <cmath>
@@ -56,8 +57,8 @@ void DrawDotGrid(const Viewport& viewport, float strength) {
   // invisible instead of a pop.
   const float t = std::clamp((spacing - kGridMinPx) / (kGridMaxPx - kGridMinPx), 0.0f, 1.0f);
 
-  const float w = static_cast<float>(GetScreenWidth());
-  const float h = static_cast<float>(GetScreenHeight());
+  const float w = static_cast<float>(ScreenWidth());
+  const float h = static_cast<float>(ScreenHeight());
   const Vector2 topLeft = viewport.ToWorld({0.0f, 0.0f});
   const Vector2 bottomRight = viewport.ToWorld({w, h});
 

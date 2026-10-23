@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "screen.h"
 
 #include <algorithm>
 #include <cmath>
@@ -34,6 +35,7 @@ struct MenuLayout {
   Rectangle insert;
   Rectangle slide;
   Rectangle ask;
+  Rectangle record;
   Rectangle alwaysCode;
   Rectangle apiKey;
   Rectangle fullscreen;
@@ -93,8 +95,10 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   // Slides come from here, and only from here.
   m.slide = {inset, y, inner, kButtonHeight};
   y += kButtonHeight + 8.0f;
-  // A conversation with Claude, in the middle of the view.
-  m.ask = {inset, y, inner, kButtonHeight};
+  // A conversation with Claude, in the middle of the view; and recording the
+  // session, for a video made from it later (`--edit`).
+  m.ask = {inset, y, buttonWidth, kButtonHeight};
+  m.record = {inset + buttonWidth + 8.0f, y, buttonWidth, kButtonHeight};
   y += kButtonHeight + 8.0f;
   // How boxes read. A tickbox rather than a button, since it is a state that
   // stays put while the menu is up, and the tick is what says which it is in.
@@ -110,8 +114,8 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   y += kButtonHeight;
   y += inset;   // the panel's own bottom margin, the same as its top
 
-  const float w = static_cast<float>(GetScreenWidth());
-  const float h = static_cast<float>(GetScreenHeight());
+  const float w = static_cast<float>(ScreenWidth());
+  const float h = static_cast<float>(ScreenHeight());
   m.panel = {std::round((w - kPanelWidth) * 0.5f), std::round((h - y) * 0.5f), kPanelWidth, y};
 
   // Everything above was relative; move it onto the panel in one pass, so there
@@ -130,6 +134,7 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   place(&m.insert);
   place(&m.slide);
   place(&m.ask);
+  place(&m.record);
   place(&m.alwaysCode);
   place(&m.apiKey);
   place(&m.fullscreen);
@@ -257,6 +262,7 @@ MenuAction OptionsMenu::Update(Options* options) {
   if (CheckCollisionPointRec(mouse, m.insert)) return MenuAction::Insert;
   if (CheckCollisionPointRec(mouse, m.slide)) return MenuAction::NewSlide;
   if (CheckCollisionPointRec(mouse, m.ask)) return MenuAction::AskClaude;
+  if (CheckCollisionPointRec(mouse, m.record)) return MenuAction::Record;
   if (CheckCollisionPointRec(mouse, m.alwaysCode)) return MenuAction::AlwaysCode;
   if (CheckCollisionPointRec(mouse, m.apiKey)) return MenuAction::PasteApiKey;
   if (CheckCollisionPointRec(mouse, m.fullscreen)) return MenuAction::Fullscreen;
@@ -267,7 +273,7 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
   if (!visible_) return;
 
   const MenuLayout m = Compute(aspectOpen_, static_cast<int>(recent_.size()));
-  DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), kScrim);
+  DrawRectangle(0, 0, ScreenWidth(), ScreenHeight(), kScrim);
 
   DrawRectangleRounded(m.panel, 0.06f, 12, kPanelBg);
   DrawRectangleRoundedLines(m.panel, 0.06f, 12, kPanelBorder);
@@ -346,6 +352,8 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
              CheckCollisionPointRec(mouse, m.insert));
   DrawButton(fonts, m.slide, "New slide", CheckCollisionPointRec(mouse, m.slide));
   DrawButton(fonts, m.ask, "Ask Claude", CheckCollisionPointRec(mouse, m.ask));
+  DrawButton(fonts, m.record, options.recording ? "Stop recording" : "Record",
+             CheckCollisionPointRec(mouse, m.record));
   DrawTickbox(fonts, m.alwaysCode, "Always show code", options.alwaysCode,
               CheckCollisionPointRec(mouse, m.alwaysCode));
   // Says what pressing it does, and which key is set if one is.

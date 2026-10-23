@@ -1,4 +1,5 @@
 #include "app.h"
+#include "screen.h"
 #include "grip.h"
 
 #include <algorithm>
@@ -91,6 +92,8 @@ bool App::Init(const std::string& assetDir, std::string* error) {
 }
 
 void App::Shutdown() {
+  StopRecording();
+  cutFill_.Unload();
   // Before anything is released: writing the canvas down reads the boxes.
   FlushAutosave();
   // The blocks go first, and by hand: a shader has to be released while the
@@ -369,7 +372,7 @@ std::vector<Rectangle> App::WindowRects() {
 Vector2 App::FindGap(Vector2 size, const std::vector<Rectangle>& taken) {
   const float   zoom = viewport_.Zoom();
   const Vector2 middle = viewport_.ToWorld(
-      {static_cast<float>(GetScreenWidth()) * 0.5f, static_cast<float>(GetScreenHeight()) * 0.5f});
+      {static_cast<float>(ScreenWidth()) * 0.5f, static_cast<float>(ScreenHeight()) * 0.5f});
   const Vector2 ideal = SnapToGrid({middle.x - size.x * 0.5f, middle.y - size.y * 0.5f}, zoom);
   // Room round it: a line's height, so two windows never read as one.
   const float room = 2.0f * GridBaseStep();
@@ -411,7 +414,7 @@ Vector2 App::FindGap(Vector2 size, const std::vector<Rectangle>& taken) {
 void App::CentreOn(Rectangle world) {
   const Vector2 centre = {world.x + world.width * 0.5f, world.y + world.height * 0.5f};
   const Vector2 middle = viewport_.ToWorld(
-      {static_cast<float>(GetScreenWidth()) * 0.5f, static_cast<float>(GetScreenHeight()) * 0.5f});
+      {static_cast<float>(ScreenWidth()) * 0.5f, static_cast<float>(ScreenHeight()) * 0.5f});
   // Already there, to within a couple of pixels: nothing to do.
   if (std::hypot(centre.x - middle.x, centre.y - middle.y) * viewport_.Zoom() < 2.0f) return;
   viewport_.GlideTo(centre, viewport_.Zoom(), 0.45f);
@@ -959,6 +962,32 @@ void App::DevKeysStep() {
     }
     if (key == "blur") SetFocus(nullptr);
     else if (key == "focus") SetFocus(devKeysBlock_);
+    // Dev: the menu's recording button, pressed.
+    else if (key == "record") recorder_.Recording() ? StopRecording() : StartRecording();
+    // Dev: Escape on the canvas -- the menu, open or shut.
+    else if (key == "menu") menu_.Toggle();
+    // Dev: a second box of these lines (`|` between them) where the view is
+    // looking; the box the keys are typed in goes away; the camera glides by
+    // (dx, dy) world units. For testing what a recording keeps of such things.
+    else if (key.rfind("newbox:", 0) == 0) {
+      std::vector<std::string> lines(1);
+      for (char c : key.substr(7)) {
+        if (c == '|') lines.emplace_back(); else lines.back() += (c == '_' ? ' ' : c);
+      }
+      SetFocus(nullptr);
+      NewBlockAtCentre()->RestoreLines(lines);
+    } else if (key == "drop") {
+      if (focus_ == devKeysBlock_) SetFocus(nullptr);
+      RemoveBlock(devKeysBlock_);
+      devKeysBlock_ = nullptr;
+      devKeysLeft_.clear();
+      return;
+    } else if (key.rfind("pan:", 0) == 0) {
+      float dx = 0.0f, dy = 0.0f;
+      std::sscanf(key.c_str() + 4, "%f,%f", &dx, &dy);
+      const Vector2 c = viewport_.Centre();
+      viewport_.GlideTo({c.x + dx, c.y + dy}, viewport_.Zoom(), 0.4f);
+    }
     else if (key.rfind("dwgrip:", 0) == 0) {
       // Display window `index` of kind `kind` (Resizables() order) dragged by its
       // grip by (dx, dy) world units, and let go.
@@ -1043,8 +1072,8 @@ void App::SetFullscreen(bool on) {
   // No change of display mode, so it is instant and disturbs nothing else.
   if (on) {
     windowedAt_ = GetWindowPosition();
-    windowedWidth_ = GetScreenWidth();
-    windowedHeight_ = GetScreenHeight();
+    windowedWidth_ = ScreenWidth();
+    windowedHeight_ = ScreenHeight();
     const int     monitor = GetCurrentMonitor();
     const Vector2 corner = GetMonitorPosition(monitor);
     SetWindowState(FLAG_WINDOW_UNDECORATED);
@@ -1730,8 +1759,8 @@ void App::FrameOnScreen() {
   // What is on screen is decided by the middle, as it is for the lasso: a
   // window mostly off the edge is not one you are looking at, and one mostly on
   // it is, however little of it sticks out.
-  const float width = static_cast<float>(GetScreenWidth());
-  const float height = static_cast<float>(GetScreenHeight());
+  const float width = static_cast<float>(ScreenWidth());
+  const float height = static_cast<float>(ScreenHeight());
   bool  any = false;
   float left = 0.0f, top = 0.0f, right = 0.0f, bottom = 0.0f;
   for (const Rectangle& rect : rects) {
@@ -1982,8 +2011,9 @@ void App::HandleTyping() {
 
 void App::Update() {
   // Ctrl+S saves straight back to wherever this canvas came from, and only
-  // asks when there is nowhere to go. Ctrl+O always asks.
-  const bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+  // asks when there is nowhere to go. Ctrl+O always asks. A canvas being played
+  // takes no keys at all: they are the editor's.
+  const bool ctrl = !passive_ && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
   if (ctrl && IsKeyPressed(KEY_S)) {
     std::string path = untitled_ ? std::string() : currentPath_;
     if (path.empty()) path = filedialog::Save("canvas.sketch");
@@ -2008,7 +2038,9 @@ void App::Update() {
 
   // Escape belongs to whatever is being typed into first: cancelling an edit is
   // not a request for the canvas menu.
-  if (IsKeyPressed(KEY_ESCAPE) && focus_ != nullptr && focus_->DropOtherCarets()) {
+  if (passive_) {
+    // Nothing: Escape is the editor's.
+  } else if (IsKeyPressed(KEY_ESCAPE) && focus_ != nullptr && focus_->DropOtherCarets()) {
     // Back to one caret, as in VS Code; a second Escape is the menu.
   } else if (IsKeyPressed(KEY_ESCAPE) && chats_.Editing()) {
     // Out of the conversation, the way Escape is out of anything being typed.
@@ -2027,7 +2059,7 @@ void App::Update() {
   // pointer -- the click would be spent twice, on two different canvases.
   const bool menuOwnsPress = menu_.Visible();
 
-  switch (menu_.Update(&options_)) {
+  switch (passive_ ? MenuAction::None : menu_.Update(&options_)) {
     case MenuAction::NewCanvas:
       NewCanvas();
       menu_.Close();
@@ -2075,6 +2107,11 @@ void App::Update() {
       }
       break;
     }
+    case MenuAction::Record:
+      // Either way the menu goes: what is recorded is the canvas.
+      if (recorder_.Recording()) StopRecording(); else StartRecording();
+      menu_.Close();
+      break;
     case MenuAction::AskClaude: {
       SetFocus(nullptr);
       const Vector2 size = ChatPanel::DefaultSize();
@@ -2107,8 +2144,8 @@ void App::Update() {
         // Into the nearest gap to the middle of the view. Its size is only known
         // once it has loaded, so it is put down and then moved there.
         const std::vector<Rectangle> taken = WindowRects();
-        const Vector2 middle = viewport_.ToWorld({static_cast<float>(GetScreenWidth()) * 0.5f,
-                                                  static_cast<float>(GetScreenHeight()) * 0.5f});
+        const Vector2 middle = viewport_.ToWorld({static_cast<float>(ScreenWidth()) * 0.5f,
+                                                  static_cast<float>(ScreenHeight()) * 0.5f});
         if (media_.Add(path, sb::SnapToGrid(middle, viewport_.Zoom()))) {
           const int       index = static_cast<int>(media_.Items().size()) - 1;
           const Rectangle bounds = media_.WorldBounds(index);
@@ -2126,7 +2163,7 @@ void App::Update() {
       break;
   }
 
-  const bool canvasActive = !menu_.Visible() && !menuOwnsPress;
+  const bool canvasActive = !passive_ && !menu_.Visible() && !menuOwnsPress;
 
   // Whatever is already being dragged owns the pointer until the button comes
   // up. Without this a window let go over another window's rim would never see
@@ -2362,14 +2399,24 @@ void App::Update() {
   // And while the menu is up, the canvas behind it is not being pointed at
   // either: the pointer is choosing from the menu, and a box flipping to code
   // under the scrim is the canvas answering a question nobody asked.
-  held = held || menu_.Visible();
+  held = held || menu_.Visible() || (passive_ && replayHeld_);
   hover::SetHeld(held);
-  hover::SetCovered(!held && canvasActive && chats_.ItemAt(GetMousePosition(), viewport_) >= 0);
+  hover::SetCovered(!held && (canvasActive || passive_) &&
+                    chats_.ItemAt(hover::Mouse(), viewport_) >= 0);
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
     block->SetPlayPaused(focus_ != nullptr);
   }
-  TrackUndo(held);
-  TrackAutosave(held);
+  if (!passive_) {
+    TrackUndo(held);
+    TrackAutosave(held);
+  }
+  if (recorder_.Recording()) {
+    // Last, so the frame is kept as everything above left it.
+    const double before = GetTime();
+    recorder_.Frame(before - recordStart_, Snapshot(), RecordedView());
+    recordCost_ += GetTime() - before;
+    ++recordFrames_;
+  }
 
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->SetSampleHover(-1);
   if (canvasActive) {
@@ -2551,6 +2598,8 @@ void App::Draw() {
   // proper is then drawn over it.
   TakeLooks();
   DrawCanvas(/*look=*/false);
+  // A transition across a cut being played: over the canvas it is turning into.
+  DrawCut();
 
   // Selected windows wear their rim whether or not they are being pointed at.
   axes_.DrawSelectionRims(viewport_, fonts_);
@@ -2578,6 +2627,11 @@ void App::Draw() {
   }
 
   menu_.Draw(fonts_, options_);
+
+  // A small red light while recording, as on a camera.
+  if (recorder_.Recording()) {
+    DrawCircleV({static_cast<float>(ScreenWidth()) - 14.0f, 14.0f}, 5.0f, {226, 60, 52, 220});
+  }
 
   // Over everything, the menu included: it is the pointer.
   if (cursorHidden_) DrawGrabCursor(GetMousePosition());
@@ -2765,11 +2819,13 @@ void App::WriteCanvas(std::ostream& file, const std::string& path, bool withView
   }
 
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+    if (block->SavedId() == 0) block->SetSavedId(++lastBoxId_);
     const Vector2 position = block->WorldPosition();
     file << "block " << position.x << " " << position.y << " " << block->Em() << " "
          << block->ReadingMode() << " " << (block->Bold() ? 1 : 0) << " "
          << (block->Italic() ? 1 : 0) << " " << static_cast<int>(block->Justification())
-         << " " << block->TextWidth() << " " << (block->ShowSource() ? 1 : 0) << "\n";
+         << " " << block->TextWidth() << " " << (block->ShowSource() ? 1 : 0) << " "
+         << block->SavedId() << "\n";
     for (const std::string& line : block->Lines()) file << "> " << line << "\n";
     // A knob's number, where the text does not already say it: a real under its
     // name, a colour as its three parts. A free function's choice lives in its
@@ -2931,6 +2987,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
     bool                                       surfaceHidden = false;
     bool                                       volumeHidden = false;
     bool                                       colourHidden = false;
+    long long                                  id = 0;   // 0: written before boxes had one
   };
   struct LoadedMedia {
     int         kind = 0;
@@ -3072,7 +3129,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       // A file written before text boxes existed simply stops here, and the
       // stream leaves the rest at its defaults.
       int showSource = 0;
-      stream >> bold >> italic >> justify >> block.textWidth >> showSource;
+      stream >> bold >> italic >> justify >> block.textWidth >> showSource >> block.id;
       block.showSource = (showSource != 0);
       block.showMath = showMath;
       block.bold = (bold != 0);
@@ -3289,12 +3346,17 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
       }
     }
     const bool kept = (block != nullptr);
-    if (relined) block->RestoreLines(loaded.lines);
+    if (relined) block->RestoreLines(loaded.lines, /*build=*/!deferBuilds_);
+    const long long id = loaded.id;
     if (kept) {
       block->SetWorldPosition(loaded.position);
       block->SetEm(loaded.em);
     } else {
       block = std::make_unique<CodeBlock>(loaded.position, loaded.em, std::move(loaded.lines));
+    }
+    if (id > 0) {
+      block->SetSavedId(id);
+      lastBoxId_ = std::max(lastBoxId_, id);
     }
     block->SetReadingMode(loaded.showMath);
     block->SetBold(loaded.bold);
@@ -3365,7 +3427,7 @@ bool App::ReadCanvas(std::istream& file, const std::string& path, bool restoring
     } else {
       block->RestoreValues(std::move(loaded.values));
       block->SetCanvas(&canvas_);
-      block->RequestCompile();
+      if (!deferBuilds_) block->RequestCompile();
     }
     codeBlocks_.push_back(std::move(block));
   }
@@ -3544,6 +3606,156 @@ void App::NewCanvas() {
   autosaveDue_ = 0.0;
   ResetUndo();
   savedSnapshot_ = undoBase_;
+}
+
+// ------------------------------------------------------------------ recording
+
+void App::StartRecording() {
+  if (recorder_.Recording()) return;
+#ifdef _WIN32
+  const char* home = std::getenv("USERPROFILE");
+#else
+  const char* home = std::getenv("HOME");
+#endif
+  const std::filesystem::path videos =
+      (home != nullptr && *home != '\0') ? std::filesystem::path(home) / "Videos" / "sketchbook"
+                                          : std::filesystem::path("recordings");
+  const std::string canvas =
+      currentPath_.empty() ? std::string("untitled")
+                           : std::filesystem::path(currentPath_).stem().string();
+  char stamp[32];
+  const std::time_t t = std::time(nullptr);
+  std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H%M%S", std::localtime(&t));
+  const std::filesystem::path folder = videos / (canvas + " " + stamp);
+  std::string error;
+  const double wall = capture::WallClock();
+  if (!recorder_.Begin(folder.string(), currentPath_, Snapshot(), wall, &error)) {
+    TraceLog(LOG_WARNING, "RECORD: %s", error.c_str());
+    return;
+  }
+  recordStart_ = GetTime();
+  // The camera and the microphone beside it, if there are any. A session
+  // without them is still a recording.
+  if (!capture_.Start(folder.string(), &error)) {
+    TraceLog(LOG_WARNING, "RECORD: no camera or sound: %s", error.c_str());
+  }
+  recordCost_ = 0.0;
+  recordFrames_ = 0;
+  builtSoFar_.clear();
+  options_.recording = true;
+  TraceLog(LOG_INFO, "RECORD: into %s", folder.string().c_str());
+}
+
+void App::StopRecording() {
+  if (!recorder_.Recording()) return;
+  recorder_.End(GetTime() - recordStart_);
+  capture_.Stop();
+  options_.recording = false;
+  TraceLog(LOG_INFO, "RECORD: %d frames; keeping them took %.3f ms a frame", recordFrames_,
+           recordFrames_ > 0 ? recordCost_ * 1000.0 / recordFrames_ : 0.0);
+}
+
+recording::View App::RecordedView() {
+  recording::View view;
+  const Vector2 centre = viewport_.Centre();
+  view.centreX = centre.x;
+  view.centreY = centre.y;
+  view.zoom = viewport_.Zoom();
+  view.width = ScreenWidth();
+  view.height = ScreenHeight();
+  const Vector2 pointer = viewport_.ToWorld(GetMousePosition());
+  view.pointerX = pointer.x;
+  view.pointerY = pointer.y;
+  view.held = hover::Held();
+  std::vector<std::pair<const CodeBlock*, int>> builds;
+  for (std::size_t i = 0; i < codeBlocks_.size(); ++i) {
+    const CodeBlock* block = codeBlocks_[i].get();
+    builds.emplace_back(block, block->Builds());
+    bool before = false;
+    for (const auto& [was, count] : builtSoFar_) {
+      if (was == block) {
+        before = true;
+        if (count != block->Builds()) view.built.push_back(static_cast<int>(i));
+      }
+    }
+    if (!before && block->Builds() > 0) view.built.push_back(static_cast<int>(i));
+  }
+  builtSoFar_ = std::move(builds);
+  for (std::size_t i = 0; i < codeBlocks_.size(); ++i) {
+    if (codeBlocks_[i].get() == focus_) {
+      view.focus = static_cast<int>(i);
+      view.caret = focus_->CaretState();
+      view.typed = focus_->Dirty();
+    }
+  }
+  return view;
+}
+
+void App::ShowRecorded(const std::vector<std::string>& canvas, const recording::View& view,
+                       bool jumped, const std::vector<std::string>& lastBuilt) {
+  // Out of a transition: everything where the far side of the cut has it.
+  EndCut();
+  const auto boxAt = [this](int index) -> CodeBlock* {
+    return (index >= 0 && index < static_cast<int>(codeBlocks_.size()))
+               ? codeBlocks_[static_cast<std::size_t>(index)].get()
+               : nullptr;
+  };
+  if (canvas != shownCanvas_) {
+    bool typed = false;
+    if (focus_ != nullptr && focus_ == boxAt(view.focus) && !shownCanvas_.empty()) {
+      std::vector<std::string> before, after;
+      recording::BoxText(shownCanvas_, view.focus, &before);
+      std::vector<std::string> lines = recording::BoxText(canvas, view.focus, &after);
+      if (before == after) {
+        focus_->SetTypedLines(std::move(lines));
+        typed = true;
+      }
+    }
+    if (!typed) {
+      std::string text;
+      for (const std::string& line : canvas) text += line + '\n';
+      std::istringstream in(text);
+      deferBuilds_ = true;
+      ReadCanvas(in, currentPath_, /*restoring=*/true);
+      deferBuilds_ = false;
+      // A box kept through that keeps its own idea of having the caret.
+      for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+        if (block.get() != boxAt(view.focus) && block->Focused()) block->SetFocused(false);
+      }
+    }
+    shownCanvas_ = canvas;
+  }
+  SetFocus(boxAt(view.focus));
+  if (focus_ != nullptr) {
+    // Typed in and not built, as it was then: one read back is neither.
+    if (view.typed && !focus_->Dirty()) focus_->SetTypedLines(focus_->Lines());
+    focus_->SetCaretState(view.caret);
+  }
+  if (jumped) {
+    for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+      if (block.get() != focus_) block->RequestCompile();
+    }
+    // The box being typed in shows what its last build said -- a balloon, say --
+    // under what has been typed since, as it did then.
+    if (focus_ != nullptr && view.typed && !lastBuilt.empty()) {
+      std::vector<std::string> typed = focus_->Lines();
+      focus_->RestoreLines(lastBuilt);
+      focus_->SetTypedLines(std::move(typed));
+      focus_->SetCaretState(view.caret);
+    } else if (focus_ != nullptr && !view.typed) {
+      focus_->RequestCompile();
+    }
+  }
+  for (int index : view.built) {
+    if (CodeBlock* block = boxAt(index)) block->RequestCompile();
+  }
+
+  // The same stretch of the world as was seen, whatever the size of the window
+  // it is being seen in now.
+  const float scale = view.height > 0 ? static_cast<float>(ScreenHeight()) / view.height : 1.0f;
+  viewport_.Reset({view.centreX, view.centreY}, view.zoom * scale);
+  hover::SetReplayed(true, viewport_.ToScreen({view.pointerX, view.pointerY}));
+  replayHeld_ = view.held;
 }
 
 // ------------------------------------------------------------------ undo

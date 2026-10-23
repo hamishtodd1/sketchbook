@@ -27,6 +27,48 @@ std::wstring Widen(const std::string& utf8) {
   return out;
 }
 
+// Starts a child with these as its standard handles, and **no other handle of
+// this process**. Without the list, a child inherits every inheritable handle
+// there is at that moment -- including the end of another child's pipe being
+// set up on another thread, which then never closes: a face decoder started
+// while a sound was being read once held that read open forever.
+bool Launch(const std::string& commandLine, HANDLE in, HANDLE out, HANDLE err,
+            PROCESS_INFORMATION* pi) {
+  std::vector<HANDLE> handles;
+  for (HANDLE h : {in, out, err}) {
+    if (h != nullptr && h != INVALID_HANDLE_VALUE &&
+        std::find(handles.begin(), handles.end(), h) == handles.end()) {
+      handles.push_back(h);
+    }
+  }
+  SIZE_T size = 0;
+  InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+  std::vector<unsigned char> storage(size);
+  auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
+  if (!InitializeProcThreadAttributeList(attributes, 1, 0, &size)) return false;
+  const bool listed =
+      handles.empty() ||
+      UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles.data(),
+                                handles.size() * sizeof(HANDLE), nullptr, nullptr);
+
+  STARTUPINFOEXW si{};
+  si.StartupInfo.cb = sizeof(si);
+  si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  si.StartupInfo.hStdInput = in;
+  si.StartupInfo.hStdOutput = out;
+  si.StartupInfo.hStdError = err;
+  si.lpAttributeList = attributes;
+
+  std::wstring wide = Widen(commandLine);
+  wide.push_back(L'\0');
+  const BOOL ok = listed && CreateProcessW(nullptr, wide.data(), nullptr, nullptr,
+                                           handles.empty() ? FALSE : TRUE,
+                                           CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                                           nullptr, nullptr, &si.StartupInfo, pi);
+  DeleteProcThreadAttributeList(attributes);
+  return ok != FALSE;
+}
+
 }  // namespace
 
 std::string Quote(const std::string& value) {
@@ -68,21 +110,10 @@ bool Pipe::Start(const std::string& commandLine) {
   if (!CreatePipe(&readEnd, &writeEnd, &sa, 1 << 20)) return false;
   SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
 
-  STARTUPINFOW si{};
-  si.cb = sizeof(si);
-  si.dwFlags = STARTF_USESTDHANDLES;
-  si.hStdOutput = writeEnd;
   // Diagnostics are not wanted here: they would land in the middle of the
   // frames. A decoder that fails simply stops writing, and a short read says so.
-  si.hStdError = nullptr;
-  si.hStdInput = nullptr;
-
   PROCESS_INFORMATION pi{};
-  std::wstring wide = Widen(commandLine);
-  wide.push_back(L'\0');
-
-  const BOOL ok = CreateProcessW(nullptr, wide.data(), nullptr, nullptr, TRUE,
-                                 CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+  const bool ok = Launch(commandLine, nullptr, writeEnd, nullptr, &pi);
   CloseHandle(writeEnd);
   if (!ok) {
     CloseHandle(readEnd);
@@ -131,6 +162,77 @@ void Pipe::Stop() {
   if (readEnd_ != nullptr) {
     CloseHandle(readEnd_);
     readEnd_ = nullptr;
+  }
+}
+
+Feed::~Feed() { Stop(); }
+
+bool Feed::Start(const std::string& commandLine, const std::string& logPath) {
+  Stop();
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+
+  HANDLE readEnd = nullptr;
+  HANDLE writeEnd = nullptr;
+  if (!CreatePipe(&readEnd, &writeEnd, &sa, 1 << 22)) return false;
+  SetHandleInformation(writeEnd, HANDLE_FLAG_INHERIT, 0);
+  HANDLE log = CreateFileW(Widen(logPath).c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+  const HANDLE        said = log == INVALID_HANDLE_VALUE ? nullptr : log;
+  PROCESS_INFORMATION pi{};
+  const bool          ok = Launch(commandLine, readEnd, said, said, &pi);
+  CloseHandle(readEnd);
+  if (log != INVALID_HANDLE_VALUE) CloseHandle(log);
+  if (!ok) {
+    CloseHandle(writeEnd);
+    return false;
+  }
+  CloseHandle(pi.hThread);
+  process_ = pi.hProcess;
+  writeEnd_ = writeEnd;
+  return true;
+}
+
+bool Feed::Write(const unsigned char* data, std::size_t bytes) {
+  if (writeEnd_ == nullptr) return false;
+  while (bytes > 0) {
+    DWORD wrote = 0;
+    const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(bytes, 1u << 20));
+    if (!WriteFile(writeEnd_, data, chunk, &wrote, nullptr) || wrote == 0) return false;
+    data += wrote;
+    bytes -= wrote;
+  }
+  return true;
+}
+
+int Feed::Finish() {
+  if (writeEnd_ != nullptr) {
+    CloseHandle(writeEnd_);
+    writeEnd_ = nullptr;
+  }
+  if (process_ == nullptr) return -1;
+  int code = -1;
+  if (WaitForSingleObject(process_, 120000) == WAIT_OBJECT_0) {
+    DWORD exit = 0;
+    if (GetExitCodeProcess(process_, &exit)) code = static_cast<int>(exit);
+  }
+  CloseHandle(process_);
+  process_ = nullptr;
+  return code;
+}
+
+void Feed::Stop() {
+  if (writeEnd_ != nullptr) {
+    CloseHandle(writeEnd_);
+    writeEnd_ = nullptr;
+  }
+  if (process_ != nullptr) {
+    TerminateProcess(process_, 1);
+    WaitForSingleObject(process_, 2000);
+    CloseHandle(process_);
+    process_ = nullptr;
   }
 }
 

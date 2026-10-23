@@ -57,6 +57,12 @@ std::filesystem::path Folder() {
   return folder;
 }
 
+std::string Value(const std::string& key) {
+  const Store store = Read();
+  const auto  found = store.find(key);
+  return found == store.end() ? std::string() : found->second;
+}
+
 bool Fullscreen() {
   const Store store = Read();
   const auto found = store.find("fullscreen");

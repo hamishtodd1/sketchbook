@@ -1,4 +1,5 @@
 #include "media.h"
+#include "screen.h"
 #include "grip.h"
 
 #include <algorithm>
@@ -584,7 +585,7 @@ void MediaPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
     if (item.absorbed) continue;
 
     const Rectangle rect = ScreenRect(item, viewport);
-    if (rect.x > GetScreenWidth() || rect.y > GetScreenHeight() || rect.x + rect.width < 0.0f ||
+    if (rect.x > ScreenWidth() || rect.y > ScreenHeight() || rect.x + rect.width < 0.0f ||
         rect.y + rect.height < 0.0f) {
       continue;
     }

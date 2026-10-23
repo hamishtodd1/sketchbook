@@ -12,6 +12,7 @@
 #include <sstream>
 
 #include "app.h"
+#include "screen.h"
 #include "hover.h"
 #include "rlgl.h"
 
@@ -468,8 +469,8 @@ void App::TakeLooks() {
 
     // Drawn once, unseen, with the camera on it -- then the real frame is drawn
     // over it, so nothing on screen moves.
-    const float   screenW = static_cast<float>(GetScreenWidth());
-    const float   screenH = static_cast<float>(GetScreenHeight());
+    const float   screenW = static_cast<float>(ScreenWidth());
+    const float   screenH = static_cast<float>(ScreenHeight());
     const Vector2 centre = viewport_.Centre();
     const float   zoom = viewport_.Zoom();
     const float   fit = std::clamp(std::min(screenW / world.width, screenH / world.height), 0.1f, 3.0f);

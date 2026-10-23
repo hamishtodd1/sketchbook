@@ -94,6 +94,46 @@ code turning into its LaTeX and back, three times, then closes. Given two lines,
 turning into the other; a side in `$...$` is LaTeX as it stands, and anything
 else is code, read.
 
+**Record**, in the Escape menu, records the session into a new folder under
+`Videos\sketchbook` (a red light top right says so; the same button stops it),
+with your camera and microphone beside it. They are the first ffmpeg finds;
+`sketchbook.exe --list-devices` says which, and a line `camera <name>` or
+`microphone <name>` in `%APPDATA%\sketchbook\settings.txt` picks another (`none`
+for neither).
+`sketchbook.exe --edit <folder>` opens one in the editor:
+
+| Input | Action |
+| --- | --- |
+| `Space` | Play / pause |
+| Drag on the timeline | Scrub; a press on a piece also selects it |
+| `C` | Cut at the playhead |
+| `Delete` or `Backspace` | Take the selected piece out and close the gap (ripple delete); on a selected transition, make the cut snap |
+| `T` | Take the selected transition away, or put it back |
+| Drag the face, or a box, on the monitor | Move it there from this moment on (its corner resizes it) |
+| `F` | Take the face off, or put it back |
+| Right-drag, wheel on the monitor | Move, zoom the camera from this moment on |
+| `B` | Give the camera back to the recording |
+| Click a diamond under the timeline | Select that key; `Delete` removes it |
+| **Settings**, then a tick | Give that switch (the mouse pointer) a timeline |
+| Drag on a switch's timeline | Make a block, where it is on; drag a block's edges or middle to change it, `Delete` removes it |
+| **Settings** > Add sound..., or drop a sound file on the window | Lay it under the video at the playhead, on a timeline of its own |
+| Drag a sound; its edges | Move it; trim it |
+| `Up`, `Down` with a sound selected | A decibel louder, quieter |
+| `Ctrl`+`Z`, `Ctrl`+`Y` | Undo, redo |
+| Wheel / `Shift`+wheel over the timeline | Zoom it about the pointer / slide it |
+| `Left`, `Right` (`Shift`: a frame) | A second back or on |
+| `Home`, `End` | Either end |
+| `Ctrl`+`R` | Render the edit to `video.mp4` in the recording's folder (1080p, 60 fps); `Escape` stops it |
+
+The editor shows the video as it will be: the canvas framed 16:9, with your face
+in the corner. Where a piece was taken out, half a second of transition (purple)
+moves what was there to what comes next; clicking it selects it. A move of the
+face, a box or the camera is a key at the playhead (diamonds under the timeline:
+camera, face, boxes), reached over the half second before it and held after. The microphone plays along, cut
+as the pieces are, and is silent through a transition; the rendered video has
+the same sound. Every change is saved at once,
+to `edit.txt` in the recording's folder; the recording itself is never changed.
+
 ## Licence
 
 The bundled fonts are OFL; see `assets/fonts/LICENSES.md`. raylib is zlib/libpng.

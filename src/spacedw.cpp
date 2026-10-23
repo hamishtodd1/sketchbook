@@ -1,4 +1,5 @@
 #include "spacedw.h"
+#include "screen.h"
 
 #include <algorithm>
 #include <cmath>
@@ -932,6 +933,8 @@ void SpacePanel::DrawScene(std::size_t index, Rectangle rect,
   EndMode3D();
   EndTextureMode();
   if (msaa_.framebuffer != 0) glext::Resolve(msaa_, target_.id);
+  // Resolving leaves the window bound; a frame being rendered is not there.
+  ResumeOuterTarget();
 
   // Right side up: a render texture is bottom-up, and only its top-left corner
   // was drawn into.
@@ -960,7 +963,7 @@ void SpacePanel::Draw(const Viewport& viewport, FontStore& fonts, VizStore& vize
     if (rect.width < 2.0f || rect.height < 2.0f) continue;
     // Culled to the screen, like everything else: a window off the side of the
     // canvas costs nothing, and a 3D one would cost a great deal.
-    if (rect.x > GetScreenWidth() || rect.y > GetScreenHeight()) continue;
+    if (rect.x > ScreenWidth() || rect.y > ScreenHeight()) continue;
     if (rect.x + rect.width < 0.0f || rect.y + rect.height < 0.0f) continue;
 
     // How each type is drawn here is a viz, the canvas's own or a built-in one.

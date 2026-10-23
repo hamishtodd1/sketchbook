@@ -12,6 +12,7 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string_view>
 #include <utility>
@@ -22,7 +23,9 @@
 #include "busy.h"
 #include "hover.h"
 #include "grip.h"
+#include "screen.h"
 #include "theme.h"
+#include "transition.h"
 #include "grid.h"
 #include "types/examples.h"
 
@@ -199,7 +202,8 @@ bool CompileShaderHalf(const char* vertex, const char* fragment, Shader* shader,
 
 }  // namespace
 
-void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float borderWidth) {
+void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float borderWidth,
+              bool shadow) {
   const float radius = kRadius * zoom;
   const float minSide = std::max(1.0f, std::min(rect.width, rect.height));
   const float roundness = std::clamp(radius / (minSide * 0.5f), 0.0f, 1.0f);
@@ -207,7 +211,7 @@ void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float border
 
   // A cheap stacked shadow: a few translucent offset copies read as a soft
   // drop shadow without a blur pass.
-  for (int i = 3; i >= 1; --i) {
+  for (int i = 3; i >= 1 && shadow; --i) {
     const float spread = static_cast<float>(i) * 1.6f * zoom;
     const Rectangle s = {rect.x - spread, rect.y - spread + 2.0f * zoom,
                          rect.width + 2.0f * spread, rect.height + 2.0f * spread};
@@ -2029,12 +2033,90 @@ void CodeBlock::CommitValue(const std::string& name) {
   SetVariableValue(name, variable->value, /*intoText=*/true);
 }
 
-void CodeBlock::RestoreLines(std::vector<std::string> lines) {
+void CodeBlock::RestoreLines(std::vector<std::string> lines, bool build) {
   lines_ = std::move(lines);
   if (lines_.empty()) lines_.emplace_back();
   ClampCaret();
   SelectNone();
-  RequestCompile();
+  if (build) RequestCompile();
+}
+
+std::vector<morph::Piece> CodeBlock::TextPieces(const Viewport& viewport, FontStore& fonts) const {
+  std::vector<morph::Piece> out;
+  const Geometry& g = Measure(viewport, fonts);
+  const bool      prose = IsText();
+  for (const Row& row : g.rows) {
+    const std::size_t i = static_cast<std::size_t>(row.line);
+    std::vector<morph::Piece> pieces;
+    if (row.asLatex) {
+      // As Draw sets it: a prose row's own slice, or the line's reading.
+      const tex::Layout& layout =
+          prose ? cache_[i].pieceLayout[static_cast<std::size_t>(row.piece)] : cache_[i].layout;
+      pieces = transition::LatexPieces(fonts, layout, prose ? std::vector<std::string>{}
+                                                            : cache_[i].parsed.marks,
+                                       {row.x, row.baseline});
+    } else {
+      // The code, with what the app injected where Draw puts it.
+      std::string       code = lines_[i];
+      const std::string injection = focused_ ? std::string() : Injection(static_cast<int>(i));
+      if (!injection.empty()) {
+        const std::size_t semicolon = code.rfind(';');
+        const std::size_t split = (semicolon == std::string::npos) ? code.size() : semicolon;
+        const bool body = cache_[i].parsed.kind == mathline::Kind::Prototype;
+        const std::size_t resume = (body && split < code.size()) ? split + 1 : split;
+        code = code.substr(0, split) + injection + code.substr(resume);
+      }
+      pieces = transition::CodePieces(fonts, code, g.emPx, {row.x, row.baseline});
+    }
+    for (morph::Piece& piece : pieces) out.push_back(std::move(piece));
+  }
+  return out;
+}
+
+std::string CodeBlock::CaretState() const {
+  std::string out = std::to_string(caretLine_) + " " + std::to_string(caretCol_) + " " +
+                    std::to_string(anchorLine_) + " " + std::to_string(anchorCol_);
+  for (const OtherCaret& other : others_) {
+    out += " " + std::to_string(other.line) + " " + std::to_string(other.col) + " " +
+           std::to_string(other.anchorLine) + " " + std::to_string(other.anchorCol);
+  }
+  return out;
+}
+
+void CodeBlock::SetCaretState(const std::string& state) {
+  std::vector<int> numbers;
+  std::size_t      at = 0;
+  while (at < state.size()) {
+    char*      end = nullptr;
+    const long n = std::strtol(state.c_str() + at, &end, 10);
+    if (end == state.c_str() + at) break;
+    numbers.push_back(static_cast<int>(n));
+    at = static_cast<std::size_t>(end - state.c_str());
+  }
+  if (numbers.size() < 4) return;
+  const auto line = [this](int n) { return std::clamp(n, 0, static_cast<int>(lines_.size()) - 1); };
+  const auto col = [this](int l, int n) {
+    return std::clamp(n, 0, static_cast<int>(lines_[static_cast<std::size_t>(l)].size()));
+  };
+  caretLine_ = line(numbers[0]);
+  caretCol_ = col(caretLine_, numbers[1]);
+  anchorLine_ = line(numbers[2]);
+  anchorCol_ = col(anchorLine_, numbers[3]);
+  others_.clear();
+  for (std::size_t k = 4; k + 3 < numbers.size(); k += 4) {
+    OtherCaret other{line(numbers[k]), 0, line(numbers[k + 2]), 0};
+    other.col = col(other.line, numbers[k + 1]);
+    other.anchorCol = col(other.anchorLine, numbers[k + 3]);
+    others_.push_back(other);
+  }
+}
+
+void CodeBlock::SetTypedLines(std::vector<std::string> lines) {
+  lines_ = std::move(lines);
+  if (lines_.empty()) lines_.emplace_back();
+  ClampCaret();
+  dirty_ = true;
+  caretUsed_ = true;
 }
 
 void CodeBlock::RestoreValues(std::vector<std::pair<std::string, float>> values) {
@@ -2668,6 +2750,7 @@ bool CodeBlock::HandleChrome(const Viewport& viewport, FontStore& fonts) {
 }
 
 void CodeBlock::RequestCompile() {
+  ++builds_;
   dirty_ = false;
   // A balloon put away stays away only until the next compile: the same error
   // coming back from it is shown again, with its copy button fresh.
@@ -2827,7 +2910,7 @@ void CodeBlock::FeedFunction() {
                  WHITE);
   EndShaderMode();
   rlEnableColorBlend();
-  EndTextureMode();
+  EndInnerTexture();
 
   glext::Barrier(glext::kShaderStorage | glext::kBufferUpdate);
 
@@ -2886,7 +2969,7 @@ void CodeBlock::ProbeIfNeeded() {
                  {0.0f, 0.0f}, 0.0f, WHITE);
   EndShaderMode();
   rlEnableColorBlend();
-  EndTextureMode();
+  EndInnerTexture();
 
   if (traceBuffer_ != 0 && traceFloats_ > 0) {
     std::vector<float> values(static_cast<std::size_t>(traceFloats_), 0.0f);
@@ -3138,7 +3221,7 @@ float CodeBlock::GrabAt(const std::string& name, int shape, Vector2 at, float pi
                  {0.0f, 0.0f}, 0.0f, WHITE);
   EndShaderMode();
   rlEnableColorBlend();
-  EndTextureMode();
+  EndInnerTexture();
 
   glext::Barrier(glext::kShaderStorage | glext::kBufferUpdate);
   float answer = kNowhere;
@@ -3252,7 +3335,7 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
   }
   const Color ink = asWords ? kSlideInk : kCodeFg;
 
-  for (std::size_t r = 0; r < g.rows.size(); ++r) {
+  for (std::size_t r = 0; r < g.rows.size() && !textHidden_; ++r) {
     const Row&        row = g.rows[r];
     const std::size_t i = static_cast<std::size_t>(row.line);
 
@@ -3348,7 +3431,7 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
                        asWords ? kSlideInk : kCaret);
     }
   };
-  if (std::fmod(GetTime() - blinkAnchor_, 1.06) < 0.62) {
+  if (!textHidden_ && std::fmod(GetTime() - blinkAnchor_, 1.06) < 0.62) {
     if (focused_) {
       mark(caretLine_, caretCol_);
       for (const OtherCaret& other : others_) mark(other.line, other.col);
@@ -3462,6 +3545,7 @@ void CodeBlock::DrawChrome(const Viewport& viewport, FontStore& fonts) const {
 }
 
 void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
+  if (overlayHidden_) return;
   // A line from the window showing a value to every place that value is
   // written. The box round the name says *that* it is the same thing; the curve
   // says which window it is the same thing as, which matters once two are open.

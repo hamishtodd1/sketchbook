@@ -1,4 +1,5 @@
 #include "slides.h"
+#include "screen.h"
 
 #include <algorithm>
 #include <cmath>
@@ -170,8 +171,8 @@ Rectangle SlidePanel::Bounds(const Slide& slide, float aspect) {
 
 float SlidePanel::ZoomToFill(const Slide& slide, float aspect) {
   const Rectangle bounds = Bounds(slide, aspect);
-  const float byWidth = static_cast<float>(GetScreenWidth()) / bounds.width;
-  const float byHeight = static_cast<float>(GetScreenHeight()) / bounds.height;
+  const float byWidth = static_cast<float>(ScreenWidth()) / bounds.width;
+  const float byHeight = static_cast<float>(ScreenHeight()) / bounds.height;
   // Cover rather than fit: the slide fills the window and its rim finishes just
   // outside it, which is what "presenting" looks like.
   return std::max(byWidth, byHeight) * 1.01f;
@@ -243,7 +244,7 @@ void SlidePanel::Draw(const Viewport& viewport, FontStore& fonts, float aspect) 
     const Rectangle rect = {topLeft.x, topLeft.y, bounds.width * zoom, bounds.height * zoom};
 
     // Off screen entirely: nothing to draw, and a deck can be long.
-    if (rect.x > GetScreenWidth() || rect.y > GetScreenHeight() ||
+    if (rect.x > ScreenWidth() || rect.y > ScreenHeight() ||
         rect.x + rect.width < 0.0f || rect.y + rect.height < 0.0f) {
       continue;
     }

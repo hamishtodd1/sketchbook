@@ -16,6 +16,7 @@
 #include "fontstore.h"
 #include "mathline.h"
 #include "mathprogram.h"
+#include "morph.h"
 #include "raylib.h"
 #include "tex/tex.h"
 #include "viewport.h"
@@ -35,7 +36,9 @@ class CodeBlock;
 // where the pointer really is the value it is reporting.
 // A card: the rounded, shadowed panel a box is drawn on, and anything else on
 // the canvas that wants to look like one.
-void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float borderWidth);
+// `shadow` false for a card fading away, whose shadow would not fade with it.
+void DrawCard(Rectangle rect, float zoom, Color fill, Color border, float borderWidth,
+              bool shadow = true);
 
 struct ActiveValue {
   CodeBlock*  block = nullptr;
@@ -530,7 +533,36 @@ class CodeBlock {
   void CommitValue(const std::string& name);
   // Replaces the text wholesale, keeping everything built from it that still
   // applies. An undo step uses it for a box whose numbers alone have changed.
-  void RestoreLines(std::vector<std::string> lines);
+  void RestoreLines(std::vector<std::string> lines, bool build = true);
+
+  // --- for a recording (recording.h) ----------------------------------------
+  //
+  // The carets as one line of text -- caret, anchor, and every other caret -- and
+  // put back from one. And the text as typing leaves it: changed, not built,
+  // which waits for the caret to leave as it did when it was typed.
+  std::string CaretState() const;
+  // How many times it has been asked to build: a recording notes the frames on
+  // which this goes up, and a playback builds then and only then.
+  int         Builds() const { return builds_; }
+  // Which box this is for as long as the canvas has it, unlike `Id`: given the
+  // first time the box is written down and kept in the file, so a recording can
+  // follow a box from one frame to the next and an edit can move it (editor.h).
+  long long   SavedId() const { return savedId_; }
+  void        SetSavedId(long long id) { savedId_ = id; }
+
+  // --- a transition across a cut (app_cut.cpp) -------------------------------
+  //
+  // What the box's text looks like, as pieces a morph can move (morph.h), on
+  // screen -- each row as it is drawn, LaTeX or code. And the text left out of
+  // the drawing, while a morph stands in for it.
+  std::vector<morph::Piece> TextPieces(const Viewport& viewport, FontStore& fonts) const;
+  void                      SetTextHidden(bool hidden) { textHidden_ = hidden; }
+  // And its balloon and the lines from its windows, which would otherwise be
+  // there at full strength from the first frame of a box still arriving.
+  void                      SetOverlayHidden(bool hidden) { overlayHidden_ = hidden; }
+  bool                      Prose() const { return IsText() && !showSource_; }
+  void        SetCaretState(const std::string& state);
+  void        SetTypedLines(std::vector<std::string> lines);
 
   // --- a knob that moves by itself ------------------------------------------
   //
@@ -824,6 +856,10 @@ class CodeBlock {
   std::string       ErrorKey() const;
   double blinkAnchor_ = 0.0;
   bool   dirty_ = false;
+  int    builds_ = 0;
+  long long savedId_ = 0;
+  bool   textHidden_ = false;
+  bool   overlayHidden_ = false;
   // Resolved during Draw, before the geometry that depends on it is measured.
   mutable int hoverLine_ = -1;
   mutable bool rimHot_ = false;

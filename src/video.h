@@ -58,6 +58,8 @@ class Stream {
   bool Advance(double seconds);
 
   bool                              HaveFrame() const { return haveFrame_; }
+  // When the frame on show is from, in the file's seconds; below 0 before one.
+  double                            CurrentTime() const { return currentTime_; }
   const std::vector<unsigned char>& Pixels() const { return current_; }  // RGB8
   int                               Width() const { return outWidth_; }
   int                               Height() const { return outHeight_; }

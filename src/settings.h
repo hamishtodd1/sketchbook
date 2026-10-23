@@ -19,6 +19,11 @@ std::filesystem::path Folder();
 // Whether the app was last left filling the screen. Written the moment it
 // changes rather than at exit, so a crash does not forget it.
 bool Fullscreen();
+
+// Any other setting, as written in settings.txt (`key value`), or empty. For
+// the ones changed by hand rather than from the app: `camera` and `microphone`
+// name the devices a recording uses (capture.h), `none` for neither.
+std::string Value(const std::string& key);
 void RememberFullscreen(bool on);
 
 // The Claude API key, sealed to this Windows account (secret.h). Empty if none

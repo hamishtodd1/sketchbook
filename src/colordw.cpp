@@ -1,4 +1,5 @@
 #include "colordw.h"
+#include "screen.h"
 
 #include <algorithm>
 #include <cmath>
@@ -898,10 +899,10 @@ void ColorPanel::Draw(const Viewport& viewport, FontStore& fonts, VizStore& vize
                    CheckCollisionPointRec(aim, rect), dragOne);
       rlDrawRenderBatchActive();
       rlViewport(static_cast<int>(rect.x),
-                 GetRenderHeight() - static_cast<int>(rect.y + rect.height),
+                 ScreenHeight() - static_cast<int>(rect.y + rect.height),
                  static_cast<int>(rect.width), static_cast<int>(rect.height));
       pane->Draw(*viz, frame);
-      rlViewport(0, 0, GetRenderWidth(), GetRenderHeight());
+      rlViewport(0, 0, ScreenWidth(), ScreenHeight());
     }
 
     // The picker's triangle shows the colour it points at, which is the

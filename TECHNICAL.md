@@ -186,6 +186,7 @@ Check a new window by magnifying a screenshot with no smoothing.
 It is a convenience, not a foundation; keep it extractable.
 
 **raylib-free**: `mathline.*`, `mathprogram.*`, `vizglsl.*`, `compiler.*`, `morph.*`,
+`recording.*`, `edit.*`,
 `process.*`, `selection.h`, `filedialog.*`, `video.*`, `recent.*`, `settings.*`,
 and a type's own file (`types/RealFunction.*`, `types/Clifford.*`,
 `types/Color.*`, `types/examples.h`). The Win32 files (`*_win32.cpp`, `glext`,
@@ -391,6 +392,174 @@ nearest the size being drawn. raylib's `fontSize` is a stbtt pixel *height*
   the wider side fills most of the window. The card's paper turns over the middle
   of the move and the ink is whichever reads on it, because light-on-dark code
   and dark-on-light LaTeX faded together pass through the same grey.
+
+---
+
+## Recording and the editor (`recording.*`, `editor.*`)
+
+- **Recording** is `App::StartRecording`/`StopRecording`, from the menu's Record
+  button (and `record` in `--dev-keys`). The recorder is the app's, and keeps a
+  frame at the end of `Update`. Its folder is `Videos\sketchbook\<canvas> <time>`.
+- **A recording is a folder** with `session.txt`: a header, the canvas it began
+  from (`App::RecordedCanvas`, an undo step's snapshot, each line after `| `),
+  then per frame that changed anything an `f` record -- time, camera, window
+  size, pointer (world), whether a gesture was held, the focused box and its
+  carets (`CodeBlock::CaretState`) -- with `b` (boxes built that frame) and `d`
+  (the lines that changed: everything between the common start and the common
+  end of the old and new canvas) after it, and `end <seconds>` last. Flushed
+  every 30 frames. Keeping a small canvas costs about 0.06 ms a frame.
+- **Builds are recorded, not redone.** `CodeBlock::Builds` counts
+  `RequestCompile`s; the frames on which one goes up are the `b` records. Playing,
+  `ReadCanvas` builds nothing (`deferBuilds_`), and a box builds when its `b`
+  comes round -- otherwise a box being typed from nothing was built at every
+  letter, and showed balloons its typist never saw. A jump (scrubbing, a seek)
+  builds every box but the one being typed in.
+- **Playing a frame** (`App::ShowRecorded`): if only the focused box's text
+  differs, it is put back as typing leaves it (`SetTypedLines`: changed, not
+  built); otherwise the canvas is read as an undo step reads it, which keeps every
+  box whose text is the same. Then the focus, the carets, and the camera, scaled
+  by the window's height against the recorded one, so the same stretch of world
+  is seen. Hover reads the recorded pointer (`hover::SetReplayed`), and a held
+  gesture holds hover off as it did.
+- **Passive** (`App::SetPassive`): Update skips the shortcuts, the menu, every
+  pointer and key path (`canvasActive` is false), undo and auto-save. Building,
+  sharing and the panels' syncing run as ever. `BeginPlayback` also points the
+  canvas path at the recorded one, for pictures, without opening or saving it.
+- **The editor** keeps the canvas of the frame it last showed and carries it
+  forward a few frames at a time while playing; further is a jump, from a
+  keyframe of the canvas held every 600 frames.
+- **An edit** (`edit.*`, raylib-free) is a list of pieces, each a stretch of the
+  recording in source seconds, played end to end; output time maps to source
+  time through them (`SourceAt`). Saved whole after every change to `edit.txt`
+  (`sbedit 1`, then `piece <from> <to>` lines), written beside and moved over.
+  Undo keeps whole piece lists, as canvas undo keeps whole canvases. Crossing a
+  join is a jump like any other.
+- **The box being typed in, across a jump.** Two more facts are recorded for it:
+  whether it has been typed in since it was built (the 2 bit of the `f`
+  record's flags), since sharing leaves such a box alone and a playback must
+  too; and, found from the `b` records (`Recording::LastBuilt`), what it was last
+  built from -- which it is built from again, with the typing since put back over
+  it, so it shows the balloon it showed then.
+- **Transitions** (`edit::Edit::Transition`, `app_cut.cpp`). A piece's `in` is the
+  length of the transition into it, used only where the recording jumps (the
+  pieces' ends differ); it is output time of its own, inserted, so `At` answers
+  either a source time or "crossing into piece k, this far". Crossing, the editor
+  hands the app both ends (`App::CutEnd`: canvas and view, cached per join) and
+  the fraction. `ShowCut` measures both ends once per key: each is loaded
+  (`LoadPlayed`, no builds), the camera put where it was, and every box's
+  position, rect, and text as pieces (`CodeBlock::TextPieces`, the rows as
+  `Draw` sets them, turned into box-local world units) read off. Boxes are paired
+  by identical text, then by nearest within 800 world units. The after canvas is
+  then built and shown; each frame the paired boxes are put part of the way
+  (`SetWorldPosition`, which their docked windows follow), their changed knobs
+  set part of the way as uniforms, and the camera eased (zoom geometrically). A
+  box whose text changed has its text hidden and the morph drawn over it by
+  `OutlineFill`; its overlay (balloon, lines) is hidden too. A box that came is
+  under a canvas-coloured cover over its footprint, thinning over the second
+  half; one that went is drawn as a ghost -- card without shadow, and its text --
+  fading over the first. `EndCut` (called by `ShowRecorded`) puts everything
+  where the after canvas has it.
+- **Rendering** (`Editor::StartRender`, `RenderFrame`). Each output frame is a
+  step of 1/60 s: the editor shows that moment, the app updates, and the app is
+  drawn into a 1920x1080 4x multisampled target (`glext::MakeMultisample`),
+  resolved, read back, and written to ffmpeg's stdin (`proc::Feed`; its stderr
+  goes to `render.log`), which encodes H.264 into `video.part.mp4`, renamed to
+  `video.mp4` when ffmpeg exits cleanly. The window shows each frame as it goes.
+  About 20 frames a second of video per second of rendering on this machine.
+- **The frame is not the window.** While rendering, `SetScreenOverride` makes
+  `ScreenWidth`/`ScreenHeight` (`screen.h`) the video's size, and **everything
+  that lays out or draws the canvas asks those, never raylib's
+  `GetScreenWidth`/`GetRenderWidth`** -- two windows that put the GL viewport back
+  to the window's size afterwards once squeezed everything drawn after them into
+  a corner of the frame. And **a render target begun mid-frame ends with
+  `EndInnerTexture`** (or `ResumeOuterTarget` after a resolve, which binds the
+  window), since raylib's `EndTextureMode` goes back to the window, not to the
+  frame being rendered.
+- **The camera and the microphone** (`capture.*`). Recording starts a second
+  ffmpeg (`proc::Feed`) reading DirectShow into `camera.mkv` (H.264 ultrafast,
+  AAC), its log in `camera.log`; stopping writes `q` to it, which is ffmpeg's own
+  "finish the file". Devices are the first `-list_devices` names of each kind,
+  or `settings::Value("camera"/"microphone")`.
+- **Keeping the two in time.** The session's header has `wallclock` (seconds
+  since 1970 at its start); the capture stamps packets with the wall clock
+  (`-use_wallclock_as_timestamps`), so its log's input `start:` is the wall-clock
+  time of the file's first moment. Session time `s` is camera time
+  `s + (session wall clock - camera start)` (`Editor::cameraOffset_`). Before
+  trimming, the sound is held to its stamps (`aresample=async=1000:first_pts=0`):
+  over an hour a microphone's clock and the wall's drift apart, and the wall's is
+  the one the session keeps.
+- **The sound when editing**: `preview.mp3` (mono, 96k) made from the camera's
+  file on a thread the first time, then streamed (`Music`), sought to where the
+  playhead is when it starts and whenever it is a quarter of a second out (a cut
+  is that), and paused through a transition. **When rendering**: an ffmpeg graph
+  (`Editor::SoundGraph`, written to `render.filter` and passed as
+  `-/filter_complex`, since a long edit's would not fit on a command line) trims
+  the camera's sound to each piece, with silence for each transition and for
+  any piece before the camera began, and joins them.
+- **A child inherits only its own handles** (`proc::Launch`, with
+  `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`). Before, every child inherited every
+  inheritable handle there was at that moment -- including the write end of
+  another child's pipe being set up on another thread. A face decoder started
+  while a sound was being read then held that pipe open, and reading it waited
+  for ever.
+- **Moving a file over another** (`edit::MoveOver`, for `edit.txt`, `video.mp4`,
+  `preview.mp3`) tries again and at worst copies: a file just written is
+  sometimes held by whatever scans new files, and the move fails. It once left an
+  edit unsaved, silently.
+- **Testing without anyone's camera**: `SKETCHBOOK_TEST_CAPTURE=1` records
+  ffmpeg's test picture and a tone instead, and mutes the editor. Only the picture
+  is stamped by the wall clock: `-re` paces an input by its stamps, so a tone
+  stamped "now" was made half as fast again as it plays.
+- **The monitor** (`editor_frame.cpp`): every frame the canvas is drawn into a
+  16:9 multisampled target the size of the monitor's rectangle, with the screen
+  override set to it before anything measures -- the monitor's gestures too --
+  and the face drawn over it; the window shows the target. A render draws the
+  same `Compose` into a 1920x1080 target. So the monitor is the render, smaller.
+- **The face** is `camera.mkv`'s picture (`video::Stream`, 640 wide) in a rounded
+  rectangle whose edge is coverage (a small SDF shader), over a faint shadow. The
+  stream is sought on a jump back or of more than 1.5 s, and otherwise carried
+  on; a render waits (up to 3 s) for the very frame. Across a transition its
+  place blends from one end's to the other's and its picture holds the near end's
+  frame.
+- **Keys** (`edit::Track`, `edit::Evaluate`): one track per thing -- `camera`
+  (centre, and the world's height the frame holds, which means the same at any
+  size; eased in proportion), `face` (centre and height, in heights of the
+  frame), `box:<id>` (offset in world units, and a scale of its type) -- with keys
+  at source times, saved as `key <target> <at> <value...>` or `... free`. A value
+  is arrived at over the half second before its key (or the whole gap, if
+  shorter) and held after; a `free` key eases back to the recording's over the
+  half second after. Undo keeps whole edits.
+- **Boxes have saved ids** (`CodeBlock::SavedId`, the last field of a `block`
+  record), given the first time a box is written and kept by undo, recording and
+  load; distinct from `Id`, which is Claude's name for a box this session. An
+  edit's moves of boxes are `App::ShiftBoxes` after each frame shown -- each box
+  put where the canvas has it plus its move, its em scaled -- and in a
+  transition, the moves at either end are where it glides from and to.
+- **Switches** (`edit::Switch`, `kSwitchKinds`): ticked in the editor's
+  Settings, saved as `switch <name> on|off`, with blocks as `block <name> <from>
+  <to>` in source seconds. A block is drawn from `OutputNear` its ends (an end
+  in a piece taken out goes to the nearest piece), and a drag on the timeline is
+  turned back into source time with `SourceNear` (in a transition, its nearer
+  end). `Edit::On` is whether a switch is ticked and in a block. The pointer is
+  the recording's `View` pointer (world), drawn in `Compose` as an arrow filled
+  by `OutlineFill` with a dark edge, blended between the ends across a
+  transition.
+- **Laid sounds** (`edit::Sound`): in output seconds, not source -- they are laid
+  against the finished video. Added sounds are copied into `sounds/` as mp3
+  (which raylib streams and ffmpeg reads), saved as `sound <at> <from> <to>
+  <gain> <file>`. Each plays through a `Music` of its own, kept in step with the
+  list. In a render each is an ffmpeg input, trimmed, scaled (`volume`), put in
+  place (`adelay`) and `amix`ed over the voice -- the microphone's cut, or
+  silence -- for as long as the voice lasts.
+- **Dev**: `--edit-keys` drives the timeline (`Editor::DevKeys`), and `--play`,
+  `--playhead` start it somewhere; `render` renders; `campan:`, `camzoom:`, `camfree`,
+`face:`, `facetoggle`, `box:` make keys; `settings`, `tick:`, `block:` work the
+switches; `addsound:`, `sound:`, `gain:` the sounds. `--dev-keys` has `newbox:a|b` (`_` for a
+  space), `drop` (the dev box removed; nothing after it runs) and `pan:dx,dy`, to
+  make recordings with those in them.
+- **Not yet recorded**: conversations (an undo step holds them by reference),
+  what a video was showing, and anything drawn from the real pointer rather than
+  `hover`.
 
 ---
 

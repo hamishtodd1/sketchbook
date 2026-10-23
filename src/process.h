@@ -47,4 +47,29 @@ class Pipe {
   void* readEnd_ = nullptr;
 };
 
+// The other way round: a child that reads what it is given, as an encoder reads
+// frames. What it says goes to `logPath`, so a failure can be read afterwards.
+class Feed {
+ public:
+  Feed() = default;
+  ~Feed();
+  Feed(const Feed&) = delete;
+  Feed& operator=(const Feed&) = delete;
+
+  bool Start(const std::string& commandLine, const std::string& logPath);
+  // Writes all of it, waiting while the child catches up. False once the child
+  // has stopped reading.
+  bool Write(const unsigned char* data, std::size_t bytes);
+  // Says there is no more, and waits for the child to finish with it. Its exit
+  // code, or -1 if it would not stop.
+  int  Finish();
+  // Stops it without waiting for it to finish: the work is being thrown away.
+  void Stop();
+  bool Running() const { return process_ != nullptr; }
+
+ private:
+  void* process_ = nullptr;
+  void* writeEnd_ = nullptr;
+};
+
 }  // namespace sb::proc

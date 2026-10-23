@@ -93,6 +93,19 @@ std::string OpenMedia() {
   return Narrow(buffer.data());
 }
 
+std::string OpenSound() {
+  static const wchar_t kSoundFilter[] =
+      L"Sound\0*.mp3;*.wav;*.ogg;*.flac;*.m4a;*.aac;*.opus;*.wma;*.mp4;*.mkv;*.mov\0"
+      L"All files (*.*)\0*.*\0\0";
+  std::vector<wchar_t> buffer(1024, L'\0');
+  OPENFILENAMEW ofn = Prepare(&buffer);
+  ofn.lpstrFilter = kSoundFilter;
+  ofn.lpstrDefExt = nullptr;
+  ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+  if (GetOpenFileNameW(&ofn) == 0) return {};
+  return Narrow(buffer.data());
+}
+
 }  // namespace sb::filedialog
 
 #else  // ----------------------------------------------------------- fallback
@@ -101,6 +114,7 @@ namespace sb::filedialog {
 std::string Save(const std::string&) { return {}; }
 std::string Open() { return {}; }
 std::string OpenMedia() { return {}; }
+std::string OpenSound() { return {}; }
 }  // namespace sb::filedialog
 
 #endif

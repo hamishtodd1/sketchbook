@@ -32,6 +32,8 @@ struct Options {
   // press of the key button found, when that was not a key.
   std::string apiKeyTail;
   std::string apiKeyNote;
+  // Whether this session is being recorded (recording.h).
+  bool        recording = false;
 };
 
 // The shapes the menu offers. A deck is made for one of them, not for an
@@ -43,7 +45,7 @@ inline constexpr const char* kAspectNames[kAspectCount] = {"3:2", "16:9", "4:3",
 
 // What the menu is asking the app to do this frame.
 enum class MenuAction { None, NewCanvas, Save, Load, Insert, NewSlide, OpenRecent, Fullscreen,
-                        AlwaysCode, PasteApiKey, AskClaude };
+                        AlwaysCode, PasteApiKey, AskClaude, Record };
 
 // The Escape menu. Drawn in screen space at a fixed pixel size, so it does not
 // take part in the canvas zoom.

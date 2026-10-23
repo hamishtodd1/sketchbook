@@ -1,4 +1,5 @@
 #include "viewport.h"
+#include "screen.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,8 +10,8 @@ namespace sb {
 namespace {
 
 Vector2 ScreenCentre() {
-  return {static_cast<float>(GetScreenWidth()) * 0.5f,
-          static_cast<float>(GetScreenHeight()) * 0.5f};
+  return {static_cast<float>(ScreenWidth()) * 0.5f,
+          static_cast<float>(ScreenHeight()) * 0.5f};
 }
 
 float Distance(Vector2 a, Vector2 b) {

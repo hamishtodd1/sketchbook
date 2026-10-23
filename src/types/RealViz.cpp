@@ -1,4 +1,5 @@
 #include "types/RealViz.h"
+#include "screen.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1317,10 +1318,10 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts, VizStore& vizes
       // Drawn in the row's own rectangle, which is the space the viz was told
       // about -- and which keeps a marker off the end from spilling out of it.
       rlDrawRenderBatchActive();
-      rlViewport(static_cast<int>(row.x), GetRenderHeight() - static_cast<int>(row.y + row.height),
+      rlViewport(static_cast<int>(row.x), ScreenHeight() - static_cast<int>(row.y + row.height),
                  static_cast<int>(row.width), static_cast<int>(row.height));
       pane->Draw(*viz, frame);
-      rlViewport(0, 0, GetRenderWidth(), GetRenderHeight());
+      rlViewport(0, 0, ScreenWidth(), ScreenHeight());
     }
 
     // What the line draws itself: an arrow for a value off the end, and a label.

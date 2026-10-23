@@ -41,11 +41,27 @@ inline bool& CoveredFlag() {
 }
 inline void SetCovered(bool covered) { CoveredFlag() = covered; }
 
+// **A recording being played points where it pointed**, not where the mouse is
+// now (which is on the editor's timeline). Set by the app each frame it plays one.
+inline bool& ReplayingFlag() {
+  static bool replaying = false;
+  return replaying;
+}
+inline Vector2& ReplayedPointer() {
+  static Vector2 pointer{-1.0e9f, -1.0e9f};
+  return pointer;
+}
+inline void SetReplayed(bool replaying, Vector2 pointer) {
+  ReplayingFlag() = replaying;
+  ReplayedPointer() = pointer;
+}
+inline Vector2 Mouse() { return ReplayingFlag() ? ReplayedPointer() : GetMousePosition(); }
+
 // Nowhere is far enough off every edge that no rectangle can contain it.
 inline Vector2 Pointer() {
-  return (Held() || CoveredFlag()) ? Vector2{-1.0e9f, -1.0e9f} : GetMousePosition();
+  return (Held() || CoveredFlag()) ? Vector2{-1.0e9f, -1.0e9f} : Mouse();
 }
 // What the covering window itself sees: the pointer, unless a gesture is held.
-inline Vector2 TopPointer() { return Held() ? Vector2{-1.0e9f, -1.0e9f} : GetMousePosition(); }
+inline Vector2 TopPointer() { return Held() ? Vector2{-1.0e9f, -1.0e9f} : Mouse(); }
 
 }  // namespace sb::hover

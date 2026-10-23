@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -22,6 +23,9 @@
 #include "ui.h"
 #include "viewport.h"
 #include "viz.h"
+#include "capture.h"
+#include "recording.h"
+#include "transition.h"
 
 namespace sb {
 
@@ -61,6 +65,75 @@ class App {
   std::string Describe() { return DescribeCanvas(); }
   // Dev: writes the canvas to a file, as Ctrl+S to a new name would.
   bool SaveTo(const std::string& path) { return SaveCanvas(path); }
+
+  // --- recording and playing back (recording.h) ------------------------------
+  //
+  // What a recording keeps of a frame besides the canvas (which it keeps as an
+  // undo step has it): the camera, the pointer, the caret.
+  recording::View    RecordedView();
+  // **Recording** is started and stopped from the Escape menu. A recording goes
+  // into a folder of its own under Videos/sketchbook, named for the canvas and
+  // the time it began.
+  void StartRecording();
+  void StopRecording();
+  bool Recording() const { return recorder_.Recording(); }
+
+  // **Passive**: the canvas takes no input and keeps no undo -- it is being
+  // played, and the pointer and keys are the editor's.
+  void SetPassive(bool on) { passive_ = on; }
+  // Ready to play a recording of the canvas at `canvasPath`: passive, never
+  // saving, and reading pictures relative to where that canvas was.
+  void BeginPlayback(const std::string& canvasPath) {
+    passive_ = true;
+    autosaveOn_ = false;
+    currentPath_ = canvasPath;
+    untitled_ = false;
+  }
+  // Shows a recorded frame. The text of the box being typed in is put back as
+  // typing left it, not built, so a recording shows no compile its typist did
+  // not ask for; anything else is put back as an undo step is.
+  // `jumped` is a frame not straight after the last one shown, whose builds in
+  // between were skipped: everything is built then, but the box being typed in.
+  // `lastBuilt` is, on a jump, what the box being typed in was last built from.
+  void ShowRecorded(const std::vector<std::string>& canvas, const recording::View& view,
+                    bool jumped, const std::vector<std::string>& lastBuilt = {});
+
+  // --- a transition across a cut (app_cut.cpp) -------------------------------
+  //
+  // One end of a cut: the canvas and the view, as the recording has them.
+  struct CutEnd {
+    std::vector<std::string> canvas;
+    recording::View          view;
+  };
+  // Shows the transition from `before` to `after`, `through` of the way across
+  // (0 to 1, eased here). The canvas is the one after, built; on top of it the
+  // camera eases from one view to the other, each box glides from where it was
+  // to where it is, its text morphs if it changed, its knobs ease from their
+  // numbers to the new ones, a box that went fades out and one that came fades
+  // in. Both ends are measured the first time a `key` is seen.
+  // `shiftBefore` and `shiftAfter` are the edit's moves of boxes at either end.
+  struct BoxShift {
+    int   index = -1;   // the box's place on the canvas at that end
+    float dx = 0.0f, dy = 0.0f, scale = 1.0f;
+  };
+  void ShowCut(const std::string& key, const CutEnd& before, const CutEnd& after, double through,
+               const std::vector<BoxShift>& shiftBefore = {},
+               const std::vector<BoxShift>& shiftAfter = {});
+
+  // **An edit moves boxes**: put each where the canvas has it, moved by so much
+  // and its type scaled by so much -- the box, not the canvas, which is not
+  // changed. Every frame, after the frame is shown; a box not mentioned is
+  // where the canvas has it.
+  void      ShiftBoxes(const std::vector<BoxShift>& shifts);
+  // The box at a point of the screen (the editor's frame, while it draws one),
+  // by its place on the canvas; -1 if none. And where it is, and which it is.
+  int       BoxUnder(Vector2 point);
+  // Where a point of the world is on the screen (or the editor's frame).
+  Vector2   ToScreen(Vector2 world) const { return viewport_.ToScreen(world); }
+  Rectangle BoxRect(int index);
+  long long BoxId(int index) const;
+
+  FontStore& Fonts() { return fonts_; }
 
   void Update();
   void Draw();
@@ -331,6 +404,48 @@ class App {
 
   FontStore                               fonts_;
   Viewport                                viewport_;
+  bool                                    passive_ = false;
+  long long                               lastBoxId_ = 0;   // the last id a box was given
+  // The transition being shown, if one is (app_cut.cpp).
+  struct CutBox {
+    CodeBlock*                                  block = nullptr;   // after the cut
+    Vector2                                     from{}, to{};      // world
+    bool                                        morphs = false;
+    morph::Morph                                text;   // box-local world units
+    std::vector<std::tuple<std::string, float, float>> values;
+    float                                       emFrom = 0.0f, emTo = 0.0f;
+    bool                                        arrives = false;
+  };
+  struct CutGhost {
+    Rectangle                 rect{};   // world
+    std::vector<morph::Piece> text;     // world
+    bool                      prose = false;
+  };
+  struct Cut {
+    std::string           key;
+    bool                  active = false;
+    recording::View       before, after;
+    std::vector<CutBox>   boxes;
+    std::vector<CutGhost> ghosts;
+    double                through = 0.0;
+  };
+  Cut                                     cut_;
+  std::vector<bool>                       shifted_;   // boxes an edit has moved
+  transition::OutlineFill                 cutFill_;
+  void                                    LoadPlayed(const std::vector<std::string>& canvas);
+  void                                    EndCut();
+  void                                    DrawCut();
+  recording::Recorder                     recorder_;
+  capture::Capture                        capture_;
+  double                                  recordStart_ = 0.0;
+  double                                  recordCost_ = 0.0;   // seconds, in all
+  int                                     recordFrames_ = 0;
+  bool                                    replayHeld_ = false;
+  // Playing: a box read back is not built until the recording says it was.
+  bool                                    deferBuilds_ = false;
+  // Recording: how many builds each box had had, to see which built this frame.
+  std::vector<std::pair<const CodeBlock*, int>> builtSoFar_;
+  std::vector<std::string>                shownCanvas_;   // the frame last played
   Options                                 options_;
   OptionsMenu                             menu_;
   std::vector<std::unique_ptr<CodeBlock>> codeBlocks_;

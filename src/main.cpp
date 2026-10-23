@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +24,9 @@
 #include "rlgl.h"
 #include "touch.h"
 #include "transition.h"
+#include "capture.h"
+#include "editor.h"
+#include "recording.h"
 
 namespace {
 
@@ -68,6 +72,14 @@ struct Args {
   // Dev only: open a window showing a transition between writings and nothing
   // else (transition.h) -- one line of code, or two formulas.
   std::vector<std::string> transition;
+  // The editor, opened on a recording (editor.h): a program of its own, reached
+  // only from here. `playhead` and `play` are where it starts, for a capture.
+  std::string edit;
+  double      playhead = 0.0;
+  bool        play = false;
+  // Prints the camera and microphone a recording would use, and exits.
+  bool        listDevices = false;
+  std::string editKeys;
   int         frames = 0;   // 0 means run until the window is closed
   std::string open;         // a .sketch canvas to load at startup
 };
@@ -96,6 +108,11 @@ Args ParseArgs(int argc, char** argv) {
     else if (flag == "--save-to" && hasValue) args.saveTo = argv[++i];
     else if (flag == "--vizes" && hasValue) args.vizes = argv[++i];
     else if (flag == "--describe") args.describe = true;
+    else if (flag == "--edit" && hasValue) args.edit = argv[++i];
+    else if (flag == "--playhead" && hasValue) args.playhead = std::atof(argv[++i]);
+    else if (flag == "--play") args.play = true;
+    else if (flag == "--list-devices") args.listDevices = true;
+    else if (flag == "--edit-keys" && hasValue) args.editKeys = argv[++i];
     else if (flag == "--animate_text_transition" && hasValue) {
       args.transition.push_back(argv[++i]);
       // A second side, if one follows that is not a flag.
@@ -268,6 +285,14 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  if (args.listDevices) {
+    const sb::capture::Devices devices = sb::capture::Find();
+    std::printf("camera: %s\nmicrophone: %s\n",
+                devices.camera.empty() ? "(none)" : devices.camera.c_str(),
+                devices.microphone.empty() ? "(none)" : devices.microphone.c_str());
+    return 0;
+  }
+
   // Deliberately no FLAG_WINDOW_HIGHDPI. GLFW is already per-monitor DPI aware,
   // so the window is sized in real pixels either way; turning the flag on adds
   // GLFW_SCALE_TO_MONITOR, which leaves the draw space scaled by the monitor
@@ -335,7 +360,24 @@ int main(int argc, char** argv) {
   // was asked for: both want exactly the window they named.
   if (args.frames == 0 && !args.sized && sb::settings::Fullscreen()) app.SetFullscreen(true);
 
-  if (!args.open.empty()) {
+  sb::Editor editor;
+  if (!args.edit.empty()) {
+    SetWindowTitle("Sketchbook editor");
+    // The editor plays the recording's sound; nothing else here makes any.
+    InitAudioDevice();
+    // Dev: a test run makes no sound on whoever's speakers these are.
+    if (std::getenv("SKETCHBOOK_TEST_CAPTURE") != nullptr) SetMasterVolume(0.0f);
+    if (!editor.Open(args.edit, &app, &error)) {
+      std::fprintf(stderr, "sketchbook: %s\n", error.c_str());
+      app.Shutdown();
+      sb::touch::Shutdown();
+      CloseWindow();
+      return 1;
+    }
+    editor.SetPlayhead(args.playhead);
+    editor.SetPlaying(args.play);
+    editor.DevKeys(args.editKeys);
+  } else if (!args.open.empty()) {
     if (!app.OpenCanvas(args.open)) {
       std::fprintf(stderr, "sketchbook: could not open %s\n", args.open.c_str());
     }
@@ -356,10 +398,15 @@ int main(int argc, char** argv) {
       if (!args.devChat.empty()) app.DevChat(args.devChat);
       if (!args.devBox.empty()) app.DevKeys(args.devBox, args.devKeys);
     }
+    if (!args.edit.empty()) editor.Update();
     app.Update();
+    // The editor draws the canvas into a frame of its own -- the monitor's, or a
+    // render's -- and the window shows that frame rather than the canvas.
+    if (!args.edit.empty()) editor.DrawFrame(app);
 
     BeginDrawing();
-    app.Draw();
+    if (args.edit.empty()) app.Draw();
+    if (!args.edit.empty()) editor.Draw(app.Fonts());
     ++frame;
     if (!args.screenshot.empty() && frame == args.frames) SaveFrame(args.screenshot);
     EndDrawing();
@@ -371,6 +418,8 @@ int main(int argc, char** argv) {
   if (!args.saveTo.empty() && !app.SaveTo(args.saveTo)) {
     std::fprintf(stderr, "sketchbook: could not save %s\n", args.saveTo.c_str());
   }
+  editor.Close();
+  if (IsAudioDeviceReady()) CloseAudioDevice();
   app.Shutdown();
   sb::touch::Shutdown();
   CloseWindow();

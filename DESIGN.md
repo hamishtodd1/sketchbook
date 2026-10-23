@@ -1074,29 +1074,59 @@ into code is not wanted.
 
 ### Recording and editing video
 
-*Decided, not yet built.* For videos with the app in them and Hamish in a corner.
+*Decided, and built.* For videos with the app in them and
+Hamish in a corner.
 **A recording is what happened, not pixels**: the app keeps the session -- every
 keystroke and click, beside the camera and microphone -- and the video is drawn
 again from it afterwards. That is what lets an edit move what was never moved,
 and render at a size nobody was looking at.
 
+- **What is recorded is the canvas as it changes**, as the text it would be saved
+  as, frame by frame, with the camera, the pointer and the caret beside it -- not
+  the keys that changed it. Playing that back needs nothing to happen the same way
+  twice; replaying keys would need every compile, reply and clock to.
 - **Recording files and edit files are separate.** A recording is what happened,
-  and is never changed; an edit says what to make of one.
-- **The editor is a mode of the app**: the same drawing, so what is edited is what
-  is rendered.
-- **The face is pinned** to the picture, not a window on the canvas.
-- **A timeline, with cuts and ripple deletes.** A cut has a transition by default,
-  of a default length: what changed across it moves there. Removing the
-  transition is how a cut snaps.
+  and is never changed; an edit says what to make of one. An edit is of one
+  recording. Recordings run to tens of minutes, an hour and a half at most.
+- **Recording is started and stopped from the Escape menu**, and goes into a
+  folder of its own under `Videos\sketchbook`. The camera and the microphone are
+  recorded with it: the first of each, or the ones named in the settings.
+- **A transition is silent**: it is time the recording never had.
+- **The editor is a mode of the app** -- the same drawing, so what is edited is
+  what is rendered -- but feels like a program of its own, and is started only
+  from the command line. **Its monitor is the video as it will be**: the frame,
+  16:9, with the face in it, above the timeline.
+- **The face is pinned** to the picture, not a window on the canvas, and is not
+  shown while recording. It starts in the bottom-right corner, with rounded
+  corners, and is keyframed like a window: moved, resized, taken off (F). Across
+  a transition its picture holds still.
+- **A timeline, with cuts and ripple deletes.** A ripple delete takes every track
+  with it -- the canvas, the face, the sound. Where the recording jumps there is
+  a transition by default, half a second of its own: a box whose text changed
+  morphs (*Transitions*), boxes and the camera glide to where they are after it,
+  numbers ease from one value to the other, and anything that came or went fades.
+  Removing the transition is how a cut snaps. A cut that skips nothing has none.
 - **Everything moves on a sigmoid**, speeding up and then slowing down.
-- **Windows and the camera can be moved in the edit**, from keyframe to keyframe.
-  Such a move is in the picture only: nothing on the canvas steps aside, because
-  nothing on the canvas knows.
+- **Boxes, the camera and the face can be moved in the edit**, by keys. A key is
+  at a moment *of the recording*, so a cut never moves one. **A key is a move made
+  then**: what it sets is arrived at over the half second before it, from where
+  things were, and held after -- not a drift all the way from the key before.
+  The camera starts as the recording had it and can be given back to it (B),
+  easing back over the half second after. Such a move is in the picture only:
+  nothing on the canvas steps aside, because nothing on the canvas knows.
+- **A box keeps its identity** for as long as the canvas has it -- a number in the
+  file -- which is what lets an edit say which box it moved.
 - **On-or-off settings are timelines of blocks.** The pointer is hidden by default.
   Ticking it in the edit's settings adds a timeline for it, and dragging on that
-  makes a resizable block, inside which the pointer shows. Any other on-or-off
-  setting works the same way.
-- **Audio timelines can be added**, beside the microphone's.
+  makes a resizable block, inside which the pointer shows -- the arrow, where the
+  recording had the mouse. Any other on-or-off setting works the same way. A
+  block, like a key, is a stretch of the recording, so a cut never moves it.
+- **Audio timelines can be added**, beside the microphone's: music, a voiceover
+  recorded afterwards, from the settings or by dropping a file on the editor.
+  **A sound is placed in the video's time**, not the recording's, unlike keys and
+  blocks: it is laid against the finished video, so taking a piece out does not
+  move it or cut it. Each is moved, trimmed and made louder or quieter on its
+  own timeline, and mixed over the microphone.
 - **Claude is not asked again**: a replay uses the replies the recording got.
 - **The output is an MP4, 1080p60.**
 - **Streaming is not a feature.** Twitch or Zoom capture the app's window like any
@@ -1290,4 +1320,7 @@ Answered ones move up into the sections above.
   right, but it is two placement rules.
 - **Editability is not shown** now that ring and dot are gone. Does it need to be?
 - **How is a transition asked for on the canvas?** A step of a slide, a key on a
-  box, something a recording drives? Only the command line can now.
+  box? Outside the editor's cuts, only the command line can now.
+- **What a cut's transition does not move yet**: windows that are not docked jump
+  to where they end up, a box that went loses its windows at once, and a morphing
+  box's code is one colour while it morphs.

@@ -64,6 +64,12 @@ add_executable(sketchbook
   src/text.cpp
   src/transition.cpp
   src/morph.cpp
+  src/recording.cpp
+  src/editor.cpp
+  src/editor_frame.cpp
+  src/edit.cpp
+  src/app_cut.cpp
+  src/capture.cpp
   src/touch.cpp
   src/touch_win32.cpp
   src/process_win32.cpp

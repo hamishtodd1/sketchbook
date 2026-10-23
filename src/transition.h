@@ -43,6 +43,7 @@ class OutlineFill {
 
   bool Load();
   void Unload();
+  bool Ready() const { return shader_.id != 0; }
   void Draw(const std::vector<morph::Shape>& shapes, Color ink);
 
  private:

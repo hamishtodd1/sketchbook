@@ -1,4 +1,5 @@
 #include "chat.h"
+#include "screen.h"
 #include "grip.h"
 
 #include <algorithm>
@@ -1243,8 +1244,8 @@ void ChatPanel::DrawWindow(std::size_t index, const Viewport& viewport, FontStor
 
   const int sx = std::max(0, static_cast<int>(p.messages.x));
   const int sy = std::max(0, static_cast<int>(p.messages.y));
-  const int sw = std::min(GetScreenWidth(), static_cast<int>(p.messages.x + p.messages.width)) - sx;
-  const int sh = std::min(GetScreenHeight(), static_cast<int>(p.messages.y + p.messages.height)) - sy;
+  const int sw = std::min(ScreenWidth(), static_cast<int>(p.messages.x + p.messages.width)) - sx;
+  const int sh = std::min(ScreenHeight(), static_cast<int>(p.messages.y + p.messages.height)) - sy;
   if (sw > 0 && sh > 0) {
     BeginScissorMode(sx, sy, sw, sh);
     float top = 0.0f;
@@ -1445,7 +1446,7 @@ void ChatPanel::Draw(const Viewport& viewport, FontStore& fonts) {
     // Absorbed by the drop target: gone from the canvas until you pull off it.
     if (window.absorbed) continue;
     const Rectangle rect = ScreenRectOf(window, viewport);
-    if (rect.x > GetScreenWidth() || rect.y > GetScreenHeight() || rect.x + rect.width < 0.0f ||
+    if (rect.x > ScreenWidth() || rect.y > ScreenHeight() || rect.x + rect.width < 0.0f ||
         rect.y + rect.height < 0.0f) {
       continue;
     }
