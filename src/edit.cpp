@@ -410,6 +410,11 @@ bool Edit::RippleDelete(int index) {
   return true;
 }
 
+void Edit::SetTransition(int index, double seconds) {
+  if (index <= 0 || index >= static_cast<int>(pieces_.size())) return;
+  pieces_[static_cast<std::size_t>(index)].in = std::max(0.0, seconds);
+}
+
 bool Edit::ToggleTransition(int index) {
   if (index <= 0 || index >= static_cast<int>(pieces_.size())) return false;
   Piece& piece = pieces_[static_cast<std::size_t>(index)];

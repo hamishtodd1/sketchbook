@@ -143,8 +143,9 @@ class Edit {
   // Takes piece `index` out; everything after it moves up. The last piece is
   // never taken: an edit of nothing is not an edit.
   bool RippleDelete(int index);
-  // The transition into piece `index` taken away, or put back.
+  // The transition into piece `index` taken away, or put back; or made so long.
   bool ToggleTransition(int index);
+  void SetTransition(int index, double seconds);
 
   // Where source time `at` is on the video, if it is in a piece; -1 if not.
   double OutputAt(double at) const;

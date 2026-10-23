@@ -109,6 +109,7 @@ for neither).
 | `C` | Cut at the playhead |
 | `Delete` or `Backspace` | Take the selected piece out and close the gap (ripple delete); on a selected transition, make the cut snap |
 | `T` | Take the selected transition away, or put it back |
+| Drag a transition's right edge | Make it longer or shorter |
 | Drag the face, or a box, on the monitor | Move it there from this moment on (its corner resizes it) |
 | `F` | Take the face off, or put it back |
 | Right-drag, wheel on the monitor | Move, zoom the camera from this moment on |

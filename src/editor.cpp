@@ -977,6 +977,10 @@ void Editor::DevKeysStep() {
       Changed();
     } else if (key == "facetoggle") {
       ToggleFace();
+    } else if (int j = 0; std::sscanf(key.c_str(), "trans:%d,%f", &j, &a) == 2) {
+      Before();
+      edit_.SetTransition(j, a);
+      Changed();
     } else if (key.rfind("addsound:", 0) == 0) {
       AddSound(key.substr(9));
     } else if (int n = 0; std::sscanf(key.c_str(), "sound:%d,%f", &n, &a) == 2) {
@@ -1105,6 +1109,31 @@ void Editor::Update() {
     HandleMonitor();
   }
 
+  if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && overPanel && !consumed) {
+    for (int i = 1; i < static_cast<int>(edit_.Pieces().size()); ++i) {
+      const Rectangle r = JoinRect(i);
+      if (edit_.Transition(i) <= 0.0 || r.width <= 0.0f) continue;
+      if (std::abs(mouse.x - (r.x + r.width)) < 5.0f && mouse.y >= r.y && mouse.y <= r.y + r.height) {
+        joinDrag_ = i;
+        joinStart_ = edit_.Transition(i);
+        joinPress_ = TimeAt(mouse.x);
+        selectedJoin_ = i;
+        selected_ = selectedKey_ = selectedSpan_ = selectedSound_ = -1;
+        playing_ = false;
+        Before();
+        consumed = true;
+      }
+    }
+  }
+  if (joinDrag_ >= 0) {
+    // The pieces after it move with the hand, so the edge stays under it.
+    consumed = true;
+    edit_.SetTransition(joinDrag_, std::clamp(joinStart_ + (TimeAt(mouse.x) - joinPress_), 0.1, 5.0));
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+      joinDrag_ = -1;
+      Changed();
+    }
+  }
   if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && overPanel && !consumed) {
     selectedSpan_ = selectedSound_ = -1;
     scrubbing_ = true;
@@ -1239,6 +1268,17 @@ void Editor::Draw(FontStore& fonts) {
     if (r.width <= 0.0f) continue;
     const Color fill = i == selectedJoin_ ? kJoinChosen : kJoinFill;
     DrawRectangleRounded(r, 0.35f, 6, edit_.Transition(i) > 0.0 ? fill : Fade(fill, 0.55f));
+    if (edit_.Transition(i) > 0.0) {
+      char length[16];
+      std::snprintf(length, sizeof(length), "%.1fs", edit_.Transition(i));
+      if (text::Measure(fonts, Face::Mono, length, 11.0f) + 8.0f < r.width) {
+        text::Draw(fonts, Face::Mono, length, {r.x + 4.0f, r.y + r.height - 8.0f}, 11.0f,
+                   Fade(kWindowBg, 0.8f));
+      }
+      // Its right edge is what lengthens it.
+      DrawLineEx({r.x + r.width - 2.0f, r.y + 6.0f}, {r.x + r.width - 2.0f, r.y + r.height - 6.0f},
+                 2.0f, Fade(kWindowBg, 0.5f));
+    }
   }
 
   // The keys: a lane each for the camera, the face and the boxes, a diamond for

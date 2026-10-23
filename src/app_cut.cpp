@@ -16,6 +16,7 @@
 #include "screen.h"
 #include "app.h"
 #include "hover.h"
+#include "screen.h"
 #include "theme.h"
 
 namespace sb {
@@ -26,8 +27,6 @@ struct Seen {
   Vector2                   at{};
   std::vector<std::string>  lines;
   std::vector<morph::Piece> text;   // relative to `at`
-  Rectangle                 rect{};
-  bool                      prose = false;
 };
 
 float Step(double from, double to, double t) {
@@ -76,10 +75,6 @@ void App::ShowCut(const std::string& key, const CutEnd& before, const CutEnd& af
         Seen s;
         s.at = block->WorldPosition();
         s.lines = block->Lines();
-        s.prose = block->Prose();
-        const Rectangle r = block->Measure(viewport_, fonts_).rect;
-        const Vector2   corner = viewport_.ToWorld({r.x, r.y});
-        s.rect = {corner.x, corner.y, r.width / viewport_.Zoom(), r.height / viewport_.Zoom()};
         s.text = block->TextPieces(viewport_, fonts_);
         for (morph::Piece& piece : s.text) {
           for (morph::Contour& contour : piece.contours) {
@@ -93,8 +88,46 @@ void App::ShowCut(const std::string& key, const CutEnd& before, const CutEnd& af
       }
       return seen;
     };
+    // Where each loose window is, panel by panel.
+    using Loose = std::vector<std::vector<std::pair<int, Vector2>>>;
+    const auto loose = [this]() {
+      Loose out;
+      for (Resizable* panel : Resizables()) {
+        std::vector<std::pair<int, Vector2>>& mine = out.emplace_back();
+        for (int i = 0; i < panel->GripCount(); ++i) {
+          if (!panel->WindowDocked(i)) mine.emplace_back(i, panel->WindowWorldPos(i));
+        }
+      }
+      return out;
+    };
     const std::vector<Seen> a = look(before);
+    const Loose             looseBefore = loose();
+    // The canvas as it was, drawn once, for whatever goes to fade out of.
+    RenderTexture2D shot{};
+    std::vector<Rectangle> footprints;
+    for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) {
+      footprints.push_back(Footprint(block.get()));
+    }
+    {
+      shot = LoadRenderTexture(ScreenWidth(), ScreenHeight());
+      RenderTexture2D* outer = OuterTarget();
+      OuterTarget() = &shot;
+      BeginTextureMode(shot);
+      ClearBackground(BLANK);
+      DrawCanvas(/*look=*/true);
+      EndTextureMode();
+      OuterTarget() = outer;
+      ResumeOuterTarget();
+    }
+    const auto onShot = [this](Rectangle world) {
+      const Vector2 corner = viewport_.ToScreen({world.x, world.y});
+      return Rectangle{corner.x, corner.y, world.width * viewport_.Zoom(),
+                       world.height * viewport_.Zoom()};
+    };
+    std::vector<Rectangle> shotRects;
+    for (const Rectangle& world : footprints) shotRects.push_back(onShot(world));
     const std::vector<Seen> b = look(after);
+    const Loose             looseAfter = loose();
 
     Cut cut;
     cut.key = key;
@@ -170,17 +203,22 @@ void App::ShowCut(const std::string& key, const CutEnd& before, const CutEnd& af
       cut.boxes.push_back(std::move(box));
     }
     for (std::size_t i = 0; i < a.size(); ++i) {
-      if (taken[i]) continue;
-      CutGhost ghost;
-      ghost.rect = a[i].rect;
-      ghost.prose = a[i].prose;
-      ghost.text = a[i].text;
-      for (morph::Piece& piece : ghost.text) {
-        for (morph::Contour& contour : piece.contours) {
-          for (morph::Point& p : contour) p = {p.x + a[i].at.x, p.y + a[i].at.y};
-        }
+      if (taken[i] || i >= footprints.size()) continue;
+      cut.ghosts.push_back({footprints[i], shotRects[i]});
+    }
+    if (cut.ghosts.empty()) {
+      UnloadRenderTexture(shot);
+    } else {
+      cut.shot = shot;
+    }
+    // Loose windows: the k-th loose one of a kind before is the k-th after.
+    const std::vector<Resizable*> panels = Resizables();
+    for (std::size_t p = 0; p < panels.size() && p < looseBefore.size() && p < looseAfter.size(); ++p) {
+      if (looseBefore[p].size() != looseAfter[p].size()) continue;
+      for (std::size_t k = 0; k < looseAfter[p].size(); ++k) {
+        cut.windows.push_back({panels[p], looseAfter[p][k].first, looseBefore[p][k].second,
+                               looseAfter[p][k].second});
       }
-      cut.ghosts.push_back(std::move(ghost));
     }
     // The canvas after the cut is the one shown, so it is built, as a jump is.
     for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->RequestCompile();
@@ -211,6 +249,11 @@ void App::ShowCut(const std::string& key, const CutEnd& before, const CutEnd& af
       }
     }
   }
+  for (const CutWindow& window : cut_.windows) {
+    if (window.index < window.panel->GripCount()) {
+      window.panel->SetWindowWorldPos(window.index, Lerp(window.from, window.to, s));
+    }
+  }
   // Nothing is pointed at while it moves.
   hover::SetReplayed(true, {-1.0e9f, -1.0e9f});
   replayHeld_ = true;
@@ -218,6 +261,10 @@ void App::ShowCut(const std::string& key, const CutEnd& before, const CutEnd& af
 
 void App::EndCut() {
   if (!cut_.active) return;
+  for (const CutWindow& window : cut_.windows) {
+    if (window.index < window.panel->GripCount()) window.panel->SetWindowWorldPos(window.index, window.to);
+  }
+  if (cut_.shot.id != 0) UnloadRenderTexture(cut_.shot);
   for (CutBox& box : cut_.boxes) {
     box.block->SetWorldPosition(box.to);
     if (box.emTo > 0.0f) box.block->SetEm(box.emTo);
@@ -291,18 +338,16 @@ void App::DrawCut() {
     }
   };
 
-  // What went: its card and its words, fading where they were.
+  // What went: the box and its windows, as they were, fading where they were.
   const float going = 1.0f - Step(0.0, 0.6, t);
   for (const CutGhost& ghost : cut_.ghosts) {
-    if (going <= 0.0f) break;
-    if (!ghost.prose) {
-      const Color card = Fade(kCodeBg, going);
-      DrawCard(screenRect(ghost.rect), zoom, card, card, 0.0f, /*shadow=*/false);
-    }
-    std::vector<morph::Shape> shapes;
-    for (const morph::Piece& piece : ghost.text) shapes.push_back({piece.contours, going});
-    onScreen(&shapes, {0.0f, 0.0f});
-    cutFill_.Draw(shapes, ghost.prose ? kSlideInk : kCodeFg);
+    if (going <= 0.0f || cut_.shot.id == 0) break;
+    // A render texture is upside down.
+    const Rectangle from = {ghost.shot.x, static_cast<float>(cut_.shot.texture.height) - ghost.shot.y -
+                                              ghost.shot.height,
+                            ghost.shot.width, -ghost.shot.height};
+    DrawTexturePro(cut_.shot.texture, from, screenRect(ghost.world), {0.0f, 0.0f}, 0.0f,
+                   Fade(WHITE, going));
   }
 
   for (const CutBox& box : cut_.boxes) {

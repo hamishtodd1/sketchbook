@@ -416,17 +416,26 @@ class App {
     float                                       emFrom = 0.0f, emTo = 0.0f;
     bool                                        arrives = false;
   };
+  // A box that went, with its windows: its part of a picture of the canvas as
+  // it was before the cut, fading where it was.
   struct CutGhost {
-    Rectangle                 rect{};   // world
-    std::vector<morph::Piece> text;     // world
-    bool                      prose = false;
+    Rectangle world{};
+    Rectangle shot{};   // in the picture's pixels
+  };
+  // A window not docked to any box, gliding from where it was to where it is.
+  struct CutWindow {
+    Resizable* panel = nullptr;
+    int        index = -1;
+    Vector2    from{}, to{};
   };
   struct Cut {
     std::string           key;
     bool                  active = false;
     recording::View       before, after;
-    std::vector<CutBox>   boxes;
-    std::vector<CutGhost> ghosts;
+    std::vector<CutBox>    boxes;
+    std::vector<CutGhost>  ghosts;
+    std::vector<CutWindow> windows;
+    RenderTexture2D        shot{};   // the canvas before the cut, if a ghost wants it
     double                through = 0.0;
   };
   Cut                                     cut_;

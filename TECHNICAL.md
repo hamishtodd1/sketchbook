@@ -447,8 +447,11 @@ nearest the size being drawn. raylib's `fontSize` is a stbtt pixel *height*
   hands the app both ends (`App::CutEnd`: canvas and view, cached per join) and
   the fraction. `ShowCut` measures both ends once per key: each is loaded
   (`LoadPlayed`, no builds), the camera put where it was, and every box's
-  position, rect, and text as pieces (`CodeBlock::TextPieces`, the rows as
-  `Draw` sets them, turned into box-local world units) read off. Boxes are paired
+  position and text as pieces (`CodeBlock::TextPieces`, the rows as `Draw` sets
+  them, turned into box-local world units) read off, and every loose window's
+  place (`Resizable::WindowWorldPos`). The before canvas is also drawn once into
+  a picture (`DrawCanvas` into a render target, `OuterTarget` set so the space
+  window's own target comes back to it), with each box's footprint on it. Boxes are paired
   by identical text, then by nearest within 800 world units. The after canvas is
   then built and shown; each frame the paired boxes are put part of the way
   (`SetWorldPosition`, which their docked windows follow), their changed knobs
@@ -456,9 +459,12 @@ nearest the size being drawn. raylib's `fontSize` is a stbtt pixel *height*
   box whose text changed has its text hidden and the morph drawn over it by
   `OutlineFill`; its overlay (balloon, lines) is hidden too. A box that came is
   under a canvas-coloured cover over its footprint, thinning over the second
-  half; one that went is drawn as a ghost -- card without shadow, and its text --
-  fading over the first. `EndCut` (called by `ShowRecorded`) puts everything
-  where the after canvas has it.
+  half; one that went is its footprint's part of the picture -- box and windows
+  as they were -- fading over the first. A loose window glides from its place to
+  its place, the k-th loose one of each kind before being the k-th after (when
+  the counts differ, they jump). `EndCut` (called by `ShowRecorded`) puts
+  everything where the after canvas has it. A transition's length is dragged
+  by its right edge (0.1 to 5 seconds).
 - **Rendering** (`Editor::StartRender`, `RenderFrame`). Each output frame is a
   step of 1/60 s: the editor shows that moment, the app updates, and the app is
   drawn into a 1920x1080 4x multisampled target (`glext::MakeMultisample`),

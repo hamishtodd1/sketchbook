@@ -58,6 +58,11 @@ class Resizable {
   virtual void      Loosen(int index, const Viewport& viewport, FontStore& fonts) = 0;
   virtual float     WindowSize(int index) const = 0;
   virtual void      SetWindowSize(int index, float size) = 0;
+  // Whether it is docked to its box, and -- when it is not -- where it is in
+  // the world. A transition across a cut glides a loose one (app_cut.cpp).
+  virtual bool      WindowDocked(int index) const = 0;
+  virtual Vector2   WindowWorldPos(int index) const = 0;
+  virtual void      SetWindowWorldPos(int index, Vector2 at) = 0;
 };
 
 // The shared body of `Loosen`, for a window with `docked` and `worldPos`: it

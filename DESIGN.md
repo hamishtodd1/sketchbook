@@ -1321,6 +1321,6 @@ Answered ones move up into the sections above.
 - **Editability is not shown** now that ring and dot are gone. Does it need to be?
 - **How is a transition asked for on the canvas?** A step of a slide, a key on a
   box? Outside the editor's cuts, only the command line can now.
-- **What a cut's transition does not move yet**: windows that are not docked jump
-  to where they end up, a box that went loses its windows at once, and a morphing
-  box's code is one colour while it morphs.
+- **What a cut's transition does not move yet**: pictures, videos and
+  conversations jump to where they end up, and a morphing box's code is one
+  colour while it morphs.

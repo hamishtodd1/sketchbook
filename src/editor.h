@@ -14,7 +14,8 @@
 // pauses; dragging on the timeline scrubs; clicking a piece, a transition or a
 // key selects it. C cuts at the playhead; Delete takes the selected piece out
 // and closes the gap, makes the selected transition a snap, or removes the
-// selected key; T takes a transition away or puts it back. On the monitor,
+// selected key; T takes a transition away or puts it back, and dragging its
+// right edge makes it longer or shorter. On the monitor,
 // dragging the face or a box moves it and its corner resizes it, F takes the
 // face off or puts it back; the right button drags the camera and the wheel
 // zooms it, and B gives the camera back to the recording -- each a key at the
@@ -87,6 +88,7 @@ class Editor {
   // camera dragged by so many pixels of the video), `camzoom:F`, `camfree`,
   // `face:X,Y,H` (the face put there, in heights of the video), `facetoggle`,
   // `box:N,DX,DY,S` (box N moved by so many world units and its type scaled),
+  // `trans:N,S` (the transition into piece N made S seconds long),
   // `addsound:PATH` (no spaces), `sound:N,AT` (sound N moved to output AT),
   // `gain:N,DB`, `settings` (open or shut), `tick:NAME` (a switch ticked, or
   // unticked), `block:NAME,FROM,TO` (a block on
@@ -193,6 +195,10 @@ class Editor {
   bool                    scrubbing_ = false;
   int                     selected_ = -1;       // a piece
   int                     selectedJoin_ = -1;   // the join into a piece
+  // A transition's length being dragged: which, how long it was, from where.
+  int                     joinDrag_ = -1;
+  double                  joinStart_ = 0.0;
+  double                  joinPress_ = 0.0;
   // A key: which track, and which of its keys.
   std::string             selectedTrack_;
   int                     selectedKey_ = -1;

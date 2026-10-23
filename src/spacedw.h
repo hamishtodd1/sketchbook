@@ -186,6 +186,9 @@ class SpacePanel : public Flanking, public Resizable {
 
   // The grip (grip.h).
   int       GripCount() const override { return static_cast<int>(windows_.size()); }
+  bool      WindowDocked(int index) const override { return windows_[static_cast<std::size_t>(index)].docked; }
+  Vector2   WindowWorldPos(int index) const override { return windows_[static_cast<std::size_t>(index)].worldPos; }
+  void      SetWindowWorldPos(int index, Vector2 at) override { windows_[static_cast<std::size_t>(index)].worldPos = at; }
   Rectangle GripWindow(int index, const Viewport& viewport, FontStore& fonts) const override {
     return RectFor(static_cast<std::size_t>(index), viewport, fonts);
   }
