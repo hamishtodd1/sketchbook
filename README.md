@@ -95,7 +95,8 @@ turning into the other; a side in `$...$` is LaTeX as it stands, and anything
 else is code, read.
 
 **Record**, in the Escape menu, records the session into a new folder under
-`Videos\sketchbook` (a red light top right says so; the same button stops it),
+`Videos\sketchbook` (a red light top right says so, once the camera has started;
+the same button stops it),
 with your camera and microphone beside it. They are the first ffmpeg finds;
 `sketchbook.exe --list-devices` says which, and a line `camera <name>` or
 `microphone <name>` in `%APPDATA%\sketchbook\settings.txt` picks another (`none`

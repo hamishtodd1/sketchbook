@@ -1090,7 +1090,10 @@ and render at a size nobody was looking at.
   recording. Recordings run to tens of minutes, an hour and a half at most.
 - **Recording is started and stopped from the Escape menu**, and goes into a
   folder of its own under `Videos\sketchbook`. The camera and the microphone are
-  recorded with it: the first of each, or the ones named in the settings. **When
+  recorded with it: the first of each, or the ones named in the settings. **The
+  camera starts first**: Windows takes a couple of seconds to open it, so the
+  light is dim ("starting...") until it is delivering, and only then does the
+  session begin -- nothing said straight after pressing Record is lost. **When
   they are not** -- none found, or the camera held by another program -- the red
   light says so, since a session found afterwards to have no face cannot be done
   again.

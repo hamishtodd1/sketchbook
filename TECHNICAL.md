@@ -399,7 +399,12 @@ nearest the size being drawn. raylib's `fontSize` is a stbtt pixel *height*
 
 - **Recording** is `App::StartRecording`/`StopRecording`, from the menu's Record
   button (and `record` in `--dev-keys`). The recorder is the app's, and keeps a
-  frame at the end of `Update`. Its folder is `Videos\sketchbook\<canvas> <time>`.
+  frame at the end of `Update`. Start makes the folder and starts the capture,
+  and *arms*; `TrackArming` begins the session (`BeginSession`) once the
+  capture's log has its input's `start:` -- the devices delivering -- or the
+  capture has died, or ten seconds have gone. On this machine the camera took
+  2.3 s to open, which a session begun at once spent without a face or sound.
+  Stopped while armed, the folder goes. Its folder is `Videos\sketchbook\<canvas> <time>`.
 - **A recording is a folder** with `session.txt`: a header, the canvas it began
   from (`App::RecordedCanvas`, an undo step's snapshot, each line after `| `),
   then per frame that changed anything an `f` record -- time, camera, window

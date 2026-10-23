@@ -74,9 +74,16 @@ class App {
   // **Recording** is started and stopped from the Escape menu. A recording goes
   // into a folder of its own under Videos/sketchbook, named for the canvas and
   // the time it began.
+  //
+  // **The camera first.** Opening the camera and the microphone takes Windows a
+  // couple of seconds, and a session begun at once had no face or sound for
+  // them. So pressing Record starts the capture and *arms*: the light is dim,
+  // "starting..." beside it, and the session itself begins once ffmpeg says the
+  // devices are delivering -- or at once if there are none, or after ten seconds
+  // whatever. Pressing it again while armed stops, and leaves nothing behind.
   void StartRecording();
   void StopRecording();
-  bool Recording() const { return recorder_.Recording(); }
+  bool Recording() const { return recorder_.Recording() || arming_; }
 
   // **Passive**: the canvas takes no input and keeps no undo -- it is being
   // played, and the pointer and keys are the editor's.
@@ -448,6 +455,11 @@ class App {
   void                                    DrawCut();
   recording::Recorder                     recorder_;
   capture::Capture                        capture_;
+  bool                                    arming_ = false;
+  double                                  armedAt_ = 0.0;
+  std::string                             armedFolder_;
+  void                                    BeginSession(const std::string& folder);
+  void                                    TrackArming();
   double                                  recordStart_ = 0.0;
   double                                  recordCost_ = 0.0;   // seconds, in all
   int                                     recordFrames_ = 0;

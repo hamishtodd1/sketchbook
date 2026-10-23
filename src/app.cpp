@@ -963,7 +963,7 @@ void App::DevKeysStep() {
     if (key == "blur") SetFocus(nullptr);
     else if (key == "focus") SetFocus(devKeysBlock_);
     // Dev: the menu's recording button, pressed.
-    else if (key == "record") recorder_.Recording() ? StopRecording() : StartRecording();
+    else if (key == "record") Recording() ? StopRecording() : StartRecording();
     // Dev: Escape on the canvas -- the menu, open or shut.
     else if (key == "menu") menu_.Toggle();
     // Dev: a second box of these lines (`|` between them) where the view is
@@ -2109,7 +2109,7 @@ void App::Update() {
     }
     case MenuAction::Record:
       // Either way the menu goes: what is recorded is the canvas.
-      if (recorder_.Recording()) StopRecording(); else StartRecording();
+      if (Recording()) StopRecording(); else StartRecording();
       menu_.Close();
       break;
     case MenuAction::AskClaude: {
@@ -2410,6 +2410,7 @@ void App::Update() {
     TrackUndo(held);
     TrackAutosave(held);
   }
+  TrackArming();
   if (recorder_.Recording()) {
     // Last, so the frame is kept as everything above left it.
     const double before = GetTime();
@@ -2631,6 +2632,14 @@ void App::Draw() {
   // A small red light while recording, as on a camera -- and a word beside it
   // when the camera and microphone are not being recorded with it, since a
   // session found to have no face afterwards cannot be done again.
+  if (arming_) {
+    // Not yet: a dim light, and why.
+    const Vector2 light = {static_cast<float>(ScreenWidth()) - 14.0f, 14.0f};
+    DrawRing(light, 3.5f, 5.0f, 0.0f, 360.0f, 24, {226, 60, 52, 160});
+    const char* note = "starting...";
+    const float width = text::Measure(fonts_, Face::Mono, note, 12.0f);
+    text::Draw(fonts_, Face::Mono, note, {light.x - 12.0f - width, 18.0f}, 12.0f, {226, 60, 52, 160});
+  }
   if (recorder_.Recording()) {
     DrawCircleV({static_cast<float>(ScreenWidth()) - 14.0f, 14.0f}, 5.0f, {226, 60, 52, 220});
     if (!capture_.Alive()) {
@@ -3635,26 +3644,64 @@ void App::StartRecording() {
   const std::time_t t = std::time(nullptr);
   std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H%M%S", std::localtime(&t));
   const std::filesystem::path folder = videos / (canvas + " " + stamp);
+  std::error_code ec;
+  std::filesystem::create_directories(folder, ec);
+  std::string error;
+  options_.recording = true;
+  // The camera and the microphone, if there are any: started first, and the
+  // session armed until they are delivering. A session without them is still
+  // a recording, and begins at once.
+  if (capture_.Start(folder.string(), &error)) {
+    arming_ = true;
+    armedAt_ = GetTime();
+    armedFolder_ = folder.string();
+    TraceLog(LOG_INFO, "RECORD: starting the camera for %s", folder.string().c_str());
+    return;
+  }
+  TraceLog(LOG_WARNING, "RECORD: no camera or sound: %s", error.c_str());
+  BeginSession(folder.string());
+}
+
+void App::TrackArming() {
+  if (!arming_) return;
+  double started = 0.0;
+  const bool delivering = capture::CameraStart(armedFolder_, &started);
+  if (delivering || !capture_.Alive() || GetTime() - armedAt_ > 10.0) {
+    if (!delivering) TraceLog(LOG_WARNING, "RECORD: the camera did not start; recording without it");
+    arming_ = false;
+    BeginSession(armedFolder_);
+  }
+}
+
+void App::BeginSession(const std::string& folder) {
   std::string error;
   const double wall = capture::WallClock();
-  if (!recorder_.Begin(folder.string(), currentPath_, Snapshot(), wall, &error)) {
+  if (!recorder_.Begin(folder, currentPath_, Snapshot(), wall, &error)) {
     TraceLog(LOG_WARNING, "RECORD: %s", error.c_str());
+    capture_.Stop();
+    options_.recording = false;
     return;
   }
   recordStart_ = GetTime();
-  // The camera and the microphone beside it, if there are any. A session
-  // without them is still a recording.
-  if (!capture_.Start(folder.string(), &error)) {
-    TraceLog(LOG_WARNING, "RECORD: no camera or sound: %s", error.c_str());
-  }
   recordCost_ = 0.0;
   recordFrames_ = 0;
   builtSoFar_.clear();
   options_.recording = true;
-  TraceLog(LOG_INFO, "RECORD: into %s", folder.string().c_str());
+  TraceLog(LOG_INFO, "RECORD: into %s", folder.c_str());
 }
 
 void App::StopRecording() {
+  if (arming_) {
+    // Stopped before it began: there is no session, so nothing is kept.
+    arming_ = false;
+    capture_.Stop();
+    options_.recording = false;
+    std::error_code ec;
+    if (!std::filesystem::exists(std::filesystem::path(armedFolder_) / "session.txt", ec)) {
+      std::filesystem::remove_all(armedFolder_, ec);
+    }
+    return;
+  }
   if (!recorder_.Recording()) return;
   recorder_.End(GetTime() - recordStart_);
   capture_.Stop();
