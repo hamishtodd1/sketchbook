@@ -24,8 +24,10 @@ struct View {
   float       centreX = 0.0f, centreY = 0.0f, zoom = 1.0f;   // the camera
   int         width = 0, height = 0;                        // the window, pixels
   float       pointerX = -1.0e9f, pointerY = -1.0e9f;       // world
-  // Whether a gesture was in flight, which is what turns hovering off.
+  // Whether a gesture was in flight, which is what turns hovering off; and
+  // whether the mouse button was down, which an edit can show.
   bool        held = false;
+  bool        pressed = false;
   int         focus = -1;   // which box has the caret, by its place in the canvas
   std::string caret;        // that box's carets (CodeBlock::CaretState)
   // Whether that box has been typed in since it was last built. Sharing leaves

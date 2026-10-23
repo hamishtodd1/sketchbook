@@ -2628,9 +2628,17 @@ void App::Draw() {
 
   menu_.Draw(fonts_, options_);
 
-  // A small red light while recording, as on a camera.
+  // A small red light while recording, as on a camera -- and a word beside it
+  // when the camera and microphone are not being recorded with it, since a
+  // session found to have no face afterwards cannot be done again.
   if (recorder_.Recording()) {
     DrawCircleV({static_cast<float>(ScreenWidth()) - 14.0f, 14.0f}, 5.0f, {226, 60, 52, 220});
+    if (!capture_.Alive()) {
+      const char* note = "no camera or sound";
+      const float width = text::Measure(fonts_, Face::Mono, note, 12.0f);
+      text::Draw(fonts_, Face::Mono, note, {static_cast<float>(ScreenWidth()) - 26.0f - width, 18.0f},
+                 12.0f, {226, 60, 52, 220});
+    }
   }
 
   // Over everything, the menu included: it is the pointer.
@@ -3667,6 +3675,7 @@ recording::View App::RecordedView() {
   view.pointerX = pointer.x;
   view.pointerY = pointer.y;
   view.held = hover::Held();
+  view.pressed = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
   std::vector<std::pair<const CodeBlock*, int>> builds;
   for (std::size_t i = 0; i < codeBlocks_.size(); ++i) {
     const CodeBlock* block = codeBlocks_[i].get();

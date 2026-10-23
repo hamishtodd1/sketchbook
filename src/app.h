@@ -435,6 +435,8 @@ class App {
     std::vector<CutBox>    boxes;
     std::vector<CutGhost>  ghosts;
     std::vector<CutWindow> windows;
+    // Pictures and videos, by their place in the list, from where to where.
+    std::vector<std::tuple<std::size_t, Vector2, Vector2>> media;
     RenderTexture2D        shot{};   // the canvas before the cut, if a ghost wants it
     double                through = 0.0;
   };

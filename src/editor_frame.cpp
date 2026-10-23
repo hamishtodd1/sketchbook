@@ -193,6 +193,10 @@ void Editor::DrawPointer(const Target& target) {
                                   {12, 24}, {8, 15}, {15, 15}};
   morph::Contour       outline;
   for (const morph::Point& p : arrow) outline.push_back({tip.x + p.x * scale, tip.y + p.y * scale});
+  // The button down: a ring round the tip, so a click can be seen to happen.
+  if (pointerPressed_) {
+    DrawRing(tip, 11.0f * scale, 14.0f * scale, 0.0f, 360.0f, 48, Fade(kAccent, 0.55f));
+  }
   pointerFill_.Draw({{{outline}, 1.0f}}, WHITE);
   for (std::size_t i = 0; i < outline.size(); ++i) {
     const morph::Point& a = outline[i];
@@ -204,11 +208,19 @@ void Editor::DrawPointer(const Target& target) {
 void Editor::DrawFrame(App& app) {
   if (render_.on) {
     Render& r = render_;
+    const double t0 = GetTime();
     Compose(app, r.target, /*waitForFace=*/true);
+    const double t1 = GetTime();
     rlEnableFramebuffer(r.target.resolved.id);
     glext::ReadPixels(0, 0, kVideoWidth, kVideoHeight, r.pixels.data());
     rlDisableFramebuffer();
-    if (!r.encoder.Write(r.pixels.data(), r.pixels.size())) {
+    const double t2 = GetTime();
+    const bool   sent = r.encoder.Write(r.pixels.data(), r.pixels.size());
+    const double t3 = GetTime();
+    r.drawing += t1 - t0;
+    r.reading += t2 - t1;
+    r.sending += t3 - t2;
+    if (!sent) {
       StopRender(true);   // ffmpeg went: say what it said
     } else if (++r.frame >= r.frames) {
       StopRender(true);
@@ -272,6 +284,11 @@ void Editor::StartRender() {
   soundPlaying_ = false;
   r.frame = 0;
   r.frames = static_cast<int>(std::ceil(edit_.Duration() * kVideoRate));
+  r.began = GetTime();
+  r.drawing = r.reading = r.sending = 0.0;
+  // As fast as it can go: the screen's refresh is nothing to wait for.
+  ClearWindowState(FLAG_VSYNC_HINT);
+  SetTargetFPS(0);
   playing_ = false;
   scrubbing_ = false;
   faceAsked_ = -1.0;
@@ -280,6 +297,10 @@ void Editor::StartRender() {
 void Editor::StopRender(bool finished) {
   Render& r = render_;
   SetScreenOverride(0, 0);
+  if (r.on) {
+    SetWindowState(FLAG_VSYNC_HINT);
+    SetTargetFPS(120);
+  }
   if (finished) {
     const int  code = r.encoder.Finish();
     const bool moved = code == 0 && edit::MoveOver(r.part, r.done);
@@ -296,6 +317,11 @@ void Editor::StopRender(bool finished) {
   r.on = false;
   faceAsked_ = -1.0;
   TraceLog(LOG_INFO, "EDIT: %s", note_.c_str());
+  if (r.frame > 0) {
+    const double each = 1000.0 / r.frame;
+    TraceLog(LOG_INFO, "EDIT: %d frames in %.1f s: %.1f ms a frame drawing, %.1f reading back, %.1f sending",
+             r.frame, GetTime() - r.began, r.drawing * each, r.reading * each, r.sending * each);
+  }
 }
 
 // ------------------------------------------------------------------ opening

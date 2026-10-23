@@ -66,6 +66,8 @@ class Feed {
   // Stops it without waiting for it to finish: the work is being thrown away.
   void Stop();
   bool Running() const { return process_ != nullptr; }
+  // Started, and not since stopped of its own accord.
+  bool Alive() const;
 
  private:
   void* process_ = nullptr;

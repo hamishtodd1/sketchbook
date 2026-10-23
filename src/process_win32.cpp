@@ -167,6 +167,10 @@ void Pipe::Stop() {
 
 Feed::~Feed() { Stop(); }
 
+bool Feed::Alive() const {
+  return process_ != nullptr && WaitForSingleObject(process_, 0) == WAIT_TIMEOUT;
+}
+
 bool Feed::Start(const std::string& commandLine, const std::string& logPath) {
   Stop();
   SECURITY_ATTRIBUTES sa{};

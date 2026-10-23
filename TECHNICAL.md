@@ -403,7 +403,8 @@ nearest the size being drawn. raylib's `fontSize` is a stbtt pixel *height*
 - **A recording is a folder** with `session.txt`: a header, the canvas it began
   from (`App::RecordedCanvas`, an undo step's snapshot, each line after `| `),
   then per frame that changed anything an `f` record -- time, camera, window
-  size, pointer (world), whether a gesture was held, the focused box and its
+  size, pointer (world), flags (1: a gesture held, 2: the focused box typed in
+  since its build, 4: the mouse button down), the focused box and its
   carets (`CodeBlock::CaretState`) -- with `b` (boxes built that frame) and `d`
   (the lines that changed: everything between the common start and the common
   end of the old and new canvas) after it, and `end <seconds>` last. Flushed
@@ -449,7 +450,7 @@ nearest the size being drawn. raylib's `fontSize` is a stbtt pixel *height*
   (`LoadPlayed`, no builds), the camera put where it was, and every box's
   position and text as pieces (`CodeBlock::TextPieces`, the rows as `Draw` sets
   them, turned into box-local world units) read off, and every loose window's
-  place (`Resizable::WindowWorldPos`). The before canvas is also drawn once into
+  place (`Resizable::WindowWorldPos`), and the pictures' and videos'. The before canvas is also drawn once into
   a picture (`DrawCanvas` into a render target, `OuterTarget` set so the space
   window's own target comes back to it), with each box's footprint on it. Boxes are paired
   by identical text, then by nearest within 800 world units. The after canvas is
@@ -471,7 +472,11 @@ nearest the size being drawn. raylib's `fontSize` is a stbtt pixel *height*
   resolved, read back, and written to ffmpeg's stdin (`proc::Feed`; its stderr
   goes to `render.log`), which encodes H.264 into `video.part.mp4`, renamed to
   `video.mp4` when ffmpeg exits cleanly. The window shows each frame as it goes.
-  About 20 frames a second of video per second of rendering on this machine.
+  The screen's refresh is not waited for while rendering (vsync off, no frame
+  cap), which makes it about 85 frames a second here -- 1.4 times real time --
+  of which 2 ms drawing, 4 reading back, 3 handing to ffmpeg; the end of a render
+  logs that breakdown. libx264 `medium` keeps up (about 110 a second at 1080p),
+  so the hardware encoders were not needed.
 - **The frame is not the window.** While rendering, `SetScreenOverride` makes
   `ScreenWidth`/`ScreenHeight` (`screen.h`) the video's size, and **everything
   that lays out or draws the canvas asks those, never raylib's
@@ -513,7 +518,9 @@ nearest the size being drawn. raylib's `fontSize` is a stbtt pixel *height*
   sometimes held by whatever scans new files, and the move fails. It once left an
   edit unsaved, silently.
 - **Testing without anyone's camera**: `SKETCHBOOK_TEST_CAPTURE=1` records
-  ffmpeg's test picture and a tone instead, and mutes the editor. Only the picture
+  ffmpeg's test picture and a tone instead, and mutes the editor; `=fail` asks for
+  a source that is not there, which is what the "no camera or sound" beside the
+  red light (`Capture::Alive`) is for. Only the picture
   is stamped by the wall clock: `-re` paces an input by its stamps, so a tone
   stamped "now" was made half as fast again as it plays.
 - **The monitor** (`editor_frame.cpp`): every frame the canvas is drawn into a

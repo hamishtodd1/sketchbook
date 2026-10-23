@@ -27,7 +27,7 @@ void WriteLines(std::FILE* file, const std::vector<std::string>& lines) {
 bool View::operator==(const View& o) const {
   return centreX == o.centreX && centreY == o.centreY && zoom == o.zoom && width == o.width &&
          height == o.height && pointerX == o.pointerX && pointerY == o.pointerY &&
-         held == o.held && focus == o.focus && caret == o.caret && built == o.built &&
+         held == o.held && pressed == o.pressed && focus == o.focus && caret == o.caret && built == o.built &&
          typed == o.typed;
 }
 
@@ -159,7 +159,8 @@ void Recorder::Frame(double time, const std::string& canvas, const View& view) {
   // A frame: when, then the view. The caret goes last, since it has spaces in it.
   std::fprintf(file_, "f %.4f %.9g %.9g %.9g %d %d %.9g %.9g %d %d %s\n", time, view.centreX,
                view.centreY, view.zoom, view.width, view.height, view.pointerX, view.pointerY,
-               (view.held ? 1 : 0) | (view.typed ? 2 : 0), view.focus, view.caret.c_str());
+               (view.held ? 1 : 0) | (view.typed ? 2 : 0) | (view.pressed ? 4 : 0), view.focus,
+               view.caret.c_str());
   if (!view.built.empty()) {
     std::fputs("b", file_);
     for (int box : view.built) std::fprintf(file_, " %d", box);
@@ -235,6 +236,7 @@ bool Recording::Load(const std::string& folder, std::string* error) {
       // Flags: 1 a gesture held, 2 the focused box typed in since its build.
       frame.view.held = (held & 1) != 0;
       frame.view.typed = (held & 2) != 0;
+      frame.view.pressed = (held & 4) != 0;
       std::getline(fields >> std::ws, frame.view.caret);
       frames_.push_back(std::move(frame));
     } else if (line.rfind("b ", 0) == 0 && !frames_.empty()) {

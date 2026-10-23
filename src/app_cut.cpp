@@ -100,8 +100,14 @@ void App::ShowCut(const std::string& key, const CutEnd& before, const CutEnd& af
       }
       return out;
     };
-    const std::vector<Seen> a = look(before);
-    const Loose             looseBefore = loose();
+    const auto mediaAt = [this]() {
+      std::vector<Vector2> out;
+      for (const std::unique_ptr<MediaItem>& item : media_.Items()) out.push_back(item->worldPos);
+      return out;
+    };
+    const std::vector<Seen>    a = look(before);
+    const Loose                looseBefore = loose();
+    const std::vector<Vector2> mediaBefore = mediaAt();
     // The canvas as it was, drawn once, for whatever goes to fade out of.
     RenderTexture2D shot{};
     std::vector<Rectangle> footprints;
@@ -126,8 +132,9 @@ void App::ShowCut(const std::string& key, const CutEnd& before, const CutEnd& af
     };
     std::vector<Rectangle> shotRects;
     for (const Rectangle& world : footprints) shotRects.push_back(onShot(world));
-    const std::vector<Seen> b = look(after);
-    const Loose             looseAfter = loose();
+    const std::vector<Seen>    b = look(after);
+    const Loose                looseAfter = loose();
+    const std::vector<Vector2> mediaAfter = mediaAt();
 
     Cut cut;
     cut.key = key;
@@ -211,6 +218,12 @@ void App::ShowCut(const std::string& key, const CutEnd& before, const CutEnd& af
     } else {
       cut.shot = shot;
     }
+    // Pictures and videos the same, when there are as many either side.
+    if (mediaBefore.size() == mediaAfter.size()) {
+      for (std::size_t k = 0; k < mediaAfter.size(); ++k) {
+        cut.media.emplace_back(k, mediaBefore[k], mediaAfter[k]);
+      }
+    }
     // Loose windows: the k-th loose one of a kind before is the k-th after.
     const std::vector<Resizable*> panels = Resizables();
     for (std::size_t p = 0; p < panels.size() && p < looseBefore.size() && p < looseAfter.size(); ++p) {
@@ -254,6 +267,9 @@ void App::ShowCut(const std::string& key, const CutEnd& before, const CutEnd& af
       window.panel->SetWindowWorldPos(window.index, Lerp(window.from, window.to, s));
     }
   }
+  for (const auto& [index, from, to] : cut_.media) {
+    if (index < media_.Items().size()) media_.Items()[index]->worldPos = Lerp(from, to, s);
+  }
   // Nothing is pointed at while it moves.
   hover::SetReplayed(true, {-1.0e9f, -1.0e9f});
   replayHeld_ = true;
@@ -263,6 +279,9 @@ void App::EndCut() {
   if (!cut_.active) return;
   for (const CutWindow& window : cut_.windows) {
     if (window.index < window.panel->GripCount()) window.panel->SetWindowWorldPos(window.index, window.to);
+  }
+  for (const auto& [index, from, to] : cut_.media) {
+    if (index < media_.Items().size()) media_.Items()[index]->worldPos = to;
   }
   if (cut_.shot.id != 0) UnloadRenderTexture(cut_.shot);
   for (CutBox& box : cut_.boxes) {

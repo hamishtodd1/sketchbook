@@ -1090,7 +1090,10 @@ and render at a size nobody was looking at.
   recording. Recordings run to tens of minutes, an hour and a half at most.
 - **Recording is started and stopped from the Escape menu**, and goes into a
   folder of its own under `Videos\sketchbook`. The camera and the microphone are
-  recorded with it: the first of each, or the ones named in the settings.
+  recorded with it: the first of each, or the ones named in the settings. **When
+  they are not** -- none found, or the camera held by another program -- the red
+  light says so, since a session found afterwards to have no face cannot be done
+  again.
 - **A transition is silent**: it is time the recording never had.
 - **The editor is a mode of the app** -- the same drawing, so what is edited is
   what is rendered -- but feels like a program of its own, and is started only
@@ -1119,7 +1122,7 @@ and render at a size nobody was looking at.
 - **On-or-off settings are timelines of blocks.** The pointer is hidden by default.
   Ticking it in the edit's settings adds a timeline for it, and dragging on that
   makes a resizable block, inside which the pointer shows -- the arrow, where the
-  recording had the mouse. Any other on-or-off setting works the same way. A
+  recording had the mouse, with a ring while its button is down. Any other on-or-off setting works the same way. A
   block, like a key, is a stretch of the recording, so a cut never moves it.
 - **Audio timelines can be added**, beside the microphone's: music, a voiceover
   recorded afterwards, from the settings or by dropping a file on the editor.
@@ -1321,6 +1324,5 @@ Answered ones move up into the sections above.
 - **Editability is not shown** now that ring and dot are gone. Does it need to be?
 - **How is a transition asked for on the canvas?** A step of a slide, a key on a
   box? Outside the editor's cuts, only the command line can now.
-- **What a cut's transition does not move yet**: pictures, videos and
-  conversations jump to where they end up, and a morphing box's code is one
-  colour while it morphs.
+- **What a cut's transition does not move yet**: conversations jump to where
+  they end up, and a morphing box's code is one colour while it morphs.

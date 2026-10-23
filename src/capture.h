@@ -42,6 +42,9 @@ class Capture {
   // Asks ffmpeg to finish the file properly, and waits for it.
   void Stop();
   bool Running() const { return feed_.Running(); }
+  // Still recording: false if it never started or ffmpeg has given up (a camera
+  // another program holds, say).
+  bool Alive() const { return feed_.Alive(); }
 
  private:
   proc::Feed feed_;

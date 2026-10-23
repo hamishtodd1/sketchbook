@@ -874,6 +874,7 @@ void Editor::Show() {
     pointer_ = {from.view.pointerX + (to.view.pointerX - from.view.pointerX) * s,
                 from.view.pointerY + (to.view.pointerY - from.view.pointerY) * s};
     pointerKnown_ = std::abs(from.view.pointerX) < 1.0e8f && std::abs(to.view.pointerX) < 1.0e8f;
+    pointerPressed_ = false;
     // Played on out of it, the piece after carries on from its first frame.
     if (shownFrame_ != cutFrame_) {
       canvas_ = cutAfter_.canvas;
@@ -915,6 +916,7 @@ void Editor::Show() {
   app_->ShiftBoxes(ShiftsAt(canvas_, moment.source));
   pointer_ = {view.pointerX, view.pointerY};
   pointerKnown_ = std::abs(view.pointerX) < 1.0e8f;
+  pointerPressed_ = view.pressed;
 }
 
 void Editor::DevKeysStep() {

@@ -258,6 +258,7 @@ class Editor {
   // Where the pointer was in the world at the playhead, as the recording has it.
   Vector2                 pointer_{};
   bool                    pointerKnown_ = false;
+  bool                    pointerPressed_ = false;
   transition::OutlineFill pointerFill_;
 
   Target                  monitor_;
@@ -269,6 +270,8 @@ class Editor {
     Target                     target;
     std::vector<unsigned char> pixels;
     std::string                part, done;
+    // Where the time goes, said when it is done: drawing, reading back, sending.
+    double                     began = 0.0, drawing = 0.0, reading = 0.0, sending = 0.0;
   };
   Render                  render_;
   // What the last render came to, said for a while under the timeline.

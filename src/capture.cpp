@@ -69,7 +69,11 @@ bool Capture::Start(const std::string& folder, std::string* error) {
   // stamped by the wall clock: `-re` paces an input by its stamps, and a tone
   // stamped "now" is never early, so it would be made faster than it plays.
   const char* test = std::getenv("SKETCHBOOK_TEST_CAPTURE");
-  if (test != nullptr && *test != '\0') {
+  // `fail` asks for a source that is not there, for seeing what a failed
+  // capture looks like.
+  if (test != nullptr && std::string(test) == "fail") {
+    input = " -f lavfi -i nosuchsource";
+  } else if (test != nullptr && *test != '\0') {
     input = " -re -use_wallclock_as_timestamps 1 -f lavfi -i testsrc2=size=640x360:rate=30"
             " -re -f lavfi -i sine=frequency=440:sample_rate=48000";
   } else {
