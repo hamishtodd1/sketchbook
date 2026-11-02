@@ -31,6 +31,7 @@
 #include "fontstore.h"
 #include "glext.h"
 #include "grip.h"
+#include "remembered.h"
 #include "raylib.h"
 #include "touch.h"
 #include "viewport.h"
@@ -233,6 +234,7 @@ class SpacePanel : public Flanking, public Resizable {
                         const std::vector<std::pair<std::string, const VizGpu*>>& vizes);
 
   std::vector<SpaceWindow>     windows_;
+  Remembered<SpaceWindow>  gone_;   // taken away for now (remembered.h)
   std::vector<const Flanking*> before_;
 
   bool        dragging_ = false;

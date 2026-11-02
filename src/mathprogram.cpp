@@ -77,6 +77,38 @@ std::string Widened(const std::string& assignment, const std::string& type) {
 // The number a variable is given, when it is given nothing but a number:
 // `float a = 0.1;`, `a = -2.;`, `float a = 3.5f;`. False for anything that
 // mentions something, which is a rule rather than a value.
+// **A bool is a switch**: `bool b;`, which the app chooses, or `bool b = true;`
+// (or false), and nothing more -- a bool worked out from something is not one
+// anybody can flip. It reaches the shader through a uniform like a number does,
+// so flipping it compiles nothing. The line reads as code, with a checkbox
+// beside it.
+bool BoolDeclaration(const std::string& raw, std::string* name, bool* typed, bool* value) {
+  std::string code = raw.substr(0, raw.find("//"));
+  const auto trim = [](std::string text) {
+    const std::size_t a = text.find_first_not_of(" \t");
+    const std::size_t b = text.find_last_not_of(" \t");
+    return a == std::string::npos ? std::string() : text.substr(a, b + 1 - a);
+  };
+  code = trim(code);
+  if (code.rfind("bool ", 0) != 0 || code.empty() || code.back() != ';') return false;
+  code = trim(code.substr(5, code.size() - 6));
+  const std::size_t equals = code.find('=');
+  const std::string named = trim(code.substr(0, equals));
+  if (named.empty() || !(std::isalpha(static_cast<unsigned char>(named[0])) || named[0] == '_')) {
+    return false;
+  }
+  for (char c : named) {
+    if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_')) return false;
+  }
+  *name = named;
+  *typed = equals != std::string::npos;
+  if (!*typed) return true;
+  const std::string given = trim(code.substr(equals + 1));
+  if (given != "true" && given != "false") return false;
+  *value = given == "true";
+  return true;
+}
+
 bool WrittenNumber(const std::string& raw, float* out) {
   const std::size_t at = raw.find('=');
   if (at == std::string::npos) return false;
@@ -567,7 +599,7 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
   // over; what a knob moves is whichever literal governs the line being read.
   for (const Variable& variable : variables) {
     if (variable.kind != Kind::Real && variable.kind != Kind::Color &&
-        variable.kind != Kind::Multivector) {
+        variable.kind != Kind::Multivector && variable.kind != Kind::Bool) {
       continue;
     }
     for (const Literal& literal : variable.literals) {
@@ -601,6 +633,8 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
     if (variable.local) continue;   // it lives in its function, not up here
     if (variable.kind == Kind::Real) {
       out += "float " + variable.name + ";\n";
+    } else if (variable.kind == Kind::Bool) {
+      out += "bool " + variable.name + ";\n";
     } else if (variable.kind == Kind::Color) {
       out += "Color " + variable.name + ";\n";
     } else if (variable.kind == Kind::Multivector) {
@@ -1399,8 +1433,41 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   // `float m = sqrt(ip);` inside a function has a different value for every
   // input the function is called with, so there is no one number for a marker
   // to show.
+  const auto chosenBool = [&](const std::string& named) -> float {
+    if (auto was = previous.find(named); was != previous.end()) return was->second;
+    for (const auto& [name, value] : restore_) {
+      if (name == named) return value;
+    }
+    return (types::NameSeed(named) & 1u) != 0u ? 1.0f : 0.0f;
+  };
   const auto knobInside = [&](const std::string& raw, const mathline::Line& line, int thisLine,
                               std::string* written) {
+    // A bool's checkbox, as one at the top has (BoolDeclaration).
+    if (std::string named; true) {
+      bool typedBool = false, given = false;
+      if (BoolDeclaration(raw, &named, &typedBool, &given)) {
+        Variable variable;
+        variable.declaredLine = thisLine;
+        variable.name = named;
+        variable.type = "bool";
+        variable.latexName = mathline::NameToLatex(named);
+        variable.kind = Kind::Bool;
+        variable.free = true;
+        variable.local = true;
+        variable.known = true;
+        variable.written = typedBool;
+        variable.value = typedBool ? (given ? 1.0f : 0.0f) : chosenBool(named);
+        Literal literal;
+        literal.line = thisLine;
+        literal.uniform = uniformFor(named, thisLine);
+        literal.value = variable.value;
+        literal.written = typedBool;
+        variable.literals.push_back(literal);
+        variables.push_back(variable);
+        *written = "bool " + named + " = (" + literal.uniform + " != 0.0);";
+        return;
+      }
+    }
     float typedHere = 0.0f;
     const bool typedNumber = line.hasInitialiser && !IsConstDeclaration(raw) &&
                              WrittenNumber(raw, &typedHere);
@@ -1696,6 +1763,33 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
     // number back into the line, so the two never disagree. And since the
     // shader then does not depend on the number at all, typing a new one builds
     // exactly the shader that is already running, which is not compiled again.
+    // A bool: a checkbox beside it (BoolDeclaration).
+    if (std::string named; ordinary) {
+      bool typedBool = false, given = false;
+      if (BoolDeclaration(raw, &named, &typedBool, &given)) {
+        Variable variable;
+        variable.declaredLine = thisLine;
+        variable.name = named;
+        variable.type = "bool";
+        variable.latexName = mathline::NameToLatex(named);
+        variable.kind = Kind::Bool;
+        variable.free = true;
+        variable.known = true;
+        variable.written = typedBool;
+        variable.value = typedBool ? (given ? 1.0f : 0.0f) : chosenBool(named);
+        Literal literal;
+        literal.line = thisLine;
+        literal.uniform = uniformFor(named, thisLine);
+        literal.value = variable.value;
+        literal.written = typedBool;
+        variable.literals.push_back(literal);
+        variables.push_back(variable);
+        shaderBody += "  " + named + " = (" + literal.uniform + " != 0.0);\n";
+        shaderFunctions += "\n";
+        continue;
+      }
+    }
+
     float typed = 0.0f;
     if (ordinary && line.kind == mathline::Kind::Declaration && line.hasInitialiser &&
         mathline::GlslTypeName(line.type) == "float" &&
@@ -1906,6 +2000,7 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
       if (variable.local || variable.kind == Kind::Function) continue;
       define(variable.name);
       if (!variable.free) continue;   // derived: made by running this box
+      if (variable.kind == Kind::Bool) continue;   // a switch is its own box's, for now
       SharedValue value;
       value.name = variable.name;
       value.home = this;
@@ -2107,6 +2202,7 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
       }
       if (variable.local) continue;
       if (variable.kind == Kind::Real) declared += "float " + variable.name + ";\n";
+      else if (variable.kind == Kind::Bool) declared += "bool " + variable.name + ";\n";
       else if (variable.kind == Kind::Color) declared += "Color " + variable.name + ";\n";
       else if (variable.kind == Kind::Multivector) declared += variable.type + " " + variable.name + ";\n";
     }
@@ -2178,6 +2274,8 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
     if ((variable.kind == Kind::Real || variable.kind == Kind::Color) &&
         !variable.literals.empty() && !variable.local) {
       seed += "  " + variable.name + " = " + variable.literals.front().uniform + ";\n";
+    } else if (variable.kind == Kind::Bool && !variable.literals.empty() && !variable.local) {
+      seed += "  " + variable.name + " = (" + variable.literals.front().uniform + " != 0.0);\n";
     }
   }
 
@@ -2342,7 +2440,7 @@ const Literal* Program::FindLiteral(const std::string& uniform) const {
 void Program::SetValue(std::size_t index, float value, int atLine) {
   if (index >= variables_.size()) return;
   Variable& variable = variables_[index];
-  if (variable.kind != Kind::Real) return;
+  if (variable.kind != Kind::Real && variable.kind != Kind::Bool) return;
 
   // The literal responsible for what is being looked at is the one that moves.
   const int which = variable.GoverningLiteral(atLine);

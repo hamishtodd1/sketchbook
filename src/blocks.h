@@ -526,6 +526,21 @@ class CodeBlock {
   // as one per member, `p.e012` and so on. Only what is not already written in
   // the text.
   std::vector<std::pair<std::string, float>> KnobValues() const;
+
+  // --- a bool's checkbox -------------------------------------------------------
+  //
+  // **A bool is a switch**, and wears a checkbox outside the card, to the left
+  // of its line, whichever reading it shows (mathprogram's BoolDeclaration). Pressing
+  // it flips the value -- a uniform, so nothing is compiled -- and writes the
+  // word into the line when the line says one.
+  struct Tickbox {
+    std::string name;
+    Rectangle   rect{};   // screen
+    bool        ticked = false;
+  };
+  std::vector<Tickbox> Tickboxes(const Viewport& viewport, FontStore& fonts) const;
+  std::string          TickboxAt(Vector2 screenPoint, const Viewport& viewport, FontStore& fonts) const;
+  void                 Flip(const std::string& name);
   // A knob about to be dragged: if its number is typed in the text, the drag is
   // an edit of the text, and gets one undo step.
   void BeginValueEdit(const std::string& name);

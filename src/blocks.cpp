@@ -1088,6 +1088,7 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
       // number line under it is as wide as the box, and would slide under the
       // pointer doing the dragging.
       for (const mathprogram::Variable& variable : program_.variables()) {
+        if (variable.kind == mathprogram::Kind::Bool) continue;   // its checkbox is outside
         bool here = false;
         for (const mathprogram::Literal& literal : variable.literals) {
           here = here || (literal.written && literal.line == static_cast<int>(i));
@@ -1909,6 +1910,8 @@ void CodeBlock::DevKeys(const std::string& keys) {
       });
     } else if (key == "esc") {
       DropOtherCarets();
+    } else if (key.rfind("flip:", 0) == 0) {
+      Flip(key.substr(5));
     } else if (key.rfind("set:", 0) == 0) {
       const std::size_t equals = key.find('=');
       if (equals != std::string::npos) {
@@ -1994,11 +1997,48 @@ void CodeBlock::SetComponentValues(const std::string& name, const std::vector<fl
   }
 }
 
+std::vector<CodeBlock::Tickbox> CodeBlock::Tickboxes(const Viewport& viewport,
+                                                     FontStore& fonts) const {
+  std::vector<Tickbox> out;
+  const Geometry& g = Measure(viewport, fonts);
+  for (const mathprogram::Variable& variable : program_.variables()) {
+    if (variable.kind != mathprogram::Kind::Bool || !variable.free) continue;
+    for (const Row& row : g.rows) {
+      if (row.line != variable.declaredLine) continue;
+      // Outside the card, to its left, level with the line: a control beside
+      // the code rather than a word in it.
+      const float side = g.emPx * 0.82f;
+      out.push_back({variable.name,
+                     {g.rect.x - g.emPx * 0.4f - side, row.y + (row.height - side) * 0.5f, side, side},
+                     variable.value != 0.0f});
+      break;
+    }
+  }
+  return out;
+}
+
+std::string CodeBlock::TickboxAt(Vector2 screenPoint, const Viewport& viewport,
+                                 FontStore& fonts) const {
+  for (const Tickbox& box : Tickboxes(viewport, fonts)) {
+    // A little more than it shows, since it is small to aim at.
+    const Rectangle r = {box.rect.x - 3.0f, box.rect.y - 3.0f, box.rect.width + 6.0f,
+                         box.rect.height + 6.0f};
+    if (CheckCollisionPointRec(screenPoint, r)) return box.name;
+  }
+  return {};
+}
+
+void CodeBlock::Flip(const std::string& name) {
+  const mathprogram::Variable* variable = FindVariable(name);
+  if (variable == nullptr || variable->kind != mathprogram::Kind::Bool) return;
+  SetVariableValue(name, variable->value != 0.0f ? 0.0f : 1.0f, /*intoText=*/true);
+}
+
 std::vector<std::pair<std::string, float>> CodeBlock::KnobValues() const {
   std::vector<std::pair<std::string, float>> out;
   for (const mathprogram::Variable& variable : program_.variables()) {
     if (!variable.free || variable.written) continue;
-    if (variable.kind == mathprogram::Kind::Real) {
+    if (variable.kind == mathprogram::Kind::Real || variable.kind == mathprogram::Kind::Bool) {
       out.emplace_back(variable.name, variable.value);
     } else if (variable.kind == mathprogram::Kind::Color && !variable.literals.empty() &&
                variable.literals.front().components.size() == 3) {
@@ -2353,7 +2393,10 @@ void CodeBlock::WriteLiteral(int line, float value) {
   std::size_t  begin = 0;
   std::size_t  end = 0;
   if (!LiteralSpan(text, &begin, &end)) return;
-  text.replace(begin, end - begin, FormatInjected(value));
+  // A bool's is a word, and stays one.
+  const std::string was = text.substr(begin, end - begin);
+  const bool        word = was == "true" || was == "false";
+  text.replace(begin, end - begin, word ? (value != 0.0f ? "true" : "false") : FormatInjected(value));
   // Not an edit in the usual sense: nothing is rebuilt, because the shader is
   // already reading this number as a uniform. The caret only has to stay on
   // the line.
@@ -3064,7 +3107,8 @@ void CodeBlock::CompileShader() {
     for (const mathprogram::Variable& variable : program_.variables()) {
       if (!variable.free) continue;
       if (variable.kind != mathprogram::Kind::Real && variable.kind != mathprogram::Kind::Color &&
-          variable.kind != mathprogram::Kind::Multivector) {
+          variable.kind != mathprogram::Kind::Multivector &&
+          variable.kind != mathprogram::Kind::Bool) {
         continue;
       }
       for (const mathprogram::Literal& literal : variable.literals) {
@@ -3404,6 +3448,25 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
     text::Draw(fonts, Face::Mono, injection, {x, row.baseline}, g.emPx, kInjected);
     x += text::Measure(fonts, Face::Mono, injection, g.emPx);
     DrawSpans(fonts, source, spans, resume, source.size(), {x, row.baseline}, g.emPx);
+  }
+
+  // Every bool's checkbox, to the left of the card, in either reading. It sits
+  // on the canvas, so it is drawn for the canvas: white with a dark edge.
+  if (!textHidden_) {
+    for (const Tickbox& box : Tickboxes(viewport, fonts)) {
+      const float roundness = 0.25f;
+      DrawRectangleRounded(box.rect, roundness, 6, box.ticked ? kAccent : WHITE);
+      DrawRectangleRoundedLinesEx(box.rect, roundness, 6, std::max(1.0f, g.emPx * 0.06f),
+                                  box.ticked ? kAccent : Fade(kSlideInk, 0.55f));
+      if (box.ticked) {
+        const Rectangle r = box.rect;
+        const float     w = std::max(1.5f, g.emPx * 0.1f);
+        DrawLineEx({r.x + r.width * 0.22f, r.y + r.height * 0.52f},
+                   {r.x + r.width * 0.43f, r.y + r.height * 0.74f}, w, WHITE);
+        DrawLineEx({r.x + r.width * 0.43f, r.y + r.height * 0.74f},
+                   {r.x + r.width * 0.80f, r.y + r.height * 0.28f}, w, WHITE);
+      }
+    }
   }
 
   // Caret. While this box is being edited, and solid while typing so it never

@@ -29,6 +29,7 @@
 #include "blocks.h"
 #include "fontstore.h"
 #include "grip.h"
+#include "remembered.h"
 #include "raylib.h"
 #include "viewport.h"
 #include "viz.h"
@@ -204,7 +205,7 @@ class AxisPanel : public Resizable {
 
   // --- persistence --------------------------------------------------------
   const std::vector<NumberLine>& Lines() const { return lines_; }
-  void Clear() { lines_.clear(); drag_ = Drag::None; dragRef_ = {}; }
+  void Clear() { lines_.clear(); gone_.Clear(); drag_ = Drag::None; dragRef_ = {}; }
   void Adopt(std::vector<NumberLine> lines) {
     lines_ = std::move(lines);
     // A canvas that was written down keeps the scale it was saved at.
@@ -319,6 +320,7 @@ class AxisPanel : public Resizable {
   void Reframe(NumberLine& line) const;
 
   std::vector<NumberLine> lines_;
+  Remembered<NumberLine>  gone_;   // taken away for now (remembered.h)
 
   // A value made by clicking an axis belongs on *that* axis, at the place it
   // was put -- not on whatever axis its box would otherwise have given it. The

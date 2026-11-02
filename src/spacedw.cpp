@@ -346,6 +346,12 @@ Rectangle SpacePanel::DockedBounds(const CodeBlock* block, const Viewport& viewp
 bool SpacePanel::Sync(const Blocks& blocks, const VizStore& vizes) {
   // Only windows coming and going is a change: that is what moves boxes about.
   bool changed = false;
+  // What each window held before anything is dropped: a window left with
+  // nothing is kept as it was, to come back as it was if its points do
+  // (remembered.h) -- a build that failed takes them away for a moment.
+  std::vector<std::vector<PointRef>> held;
+  for (const SpaceWindow& window : windows_) held.push_back(window.refs);
+  const std::size_t heldCount = windows_.size();
 
   for (const std::unique_ptr<CodeBlock>& block : blocks) {
     bool            found = false;
@@ -403,6 +409,29 @@ bool SpacePanel::Sync(const Blocks& blocks, const VizStore& vizes) {
         if (present) break;
       }
       if (present) continue;
+      // A window it was in, taken away for a moment, comes back as it was, with
+      // whichever of its points are back too.
+      SpaceWindow      kept;
+      const CodeBlock* mine = block.get();
+      if (gone_.Take(
+              [mine, &name](const SpaceWindow& window) {
+                for (const PointRef& ref : window.refs) {
+                  if (ref.block == mine && ref.name == name) return true;
+                }
+                return false;
+              },
+              &kept)) {
+        kept.refs.erase(std::remove_if(kept.refs.begin(), kept.refs.end(),
+                                       [&](const PointRef& ref) {
+                                         return ref.block != mine || !declared(ref.name);
+                                       }),
+                        kept.refs.end());
+        kept.id = 0;   // a new one: what the old one had on the GPU went with it
+        windows_.push_back(std::move(kept));
+        if (windows_.back().home && windows_.back().dock == mine) home = windows_.size() - 1;
+        changed = true;
+        continue;
+      }
       ensureHome();
       windows_[home].refs.push_back({block.get(), name});
     }
@@ -420,6 +449,11 @@ bool SpacePanel::Sync(const Blocks& blocks, const VizStore& vizes) {
     }
     const bool feeding = alive && window.home && FeedsHere(*window.dock, window.kind, vizes);
     if (alive && (!window.refs.empty() || feeding)) continue;
+    if (alive && i < heldCount && !held[i].empty()) {
+      SpaceWindow kept = window;
+      kept.refs = held[i];
+      gone_.Keep(std::move(kept));
+    }
     windows_.erase(windows_.begin() + static_cast<long>(i));
     // A window being held further along the list has just moved down one.
     if (dragging_ && dragView_ > i) --dragView_;
@@ -457,6 +491,12 @@ bool SpacePanel::Sync(const Blocks& blocks, const VizStore& vizes) {
 
 void SpacePanel::Forget(const CodeBlock* block) {
   if (held_.block == block) held_ = {};
+  // Nothing kept may name a box that is going.
+  gone_.Drop([block](const SpaceWindow& window) {
+    if (window.dock == block) return true;
+    for (const PointRef& ref : window.refs) if (ref.block == block) return true;
+    return false;
+  });
   for (std::size_t i = windows_.size(); i-- > 0;) {
     if (windows_[i].dock != block) continue;
     windows_.erase(windows_.begin() + static_cast<long>(i));
@@ -1033,6 +1073,7 @@ void SpacePanel::DrawSelectionRims(const Viewport& viewport, FontStore& fonts) c
 
 void SpacePanel::Clear() {
   windows_.clear();
+  gone_.Clear();
   dragging_ = false;
   orbiting_ = false;
   held_ = {};

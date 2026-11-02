@@ -278,6 +278,7 @@ void ColorPanel::Forget(const CodeBlock* block) {
   views_.erase(std::remove_if(views_.begin(), views_.end(),
                               [block](const ColorView& view) { return view.block == block; }),
                views_.end());
+  gone_.Drop([block](const ColorView& view) { return view.block == block; });
   drag_ = Drag::None;
   menuOpen_ = -1;
 }
@@ -298,12 +299,16 @@ bool HasColours(const CodeBlock& block) {
 
 bool ColorPanel::Sync(const Blocks& blocks) {
   const std::size_t before = views_.size();
-  views_.erase(std::remove_if(views_.begin(), views_.end(),
-                              [](const ColorView& view) {
-                                return view.block == nullptr || !HasColours(*view.block) ||
-                                       view.block->DrawnHidden(CodeBlock::kColour);
-                              }),
-               views_.end());
+  // What goes is kept, to come back as it was if its box gets it back
+  // (remembered.h) -- a build that failed takes every window away for a moment.
+  const auto gone = [](const ColorView& view) {
+    return view.block == nullptr || !HasColours(*view.block) ||
+           view.block->DrawnHidden(CodeBlock::kColour);
+  };
+  for (const ColorView& view : views_) {
+    if (view.block != nullptr && gone(view)) gone_.Keep(view);
+  }
+  views_.erase(std::remove_if(views_.begin(), views_.end(), gone), views_.end());
   for (const std::unique_ptr<CodeBlock>& block : blocks) {
     if (!HasColours(*block) || block->DrawnHidden(CodeBlock::kColour)) continue;
     bool present = false;
@@ -312,7 +317,10 @@ bool ColorPanel::Sync(const Blocks& blocks) {
     }
     if (present) continue;
     ColorView view;
-    view.block = block.get();
+    const CodeBlock* mine = block.get();
+    if (!gone_.Take([mine](const ColorView& kept) { return kept.block == mine; }, &view)) {
+      view.block = block.get();
+    }
     views_.push_back(view);
   }
   if (menuOpen_ >= static_cast<int>(views_.size())) menuOpen_ = -1;

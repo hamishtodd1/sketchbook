@@ -207,20 +207,21 @@ bool App::DwUnder(Vector2 point, Rectangle* world, std::string* kind) {
     std::vector<Rectangle> rects;
   };
   std::vector<Candidate> candidates(7);
-  candidates[0].name = "space";
-  spaces_.Rects(viewport_, fonts_, &candidates[0].rects);
-  candidates[1].name = "volume";
-  volumes_.Rects(viewport_, fonts_, &candidates[1].rects);
-  candidates[2].name = "surface";
-  surfaces_.Rects(viewport_, fonts_, &candidates[2].rects);
-  candidates[3].name = "colour";
-  colours_.Rects(viewport_, fonts_, &candidates[3].rects);
-  candidates[4].name = "picture";
-  shaders_.Rects(viewport_, fonts_, &candidates[4].rects);
-  candidates[5].name = "plot";
-  plots_.Rects(viewport_, fonts_, &candidates[5].rects);
-  candidates[6].name = "number line";
-  axes_.Rects(viewport_, fonts_, &candidates[6].rects);
+  // Number lines are drawn over every display window (controls above displays).
+  candidates[0].name = "number line";
+  axes_.Rects(viewport_, fonts_, &candidates[0].rects);
+  candidates[1].name = "space";
+  spaces_.Rects(viewport_, fonts_, &candidates[1].rects);
+  candidates[2].name = "volume";
+  volumes_.Rects(viewport_, fonts_, &candidates[2].rects);
+  candidates[3].name = "surface";
+  surfaces_.Rects(viewport_, fonts_, &candidates[3].rects);
+  candidates[4].name = "colour";
+  colours_.Rects(viewport_, fonts_, &candidates[4].rects);
+  candidates[5].name = "picture";
+  shaders_.Rects(viewport_, fonts_, &candidates[5].rects);
+  candidates[6].name = "plot";
+  plots_.Rects(viewport_, fonts_, &candidates[6].rects);
   for (const Candidate& candidate : candidates) {
     for (auto it = candidate.rects.rbegin(); it != candidate.rects.rend(); ++it) {
       if (!CheckCollisionPointRec(point, *it)) continue;

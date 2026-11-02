@@ -121,13 +121,17 @@ void DrawEdges(const VolumeView& view, Rectangle rect, float zoom) {
 bool VolumePanel::Sync(const Blocks& blocks) {
   const std::size_t before = views_.size();
 
-  views_.erase(std::remove_if(views_.begin(), views_.end(),
-                              [](const VolumeView& view) {
-                                return view.block == nullptr || !view.block->HasShader() ||
-                                       !view.block->HasVolume() ||
-                                       view.block->DrawnHidden(CodeBlock::kVolume);
-                              }),
-               views_.end());
+  // What goes is kept, to come back as it was if its box gets it back
+  // (remembered.h) -- a build that failed takes every window away for a moment.
+  const auto gone = [](const VolumeView& view) {
+    return view.block == nullptr || !view.block->HasShader() ||
+           !view.block->HasVolume() ||
+           view.block->DrawnHidden(CodeBlock::kVolume);
+  };
+  for (const VolumeView& view : views_) {
+    if (view.block != nullptr && gone(view)) gone_.Keep(view);
+  }
+  views_.erase(std::remove_if(views_.begin(), views_.end(), gone), views_.end());
 
   for (const std::unique_ptr<CodeBlock>& block : blocks) {
     if (!block->HasShader() || !block->HasVolume() ||
@@ -141,7 +145,10 @@ bool VolumePanel::Sync(const Blocks& blocks) {
     if (present) continue;
 
     VolumeView view;
-    view.block = block.get();
+    const CodeBlock* mine = block.get();
+    if (!gone_.Take([mine](const VolumeView& kept) { return kept.block == mine; }, &view)) {
+      view.block = block.get();
+    }
     views_.push_back(view);
   }
   return views_.size() != before;
@@ -151,6 +158,7 @@ void VolumePanel::Forget(const CodeBlock* block) {
   views_.erase(std::remove_if(views_.begin(), views_.end(),
                               [block](const VolumeView& view) { return view.block == block; }),
                views_.end());
+  gone_.Drop([block](const VolumeView& view) { return view.block == block; });
   dragging_ = false;
   orbiting_ = false;
 }

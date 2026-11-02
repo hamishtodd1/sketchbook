@@ -1,10 +1,10 @@
 sketchbook 3
 view 375.341 40.1241 0.494782
 aspect 1.5
-block 192.192 -461.261 34 0 1 0 0 1000 0
+block 192.192 -461.261 34 0 1 0 0 1000 0 32
 > \text Vizes
 end
-block -107.808 -230.63 20 0 0 0 0 0 0
+block -115.315 -230.63 20 0 0 0 0 0 0 33
 > Viz(float, "Axis");
 > // A real is a ring on the line, where the number is. The ring is chrome
 > // rather than part of the scale, so it is measured in pixels of chrome --
@@ -54,7 +54,7 @@ block -107.808 -230.63 20 0 0 0 0 0 0
 >   return floor((rand() * 2.0 - 1.0) * 10000.0) / 10000.0;
 > }
 end
-block 1268.47 -230.63 20 0 0 0 0 0 0
+block 1076.28 -230.63 20 0 0 0 0 0 0 34
 > Viz(RToR, "Plot");
 > // A function of reals is a curve on a plot, input up and output across. A
 > // pixel is on it by how near it is, measured square to the curve -- so a
@@ -79,7 +79,7 @@ block 1268.47 -230.63 20 0 0 0 0 0 0
 >   return shape(d, rand(), rand());
 > }
 end
-block 1383.78 650 20 0 0 0 0 0 0
+block 1383.78 768.768 20 0 0 0 0 0 0 35
 > Viz(RToR, "Axis");
 > // And a field along a number line: nothing at zero, opaque green at +1 and
 > // opaque yellow at -1, clamped beyond -- so a colour means the same number
@@ -91,7 +91,7 @@ block 1383.78 650 20 0 0 0 0 0 0
 >   return vec4(c, abs(v) * sbTint.a);
 > }
 end
-block 1383.78 1170 20 0 0 0 0 0 0
+block 1191.59 1153.15 20 0 0 0 0 0 0 36
 > Viz(R2ToR3, "Picture");
 > // A function of the plane is a picture: each pixel is the answer there, and
 > // a vec3 is a colour.
@@ -104,7 +104,7 @@ block 1383.78 1170 20 0 0 0 0 0 0
 >   return vec3(shape(d, rand(), rand()), shape(d, rand(), rand()), shape(d, rand(), rand()));
 > }
 end
-block 1383.78 1730 20 0 0 0 0 0 0
+block 1191.59 1729.73 20 0 0 0 0 0 0 37
 > Viz(R2ToC, "Picture");
 > // A complex answer is domain colouring: hue for its argument, lightness for
 > // its size.
@@ -117,7 +117,7 @@ block 1383.78 1730 20 0 0 0 0 0 0
 >   return Complex(shape(d, rand(), rand()), shape(d, rand(), rand()));
 > }
 end
-block 1383.78 2290 20 0 0 0 0 0 0
+block 1268.47 2306.3 20 0 0 0 0 0 0 38
 > Viz(CToC, "Picture");
 > vec4 frag(vec2 at) {
 >   return sbPaint(value(Complex(at.x, at.y)));
@@ -128,7 +128,7 @@ block 1383.78 2290 20 0 0 0 0 0 0
 >   return Complex(shape(d, rand(), rand()), shape(d, rand(), rand()));
 > }
 end
-block 1383.78 2770 20 0 0 0 0 0 0
+block 1383.78 2767.56 20 0 0 0 0 0 0 39
 > Viz(CToR3, "Picture");
 > vec4 frag(vec2 at) {
 >   return sbPaint(value(Complex(at.x, at.y)));
@@ -139,7 +139,7 @@ block 1383.78 2770 20 0 0 0 0 0 0
 >   return vec3(shape(d, rand(), rand()), shape(d, rand(), rand()), shape(d, rand(), rand()));
 > }
 end
-block 1383.78 3250 20 0 0 0 0 0 0
+block 1383.78 3267.26 20 0 0 0 0 0 0 40
 > Viz(CToR, "Picture");
 > vec4 frag(vec2 at) {
 >   return sbPaint(value(Complex(at.x, at.y)));
@@ -150,7 +150,7 @@ block 1383.78 3250 20 0 0 0 0 0 0
 >   return shape(d, rand(), rand());
 > }
 end
-block 2421.62 -384.384 20 0 0 0 0 0 0
+block 2229.43 -768.768 20 0 0 0 0 0 0 41
 > Viz(R2ToR, "Surface");
 > // A real function of the plane is a landscape, marched from wherever the
 > // window has been turned to. sbMarch finds where a ray first meets it.
@@ -189,8 +189,10 @@ block 2421.62 -384.384 20 0 0 0 0 0 0
 >   float d = length(p);
 >   return shape(d, rand(), rand());
 > }
+val nearest -0.6916
+val ignored 0.862
 end
-block 2383.18 691.891 20 0 0 0 0 0 0
+block 2421.62 538.138 20 0 0 0 0 0 0 42
 > Viz(R3ToR, "Volume");
 > // A function of space is a cloud, looked through: thick where there is a lot
 > // of it, clear where there is none, accumulated front to back so what is
@@ -218,7 +220,7 @@ block 2383.18 691.891 20 0 0 0 0 0 0
 >   return shape(d, rand(), rand());
 > }
 end
-block 2383.18 1422.22 20 0 0 0 0 0 0
+block 2383.18 1614.41 20 0 0 0 0 0 0 43
 > Viz(R3ToC, "Volume");
 > // The same cloud, coloured by argument and thickened by size.
 > vec4 frag(vec2 film) {
@@ -244,7 +246,7 @@ block 2383.18 1422.22 20 0 0 0 0 0 0
 >   return Complex(shape(d, rand(), rand()), shape(d, rand(), rand()));
 > }
 end
-block 3421.02 -1383.78 20 0 0 0 0 0 0
+block 3421.02 -1537.54 20 0 0 0 0 0 0 44
 > Viz(Color, "Picker");
 > // A colour on the picker's ring, at its hue. The one the triangle points at is
 > // also shown in the triangle, by the picker itself.
@@ -298,7 +300,7 @@ block 3421.02 -1383.78 20 0 0 0 0 0 0
 >   return hsv(rand(), 0.7, 0.9);
 > }
 end
-block 3421.02 153.754 20 0 0 0 0 0 0
+block 3613.21 153.754 20 0 0 0 0 0 0 45
 > Viz(Color, "Cube");
 > // A colour in the RGB cube: red, green and blue along its three edges.
 > vec3 where(Color c) {
@@ -345,7 +347,7 @@ block 3421.02 153.754 20 0 0 0 0 0 0
 >   return sbRayOrigin + sbRayDir * t + vec3(0.5);
 > }
 end
-block 3382.58 1614.41 20 0 0 0 0 0 0
+block 3574.77 1614.41 20 0 0 0 0 0 0 46
 > Viz(Color, "Cylinder");
 > // A colour in the HSV cylinder: hue round it, saturation out from the middle,
 > // value up.
@@ -397,7 +399,7 @@ block 3382.58 1614.41 20 0 0 0 0 0 0
 >   return hsv(h, length(vec2(q.x, q.z)) / 0.5, q.y + 0.5);
 > }
 end
-block -1300 -230.63 20 0 0 0 0 0 0
+block -1306.91 -230.63 20 0 0 0 0 0 0 47
 > // What the functions' examples are made of, shared by every viz of a
 > // function here.
 > // One of four shapes a person would know -- a wave, a parabola, a bump, a
@@ -410,3 +412,6 @@ block -1300 -230.63 20 0 0 0 0 0 0
 >   return k * d;
 > }
 end
+axis 1 0 0 0.0852 2.21943 9 1 0
+ref 9 nearest
+ref 9 ignored

@@ -953,9 +953,22 @@ std::string NameToLatex(std::string_view name) {
     }
   }
 
+  // A Greek letter spelled out is that letter, as in TeX: `lambda` is λ, `Omega`
+  // is Ω. Braced, so whatever follows cannot run on into the command's name.
+  static const char* const kGreek[] = {
+      "alpha", "beta",  "gamma",   "delta",  "epsilon", "varepsilon", "zeta",   "eta",
+      "theta", "vartheta", "iota", "kappa",  "lambda",  "mu",         "nu",     "xi",
+      "pi",    "varpi", "rho",     "varrho", "sigma",   "varsigma",   "tau",    "upsilon",
+      "phi",   "varphi", "chi",    "psi",    "omega",   "Gamma",      "Delta",  "Theta",
+      "Lambda", "Xi",   "Pi",      "Sigma",  "Upsilon", "Phi",        "Psi",    "Omega"};
+  bool greek = false;
+  for (const char* letter : kGreek) greek = greek || base == letter;
+
   // A single letter is a variable and italicises on its own; a word would
   // otherwise be set as a product of its letters.
-  std::string out = (base.size() == 1) ? base : ("\\mathit{" + base + "}");
+  std::string out = greek               ? ("{\\" + base + "}")
+                    : (base.size() == 1) ? base
+                                         : ("\\mathit{" + base + "}");
   if (!subscript.empty()) out += "_{" + subscript + "}";
   return out;
 }
@@ -992,7 +1005,8 @@ bool BracesBalance(std::string_view source) {
 
 }  // namespace
 
-Line Parse(std::string_view source, const clifford::Signature& sig, const Inside& inside) {
+static Line ParseCode(std::string_view source, const clifford::Signature& sig,
+                      const Inside& inside) {
   Line line;
 
   // Saying what this box draws is a statement *about* the box rather than one
@@ -1200,6 +1214,35 @@ Line Parse(std::string_view source, const clifford::Signature& sig, const Inside
   const std::string head = Marked(name, &line.marks);
   const std::string body = Emit(*expression, 0, &line.marks);
   line.latex = head + Defines(line.marks.size() > 1 || CallsAnything(*expression)) + body;
+  return line;
+}
+
+// **A comment is for the reader, not the machine.** The line is read without
+// it -- so `float k = 0.; // 0.5 is flat` is a declaration with a knob, as it is
+// without the comment -- and the comment is set beside the reading, in words.
+// A line that is nothing but a comment has no reading, and stays code.
+Line Parse(std::string_view source, const clifford::Signature& sig, const Inside& inside) {
+  const std::size_t slashes = source.find("//");
+  if (slashes == std::string_view::npos) return ParseCode(source, sig, inside);
+  const std::string_view code = source.substr(0, slashes);
+  if (code.find_first_not_of(" \t") == std::string_view::npos) {
+    Line line;
+    line.kind = Kind::Unparsed;
+    return line;
+  }
+  Line line = ParseCode(code, sig, inside);
+  std::string words(source.substr(slashes + 2));
+  // Braces and backslashes would be read as TeX; nothing else in a text is.
+  for (char& c : words) {
+    if (c == '{') c = '(';
+    else if (c == '}') c = ')';
+    else if (c == '\\') c = '/';
+  }
+  const std::size_t first = words.find_first_not_of(" \t");
+  const std::size_t last = words.find_last_not_of(" \t");
+  if (!line.latex.empty() && first != std::string::npos) {
+    line.latex += "\\qquad\\text{" + words.substr(first, last + 1 - first) + "}";
+  }
   return line;
 }
 

@@ -33,6 +33,7 @@
 #include "dock.h"
 #include "fontstore.h"
 #include "grip.h"
+#include "remembered.h"
 #include "raylib.h"
 #include "types/RealFunctionViz.h"
 #include "types/RealViz.h"
@@ -103,7 +104,7 @@ class ShaderPanel : public Flanking, public Resizable {
 
   // --- persistence --------------------------------------------------------
   const std::vector<ShaderView>& Views() const { return views_; }
-  void Clear() { views_.clear(); dragging_ = false; }
+  void Clear() { views_.clear(); gone_.Clear(); dragging_ = false; }
   void Adopt(std::vector<ShaderView> views) { views_ = std::move(views); }
 
   // The grip (grip.h).
@@ -127,6 +128,7 @@ class ShaderPanel : public Flanking, public Resizable {
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
 
   std::vector<ShaderView>       views_;
+  Remembered<ShaderView> gone_;   // taken away for now (remembered.h)
   std::vector<const Flanking*>  before_;
 
   bool        dragging_ = false;

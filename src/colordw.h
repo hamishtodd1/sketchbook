@@ -42,6 +42,7 @@
 #include "dock.h"
 #include "fontstore.h"
 #include "grip.h"
+#include "remembered.h"
 #include "raylib.h"
 #include "viewport.h"
 #include "viz.h"
@@ -132,7 +133,7 @@ class ColorPanel : public Flanking, public Resizable {
 
   // --- persistence --------------------------------------------------------
   const std::vector<ColorView>& Views() const { return views_; }
-  void Clear() { views_.clear(); drag_ = Drag::None; menuOpen_ = -1; }
+  void Clear() { views_.clear(); gone_.Clear(); drag_ = Drag::None; menuOpen_ = -1; }
   void Adopt(std::vector<ColorView> views) { views_ = std::move(views); }
 
   // The grip (grip.h).
@@ -186,6 +187,7 @@ class ColorPanel : public Flanking, public Resizable {
   void                DrawMenu(Rectangle window, std::size_t index, FontStore& fonts) const;
 
   std::vector<ColorView>        views_;
+  Remembered<ColorView> gone_;   // taken away for now (remembered.h)
   std::vector<const Flanking*>  before_;
 
   Drag        drag_ = Drag::None;

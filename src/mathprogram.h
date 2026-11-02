@@ -29,6 +29,7 @@ enum class Kind {
   Function,     // RToR: a function from reals to reals
   Multivector,  // an element of a Clifford algebra: Bi, Even, ...
   Color,        // a vec3 that is a colour: three numbers, one knob
+  Bool,         // a bool: a checkbox beside it, and `value` is 0 or 1
 };
 
 // One literal assignment to a variable, and the uniform standing behind it.

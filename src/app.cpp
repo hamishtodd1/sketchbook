@@ -2206,6 +2206,17 @@ void App::Update() {
       consumed = (*it)->ClickError(GetMousePosition());
     }
   }
+  // A bool's checkbox is pressed, not typed into: asked before a press could put
+  // the caret in its box or pick the box up.
+  if (canvasActive && !consumed && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+      chats_.ItemAt(GetMousePosition(), viewport_) < 0) {
+    for (auto it = codeBlocks_.rbegin(); it != codeBlocks_.rend() && !consumed; ++it) {
+      const std::string name = (*it)->TickboxAt(GetMousePosition(), viewport_, fonts_);
+      if (name.empty()) continue;
+      (*it)->Flip(name);
+      consumed = true;
+    }
+  }
   // Two fingers on two values mean something neither means alone, so this is
   // asked before anything that could move one of them.
   if (canvasActive && !consumed) consumed = HandleCompose();
@@ -2535,8 +2546,10 @@ void App::Update() {
     Rectangle   under{};
     std::string kind;
     if (DwUnder(GetMousePosition(), &under, &kind)) {
+      // Every window whose wheel changes its own scale. Only a colour window
+      // has no scale, and leaves the wheel to the canvas.
       ownWheel = ownWheel || kind == "space" || kind == "volume" || kind == "surface" ||
-                 kind == "picture";
+                 kind == "picture" || kind == "plot" || kind == "number line";
     }
   }
   viewport_.Update(canvasActive, !consumed, canvasActive && !ownWheel && !Gripping(),
@@ -2664,13 +2677,17 @@ void App::DrawCanvas(bool look) {
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->Draw(viewport_, fonts_);
   for (const MathBlock& block : mathBlocks_) block.Draw(viewport_, fonts_);
 
-  axes_.Draw(viewport_, fonts_, vizes_);
   plots_.Draw(viewport_, fonts_);
   shaders_.Draw(viewport_, fonts_);
   colours_.Draw(viewport_, fonts_, vizes_);
   surfaces_.Draw(viewport_, fonts_);
   volumes_.Draw(viewport_, fonts_);
   spaces_.Draw(viewport_, fonts_, vizes_);
+  // **Controls above displays**: a number line is drawn over every window that
+  // only shows something, so a knob is never hidden behind a picture. Input
+  // already asks it first (Update, DwUnder), so what is seen on top is what a
+  // press reaches.
+  axes_.Draw(viewport_, fonts_, vizes_);
   if (!look) {
     for (Resizable* panel : Resizables()) {
       for (int i = 0; i < panel->GripCount(); ++i) {

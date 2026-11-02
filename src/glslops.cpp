@@ -147,6 +147,8 @@ class Rewriter {
  private:
   const std::vector<Token>& tokens_;
   std::size_t               at_ = 0;
+  // Where in the output the last whole expression began (LastOperand).
+  std::size_t               expressionStart_ = 0;
 
   const Token& Peek() const { return tokens_[at_]; }
   bool         AtEnd() const { return tokens_[at_].kind == Token::Kind::End; }
@@ -192,15 +194,17 @@ class Rewriter {
       out->push_back({separator.text + " ", separator.line});
       return;
     }
+    expressionStart_ = out->size();
     Expression(out, 0);
   }
 
-  // Everything already emitted for the current statement, which is what a
-  // compound assignment has to repeat. Good enough for the names and member
-  // accesses these boxes assign to.
+  // The expression just emitted, which is what a compound assignment has to
+  // repeat: the one being assigned to. Not everything since the statement
+  // began -- `if (c) s += 1;` assigns to `s`, and repeating `if(c)s` was a
+  // syntax error.
   std::string LastOperand(std::vector<Piece>* out) const {
     std::string text;
-    for (std::size_t i = out->size(); i-- > 0;) {
+    for (std::size_t i = out->size(); i-- > expressionStart_;) {
       const std::string& piece = (*out)[i].text;
       // Anything structural ends the statement, not just a semicolon: a line
       // after a closing brace would otherwise drag the brace in with it.

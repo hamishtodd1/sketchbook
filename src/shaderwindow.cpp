@@ -22,6 +22,7 @@ void ShaderPanel::Forget(const CodeBlock* block) {
   views_.erase(std::remove_if(views_.begin(), views_.end(),
                               [block](const ShaderView& view) { return view.block == block; }),
                views_.end());
+  gone_.Drop([block](const ShaderView& view) { return view.block == block; });
   dragging_ = false;
 }
 
@@ -30,13 +31,17 @@ bool ShaderPanel::Sync(const Blocks& blocks) {
 
   // A box that has stopped being a shader, or whose window has been thrown
   // away, keeps none.
-  views_.erase(std::remove_if(views_.begin(), views_.end(),
-                              [](const ShaderView& view) {
-                                return view.block == nullptr || !view.block->HasShader() ||
-                                       !view.block->Draws() ||
-                                       view.block->DrawnHidden(CodeBlock::kPicture);
-                              }),
-               views_.end());
+  // What goes is kept, to come back as it was if its box gets it back
+  // (remembered.h) -- a build that failed takes every window away for a moment.
+  const auto gone = [](const ShaderView& view) {
+    return view.block == nullptr || !view.block->HasShader() ||
+           !view.block->Draws() ||
+           view.block->DrawnHidden(CodeBlock::kPicture);
+  };
+  for (const ShaderView& view : views_) {
+    if (view.block != nullptr && gone(view)) gone_.Keep(view);
+  }
+  views_.erase(std::remove_if(views_.begin(), views_.end(), gone), views_.end());
 
   for (const std::unique_ptr<CodeBlock>& block : blocks) {
     if (!block->HasShader() || !block->Draws() ||
@@ -50,7 +55,10 @@ bool ShaderPanel::Sync(const Blocks& blocks) {
     if (present) continue;
 
     ShaderView view;
-    view.block = block.get();
+    const CodeBlock* mine = block.get();
+    if (!gone_.Take([mine](const ShaderView& kept) { return kept.block == mine; }, &view)) {
+      view.block = block.get();
+    }
     views_.push_back(view);
   }
   return views_.size() != before;

@@ -72,6 +72,12 @@ void PlotPanel::Forget(const CodeBlock* block) {
                     plot.refs.end());
     if (plot.dock == block) plot.dock = plot.refs.empty() ? nullptr : plot.refs.front().block;
   }
+  // Nothing kept may name a box that is going.
+  gone_.Drop([block](const Plot& kept) {
+    if (kept.dock == block) return true;
+    for (const CurveRef& ref : kept.refs) if (ref.block == block) return true;
+    return false;
+  });
   plots_.erase(std::remove_if(plots_.begin(), plots_.end(),
                               [](const Plot& plot) { return plot.refs.empty(); }),
                plots_.end());
@@ -80,11 +86,25 @@ void PlotPanel::Forget(const CodeBlock* block) {
 
 bool PlotPanel::Sync(const Blocks& blocks) {
   const std::size_t before = plots_.size();
+  // A plot left with nothing is kept as it was, to come back as it was if its
+  // curves do (remembered.h) -- a build that failed takes them away for a moment.
+  std::vector<std::vector<CurveRef>> held;
+  for (const Plot& plot : plots_) held.push_back(plot.refs);
 
   for (Plot& plot : plots_) {
     plot.refs.erase(std::remove_if(plot.refs.begin(), plot.refs.end(),
-                                   [this](const CurveRef& ref) { return Resolve(ref) == nullptr; }),
+                                   [this](const CurveRef& ref) {
+                                     const mathprogram::Variable* variable = Resolve(ref);
+                                     return variable == nullptr ||
+                                            variable->kind != mathprogram::Kind::Function;
+                                   }),
                     plot.refs.end());
+  }
+  for (std::size_t i = 0; i < plots_.size(); ++i) {
+    if (!plots_[i].refs.empty() || held[i].empty()) continue;
+    Plot kept = plots_[i];
+    kept.refs = held[i];
+    gone_.Keep(std::move(kept));
   }
   plots_.erase(std::remove_if(plots_.begin(), plots_.end(),
                               [](const Plot& plot) { return plot.refs.empty(); }),
@@ -108,9 +128,31 @@ bool PlotPanel::Sync(const Blocks& blocks) {
       }
       if (present) continue;
 
-      Plot plot;
-      plot.refs.push_back({block.get(), variable.name});
-      plot.dock = block.get();
+      Plot              plot;
+      const CodeBlock*  mine = block.get();
+      const std::string name = variable.name;
+      if (gone_.Take(
+              [mine, &name](const Plot& kept) {
+                for (const CurveRef& ref : kept.refs) {
+                  if (ref.block == mine && ref.name == name) return true;
+                }
+                return false;
+              },
+              &plot)) {
+        // Back as it was, with whichever of its curves are back too.
+        plot.refs.erase(std::remove_if(plot.refs.begin(), plot.refs.end(),
+                                       [this](const CurveRef& ref) {
+                                     const mathprogram::Variable* variable = Resolve(ref);
+                                     return variable == nullptr ||
+                                            variable->kind != mathprogram::Kind::Function;
+                                   }),
+                        plot.refs.end());
+        if (plot.refs.empty()) plot.refs.push_back({block.get(), name});
+        if (plot.dock == nullptr) plot.dock = block.get();
+      } else {
+        plot.refs.push_back({block.get(), variable.name});
+        plot.dock = block.get();
+      }
       plots_.push_back(plot);
     }
   }

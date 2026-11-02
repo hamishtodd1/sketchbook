@@ -25,6 +25,7 @@
 #include "viz.h"
 #include "fontstore.h"
 #include "grip.h"
+#include "remembered.h"
 #include "raylib.h"
 #include "viewport.h"
 
@@ -131,7 +132,7 @@ class PlotPanel : public Resizable {
 
   // --- persistence --------------------------------------------------------
   const std::vector<Plot>& Plots() const { return plots_; }
-  void Clear() { plots_.clear(); drag_ = Drag::None; }
+  void Clear() { plots_.clear(); gone_.Clear(); drag_ = Drag::None; }
   void Adopt(std::vector<Plot> plots) { plots_ = std::move(plots); }
 
   // The grip (grip.h).
@@ -169,6 +170,7 @@ class PlotPanel : public Resizable {
                  Color tint) const;
 
   std::vector<Plot> plots_;
+  Remembered<Plot>  gone_;   // taken away for now (remembered.h)
   mutable Pick        pick_ = Pick::Idle;
   mutable CurveRef    pickRef_;
   const AxisPanel*  axes_ = nullptr;

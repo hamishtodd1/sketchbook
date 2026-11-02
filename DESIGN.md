@@ -240,6 +240,13 @@ The readings themselves:
   `r := randChanging()` -- but a constructor is not.
 - **A name that is a word gets a thin space beside it**, so `speed * time` does
   not read as one name. Single letters stay tight.
+- **A comment is for the reader**: a line is read without its trailing `//`
+  comment, so `float k = 0.; // 0.5 is flat` is a declaration with a knob like
+  any other, and the comment is set beside the reading in words. A line that is
+  only a comment stays code.
+- **A Greek letter spelled out is that letter**: `lambda` is λ, `alpha1` is α₁,
+  `Omega` is Ω -- the names TeX has, italic in lower case and upright in upper,
+  as TeX sets them. A Greek letter is a single letter, so it stays tight too.
 - **The algebra is considered, not named**: `Cl(3,0,1);` reads "Consider
   Cl_{3,0,1}", and every type names the algebra outright (Section 8).
 
@@ -297,6 +304,14 @@ The readings themselves:
 
 **Free variables get knobs** -- a handle on a number line for a real. That is
 "choosing values" made physical.
+
+**A bool is a switch, and its knob is a checkbox beside it** -- outside the box,
+to its left, level with its line: always, in either reading, never in a window of
+its own. `bool b;` is chosen by the
+app; `bool b = true;` says, and ticking the box writes the other word into the
+line. Only those two shapes: a bool worked out from something is not one anybody
+can flip. Like any knob it is a uniform, so ticking compiles nothing. The line
+reads as code. (A bool is not shared with other boxes yet.)
 
 ### A number line per box
 
@@ -745,6 +760,11 @@ scales, cameras, panning, merging and docking -- and nothing about what a value
 looks like. **A viz** is how one type is drawn in one kind of dw, and a viz is the
 user's.
 
+**A window taken away for a moment comes back as it was.** A build that fails
+leaves a box with nothing to show, so its windows go; when it builds again they
+come back where they were, loose or docked, at the size and the scale they were
+left at -- not new.
+
 ### Vizes are bootstrapped
 
 **The app's own vizes are written the way a user's would be: in GLSL, on a
@@ -901,7 +921,10 @@ governs itself can only be wrong.
 **Every window snaps to the grid as drawn**, so placement gets finer as you zoom
 in. **Boxes never overlap**: one put on another steps clear by the nearest edge,
 and a box's docked windows count as part of it. (Pictures do overlap, since a
-caption on a photograph is normal.)
+caption on a photograph is normal.) **Where windows do overlap, controls are on
+top**: a number line is drawn over every window that only shows something -- a
+picture, a plot, a space -- so a knob is never hidden behind a picture, and a
+press reaches whatever is drawn on top.
 
 **A new window goes in the nearest gap to the middle of the view.** A box started
 by typing on the canvas, a conversation, a picture or video inserted from the menu:
@@ -958,8 +981,8 @@ but do not snap themselves: the same size as another program means nothing.
 
 **The wheel zooms the canvas**, over boxes and pictures as over bare canvas.
 Over a conversation it scrolls it, and inside a window with a camera or a scale
-of its own -- a picture of a function, a surface, a volume, a space window -- it
-is that window's.
+of its own -- a number line, a plot, a picture of a function, a surface, a
+volume, a space window -- it is that window's, and the canvas stays still.
 
 **A display window resized comes loose from its box.** Docking is a row of slots
 of one size beside or under the box, and a window of another size has no slot;

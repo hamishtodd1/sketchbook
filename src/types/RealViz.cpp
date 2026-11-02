@@ -313,6 +313,14 @@ void AxisPanel::Forget(const CodeBlock* block) {
                                        line.samples.empty();
                               }),
                lines_.end());
+  // Nothing kept may name a box that is going.
+  gone_.Drop([block](const NumberLine& line) {
+    if (line.dock == block) return true;
+    for (const AxisRef& ref : line.refs) if (ref.block == block) return true;
+    for (const AxisRef& ref : line.fields) if (ref.block == block) return true;
+    for (const CodeBlock* sampled : line.samples) if (sampled == block) return true;
+    return false;
+  });
   drag_ = Drag::None;
   // The handle being dragged named a box that may be the one going away, and so
   // may the value a click was waiting on.
@@ -322,17 +330,29 @@ void AxisPanel::Forget(const CodeBlock* block) {
 
 bool AxisPanel::Sync(const Blocks& blocks) {
   const std::size_t before = lines_.size();
-  // Drop refs whose variable no longer exists.
+  // What each line held before anything is dropped: a line left with nothing is
+  // kept as it was, refs and all, to come back as it was if they come back
+  // (remembered.h) -- a build that failed takes every value away for a moment.
+  std::vector<std::vector<AxisRef>> held;
+  held.reserve(lines_.size());
+  for (const NumberLine& line : lines_) held.push_back(line.refs);
+  // Drop refs whose variable no longer exists -- or is no longer a real: a
+  // name kept and its type changed (`float a` become `bool a`) is not a point
+  // on a line any more. A field is a function's, on the same terms.
+  const auto notReal = [this](const AxisRef& ref) {
+    const mathprogram::Variable* variable = Resolve(ref);
+    return variable == nullptr || variable->kind != mathprogram::Kind::Real;
+  };
+  const auto notFunction = [this](const AxisRef& ref) {
+    const mathprogram::Variable* variable = Resolve(ref);
+    return variable == nullptr || variable->kind != mathprogram::Kind::Function;
+  };
   for (NumberLine& line : lines_) {
-    line.refs.erase(std::remove_if(line.refs.begin(), line.refs.end(),
-                                   [this](const AxisRef& ref) { return Resolve(ref) == nullptr; }),
-                    line.refs.end());
+    line.refs.erase(std::remove_if(line.refs.begin(), line.refs.end(), notReal), line.refs.end());
   }
   for (NumberLine& line : lines_) {
-    line.fields.erase(
-        std::remove_if(line.fields.begin(), line.fields.end(),
-                       [this](const AxisRef& ref) { return Resolve(ref) == nullptr; }),
-        line.fields.end());
+    line.fields.erase(std::remove_if(line.fields.begin(), line.fields.end(), notFunction),
+                      line.fields.end());
   }
   // A box that has stopped having a sampled function stops needing a row for
   // one. Asked of the box rather than of the caret, so nothing comes and goes
@@ -346,6 +366,15 @@ bool AxisPanel::Sync(const Blocks& blocks) {
                                         return true;
                                       }),
                        line.samples.end());
+  }
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    const NumberLine& line = lines_[i];
+    if (!line.refs.empty() || !line.fields.empty() || !line.samples.empty() || held[i].empty()) {
+      continue;
+    }
+    NumberLine kept = line;
+    kept.refs = held[i];
+    gone_.Keep(std::move(kept));
   }
   lines_.erase(std::remove_if(lines_.begin(), lines_.end(),
                               [](const NumberLine& line) {
@@ -383,6 +412,28 @@ bool AxisPanel::Sync(const Blocks& blocks) {
         if (present) break;
       }
       if (present) continue;
+
+      // A line it was on, taken away for a moment, comes back as it was, with
+      // whichever of its values are back too.
+      {
+        const CodeBlock*  mine = block.get();
+        const std::string name = variable.name;
+        NumberLine        kept;
+        if (gone_.Take(
+                [mine, &name](const NumberLine& line) {
+                  for (const AxisRef& ref : line.refs) {
+                    if (ref.block == mine && ref.name == name) return true;
+                  }
+                  return false;
+                },
+                &kept)) {
+          kept.refs.erase(std::remove_if(kept.refs.begin(), kept.refs.end(), notReal),
+                          kept.refs.end());
+          if (kept.dock == nullptr) kept.dock = block.get();
+          lines_.push_back(std::move(kept));
+          continue;
+        }
+      }
 
       // It joins the axis its box already has rather than starting one of its
       // own. The values in a box are read together, so they belong on one

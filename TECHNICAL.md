@@ -581,6 +581,40 @@ switches; `addsound:`, `sound:`, `gain:` the sounds. `--dev-keys` has `newbox:a|
 
 ---
 
+## Windows that come back (`remembered.h`)
+
+A window's ref is kept while its variable is there **and still the kind the window
+shows**: a number line's points are reals and its fields functions, a plot's
+curves functions. Found by name alone, a `float a` retyped as `bool a` stayed on
+its line.
+
+Each panel's `Sync` takes away the windows whose box has nothing for them -- a
+failed build is the common case -- and used to make fresh ones when the box had
+something again. Now what it takes away goes into a `Remembered<>` of its own
+(sixteen at most), and a window wanted again for the same box -- and, for number
+lines, plots and space windows, the same name -- is taken back out whole. Lines,
+plots and space windows are kept with the refs they held *before* the refs were
+dropped (the drop is what empties them). `Forget` drops whatever names the box
+going, and `Clear` everything, so nothing kept points at a box that is gone. A
+space window comes back with `id` 0, to be given a new one: what the old one had
+on the GPU went with it.
+
+## A bool's checkbox
+
+`BoolDeclaration` (mathprogram.cpp) recognises `bool b;` and `bool b = true|false;`
+(a trailing comment allowed) -- by hand, since `mathline` does not read `bool`, so
+the line stays code. Top-level and inside a function, it becomes a `Kind::Bool`
+variable with one literal behind a float uniform, and the line becomes
+`b = (U != 0.0);`. The value is 0 or 1; unwritten ones are chosen by the name's
+seed, kept across builds and saved as `val`. `CodeBlock::Tickboxes` puts each
+outside the card, left of it, level with its row -- drawn for the canvas, white
+with a dark edge -- and a press on one
+(asked in `App::Update` before the caret or a carry could take it) is `Flip`,
+which is `SetVariableValue` -- whose `WriteLiteral` writes a word back where the
+line had a word.
+
+---
+
 ## Operators
 
 GLSL has no operator overloading, but it has function overloading, so **the
@@ -590,6 +624,10 @@ rewrite needs no types** (`glslops.*`):
     a | b -> ip(a, b)     a & b -> rp(a, b)     a >> b -> sw(a, b)
     a + b -> add(a, b)    a - b -> sub(a, b)    -a -> neg(a)
     a / b -> div(a, b)    x += y -> x = add(x, y), and so on
+
+A compound assignment repeats only **the expression just before it** -- where the
+last whole expression began is noted as it is emitted. It once repeated everything
+since the statement began, so `if (c) s += 1;` became `s = add(if(c)s, 1)`.
 
 The same names exist for GLSL's own types -- `float gp(float, float)`,
 `vec3 add(vec3, float)`, including mixed int/float pairs so nothing is ambiguous --

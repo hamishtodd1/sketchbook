@@ -29,6 +29,7 @@
 #include "dock.h"
 #include "fontstore.h"
 #include "grip.h"
+#include "remembered.h"
 #include "raylib.h"
 #include "types/RealFunctionViz.h"
 #include "types/RealViz.h"
@@ -95,7 +96,7 @@ class SurfacePanel : public Flanking, public Resizable {
 
   // --- persistence --------------------------------------------------------
   const std::vector<SurfaceView>& Views() const { return views_; }
-  void Clear() { views_.clear(); dragging_ = false; orbiting_ = false; }
+  void Clear() { views_.clear(); gone_.Clear(); dragging_ = false; orbiting_ = false; }
   void Adopt(std::vector<SurfaceView> views) { views_ = std::move(views); }
 
   // The grip (grip.h).
@@ -119,6 +120,7 @@ class SurfacePanel : public Flanking, public Resizable {
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
 
   std::vector<SurfaceView>     views_;
+  Remembered<SurfaceView> gone_;   // taken away for now (remembered.h)
   std::vector<const Flanking*> before_;
 
   bool        dragging_ = false;
