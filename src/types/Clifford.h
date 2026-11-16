@@ -107,7 +107,7 @@ std::string TypeLatex(std::string_view name, const Signature& sig);
 std::string AlgebraLatex(const Signature& sig);
 
 // The members of a type, in the order its struct declares them -- `e012`,
-// `e123`, and so on, with `s` for the scalar. Empty if the name is not a type
+// `e123`, and so on, with a bare `e` for the scalar. Empty if the name is not a type
 // of this algebra. What a value of it looks like from outside is exactly this
 // list of floats, which is how one comes back in the trace and how a window
 // reads it.

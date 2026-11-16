@@ -24,6 +24,7 @@ bool Fullscreen();
 // the ones changed by hand rather than from the app: `camera` and `microphone`
 // name the devices a recording uses (capture.h), `none` for neither.
 std::string Value(const std::string& key);
+void        Remember(const std::string& key, const std::string& value);
 void RememberFullscreen(bool on);
 
 // The Claude API key, sealed to this Windows account (secret.h). Empty if none

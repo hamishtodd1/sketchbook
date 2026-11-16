@@ -40,6 +40,8 @@ constexpr float kPlayDrop = 16.0f;
 // the axis's span -- so it sweeps half the row, and stays on it.
 constexpr float kPlaySwing = 0.25f;
 constexpr float kTickEm = 12.0f;
+// How near a notch, in pixels at a zoom of one, a dragged value is pulled onto it.
+constexpr float kNotchPull = 5.0f;
 
 constexpr float kMinSpan = 1e-4f;
 constexpr float kMaxSpan = 1e9f;
@@ -168,7 +170,7 @@ const AxisRef* AxisPanel::NearestAt(std::size_t index, Vector2 point, bool freeO
   const Rectangle   row = RectFor(index, viewport, fonts);
   const float       reach = kGrabRadius * row.height / kRowHeight;
   const auto accept = [&](const VizItem& one) {
-    if (one.sample >= 0) return false;
+    if (one.sample >= 0 || one.pass >= 0) return false;
     const AxisRef ref{one.block, one.name};
     const mathprogram::Variable* variable = Resolve(ref);
     // A derived marker is read-only, so there is nothing there to take hold of
@@ -575,6 +577,9 @@ bool AxisPanel::Sync(const Blocks& blocks) {
     bool ready = true;
     for (const AxisRef& ref : line.refs) {
       const mathprogram::Variable* variable = Resolve(ref);
+      // A function's derived local is known only while it is being read: not a
+      // value to wait for.
+      if (variable != nullptr && variable->local && !variable->free) continue;
       if (variable == nullptr || !variable->known) {
         ready = false;
         break;
@@ -1075,7 +1080,16 @@ bool AxisPanel::HandleInput(const Viewport& viewport, FontStore& fonts, const Bl
           std::vector<float> parts;
           if (VizPane* pane = PaneFor(dragLine_);
               pane != nullptr && pane->TakeDrag(&parts) && !parts.empty()) {
-            dragRef_.block->SetVariableValue(dragRef_.name, parts[0]);
+            // Near a notch it is taken to be the notch -- a round number is
+            // nearly always the one meant. Alt lets go of them.
+            float value = parts[0];
+            const bool alt = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+            const float step = NiceStep(line.span, 6.0f);
+            const float notch = std::round(value / step) * step;
+            const bool  shown = std::abs(notch - line.centre) <= line.span * 0.5f + step * 0.01f;
+            const float apart = std::abs(value - notch) / line.span * area.width;
+            if (!alt && shown && apart < kNotchPull * row.height / kRowHeight) value = notch;
+            dragRef_.block->SetVariableValue(dragRef_.name, value);
           }
         }
         break;
@@ -1333,6 +1347,20 @@ void AxisPanel::Draw(const Viewport& viewport, FontStore& fonts, VizStore& vizes
     pane->Collect();
     if (viz != nullptr) {
       pane->Begin();
+      // **Every pass of a loop**, at the line being read: drawn as the value is,
+      // fainter the earlier, and under the value itself, which is the last.
+      for (const AxisRef& ref : line.refs) {
+        const mathprogram::Variable* variable = Resolve(ref);
+        if (variable == nullptr || !Shown(ref) || variable->passes.size() < 2) continue;
+        const Color       tint = ref.block->VariableColor(ref.name);
+        const std::size_t count = variable->passes.size();
+        for (std::size_t p = 0; p < count; ++p) {
+          const float along = static_cast<float>(p) / static_cast<float>(count - 1);
+          VizItem     item{ref.block, ref.name};
+          item.pass = static_cast<int>(p);
+          pane->Add(item, Fade(tint, 0.2f + 0.5f * along), &variable->passes[p], 1);
+        }
+      }
       for (const AxisRef& ref : line.refs) {
         const mathprogram::Variable* variable = Resolve(ref);
         if (variable == nullptr || !Shown(ref)) continue;

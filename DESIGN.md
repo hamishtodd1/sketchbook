@@ -240,10 +240,10 @@ The readings themselves:
   `r := randChanging()` -- but a constructor is not.
 - **A name that is a word gets a thin space beside it**, so `speed * time` does
   not read as one name. Single letters stay tight.
-- **A comment is for the reader**: a line is read without its trailing `//`
+- **A comment is not mathematics**: a line is read without its trailing `//`
   comment, so `float k = 0.; // 0.5 is flat` is a declaration with a knob like
-  any other, and the comment is set beside the reading in words. A line that is
-  only a comment stays code.
+  any other, and the reading leaves the comment out -- it is in the code. A line
+  that is only a comment stays code.
 - **A Greek letter spelled out is that letter**: `lambda` is λ, `alpha1` is α₁,
   `Omega` is Ω -- the names TeX has, italic in lower case and upright in upper,
   as TeX sets them. A Greek letter is a single letter, so it stays tight too.
@@ -303,7 +303,9 @@ The readings themselves:
 ## 5. Values and knobs
 
 **Free variables get knobs** -- a handle on a number line for a real. That is
-"choosing values" made physical.
+"choosing values" made physical. **A knob dragged near a notch lands on it**,
+since a round number is nearly always the one meant; the pull is a few pixels,
+and only to notches drawn. Alt drags past them.
 
 **A bool is a switch, and its knob is a checkbox beside it** -- outside the box,
 to its left, level with its line: always, in either reading, never in a window of
@@ -349,7 +351,10 @@ scrolls on the right button**, the one window on the canvas that does.
 A variable is mutable, so a window has to answer *when*. **It shows the value at
 the line the box is being read at**: the caret's line while the box is selected,
 otherwise the end. (Not the pointer's line: that made windows flicker as the
-mouse crossed a card.) A hovered declaration shows the number it is *given*.
+mouse crossed a card.) **Except a name being pointed at**, which is read at the
+line it is pointed at -- that one variable, every pass of a loop included, while
+nothing else moves. So a local inside a loop can be looked at without putting the
+caret there. A hovered declaration shows the number it is *given*.
 
 **With a caret in a box, only the variables being written about keep their
 windows** -- those on the caret's line, or those a highlight touches. The rest
@@ -363,10 +368,39 @@ shown at all.
 numbers on lines 2, 9 and 13 has three knobs, and dragging moves the one that
 governs what you are looking at -- the last one at or before the reading line.
 
+**Each function's values are its own.** `s` in `rotate45` and `s` in `unrotate45`
+are two variables, with their own windows, knobs and saved values, as GLSL says --
+and every function may call its argument `p`. Pointing at `s` in one lights up
+only that one. So are two of one name in two blocks of the same function -- a
+`float m` in each branch of an `if`.
+
 **A free real inside a function gets a knob too**: `float k;` is the same abstract
-statement wherever it is written. **A derived one does not**, by decision: inside a
-function it has a different value for every input, so there is no one number for
-a marker to show. What a function does with its input is shown by feeding it.
+statement wherever it is written. **So does the function's argument**: a function
+is read at an example input, chosen as `float x;` would be, and what it works out
+from that is derived like any other value, with markers. Dragging the argument
+moves them all. A `vec2` argument is not a knob but a point on the
+function's Plane window, to drag: **a loupe**, a square of the five by five pixels
+of the picture around it, magnified, with lines between them, so it can be put on
+the pixel you mean -- the middle one is the point's. Its x and y show beside it
+while the pointer is on it. (Feeding a function still shows what it does with every
+input.) **With no caret, a value inside a function shows what it was when the
+function returned** -- or nothing until the caret is in it, with *Values inside
+functions without a caret* unticked in the Escape menu.
+
+**A value worked out in a loop has a value for every pass.** With the caret on a
+line inside a loop, a value's window shows every value it took on there -- a
+real's number line, a multivector's space window, a colour's colour window --
+drawn as the value is but read-only, fainter for earlier passes; its marker is the
+last. A multivector's or colour's passes are kept only if something can draw its
+type -- they are dear to compile, and for nothing where nothing can show them.
+**The passes are that line's**: on a line inside an `if`, only the passes
+that went through it, and every value on the line is from the same pass. Nested loops
+show every pass of both. The Escape menu's *Max loop values to show* (1, 4, 16, 64,
+256; 16 to begin with) caps how many. **A loop with more passes than that is
+sampled across all of them**, not cut off after the first: the ones from the start
+say nothing about how it ends. The sample is the same every time, so dragging a
+knob does not reshuffle it, and its passes are shown in the order they ran. With
+the caret after the loop, or no caret, it shows only what it came to.
 
 ### Closing a control bakes it
 
@@ -441,10 +475,12 @@ is on.
   is let go. A choice re-taken every frame can change its mind mid-gesture.
 - **A name written five times is still one variable, so the wires converge** at a
   junction just clear of the names and run on as one cable.
-- **A picture's wire leaves the pointer**, because there the pointer *is* the
-  value: **the pointer over a picture is the argument of the function it draws**
-  (the `p` of `vec3 ripple(vec2 p)`). It lights up where that argument is written,
-  in that function only, and takes the next colour after the box's variables.
+- **A picture's argument is a point on its plane** (the `p` of
+  `vec3 ripple(vec2 p)`): the example input the function is read at, drawn by
+  `Viz(vec2, "Plane")` as a loupe. Pointing at it lights up where that argument
+  is written, in that function only, and its wire leaves it as one leaves any
+  viz. (The pointer itself used to be the argument; a point you choose and leave
+  is something to read the function's values at.)
 
 **A derived value is the end of a little machine, and pointing at it draws the
 machine.** `d = a + b * c` appears as wires from the windows of `b` and `c` into a
@@ -535,7 +571,7 @@ display window is largely its camera**:
 | function | window | camera |
 | --- | --- | --- |
 | ℝ → ℝ | a curve on a plot, and a field on a number line | none |
-| ℝ² or ℂ → a colour or ℂ | a picture | none: a colour has nowhere to go but its pixel |
+| ℝ² or ℂ → a colour or ℂ | a picture, in the **Plane** window | none: a colour has nowhere to go but its pixel |
 | ℝ² → ℝ | a surface | orthographic, and it turns |
 | ℝ³ → ℝ or ℂ | a volume | perspective, and it turns |
 
@@ -694,9 +730,17 @@ Every operator also has a function spelling -- `gp`, `ip`, `op`, `rp`, `rev`,
   the subscript always shown, even on the scalar part, so the easiest projection
   to miss does not look like no projection. Only grades a type has get a
   selector: asking an `Even` for grade 3 is a mistake, and the types can see it.
+  The scalar part is also a member, **`M.e`** -- the empty product of
+  generators, as `M.e12` is e₁e₂ -- and reads `⟨M⟩₀` the same.
 - **The reverse of a sum wears one long tilde**, drawn at the width of what it
   covers -- a small tilde in the middle of a sum would say it was the reverse of
   one term.
+- **A choice reads as cases**: `c ? a : b` is a brace, *a* if *c*, *b* otherwise,
+  and `c ? a : d ? b : e` is one brace of three rows. The condition reads as
+  mathematics -- `==` is `=`, `!=` `≠`, `<=` `≤`, `>=` `≥` -- and `&&`, `||`, `!`
+  as "and", "or", ¬: in words, since ∧ and ∨ are the algebra's. All of them bind
+  looser than any algebra operator, as in the shader. A value chosen this way is
+  a value like any other, with its window.
 
 How the algebra reads: **it is considered, not named** -- `Cl(3,0,1);` reads
 "Consider Cl_{3,0,1}", and every type names the algebra outright:

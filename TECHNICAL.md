@@ -235,8 +235,8 @@ folding them took `realfunction` from 43.8 ms to 4.5 and `glsl` from 20.4 to 8.7
 - **A box's variables are globals**, declared in the prologue before the
   functions, because GLSL has nowhere to put a nested function and a hoisted
   function cannot see a local. (`realfunction.sketch` failed silently with
-  `undefined variable "a"` until this.) A free variable *inside* a function stays
-  a local of that function, untraced. `vec2 q = vec2(0.5);` -- a line with no
+  `undefined variable "a"` until this.) A variable *inside* a function stays a
+  local of that function, traced in its traced copy (*Reading values back*). `vec2 q = vec2(0.5);` -- a line with no
   mathematical reading -- is passed through and stays a local.
 - **A box's lines appear twice**: hoisted above `main` (functions, padded to one
   line per line) and again inside it. Mapping a driver's line back takes two
@@ -286,6 +286,79 @@ is why the context is 4.3. A slot for a variable **not yet in scope is NaN**, no
 zero, since zero is a value. A read is a stall, so it only happens when something
 it depends on (a knob, a clock) has moved (`ProbeIfNeeded`).
 
+- **A capture goes only where a statement is finished** (`SpotsIn`): after `;`,
+  `{` or `}`, never before an `else`, and **before a `//` comment** on the line
+  (`CommentAt`) -- appended after one, it was commented out, and a line like
+  `float t = ...; // note` was never traced. After `if (c)` a capture would
+  become the body. A line with no capture is read from the last one before it
+  (`mainRow_`, `functionRow_`).
+- **Inside a function**, each function of one argument with a body runs once at
+  its example input, after the body, in pixel 0 of the probe. It runs as **a
+  traced copy**, `sbTraced_f`, emitted after the box's functions: the original
+  draws the picture at every pixel and is left exactly as written (guarding the
+  captures in the original put a branch on every line of every pass of every
+  pixel). Its captures are scoped by brace depth (`ScopeEnd`), so a local of a
+  loop body is not captured after the loop's `}`. A `return` captures before
+  itself, and with no caret a function is read at its last capture
+  (`functionEnd_`). The argument is a knob: a uniform passed by that call; a
+  `vec2` one is `Kind::Point`, two numbers behind a `vec2`. Other boxes are
+  shared the function without it. **A local is named for its function**:
+  after the build's main loop a local's `name` becomes `rotate45:s` (the
+  second `s` declared in it, `rotate45:s#2`) and its `spelled` is `s`, meant
+  from its declaration to the end of its block (`SpelledOn`; an argument, all
+  of its function). `localName` works the name out before it exists, for
+  finding what a knob was set to. Everything
+  that holds a variable -- windows, `val`, `hide`, highlights, the tools -- holds
+  `name`; whatever reads the text asks `CodeBlock::SpelledAt` (what `s` on this
+  line is) or `WrittenOn` (how this one is written on this line). The trace's
+  slots keep the spelling, since they are GLSL. A name under the pointer (`MentionAt`, its
+  row's line) is handed to its box before polling (`SetPeek`), and `ApplyTrace`
+  reads that one variable at that line -- from the trace already read back, so
+  nothing is drawn again.
+- **Every pass of a loop** (`LoopLines`, `StatementEnd`): a line run once per
+  pass gets a counter, `sbPassN`, and writes each in-scope value's numbers (a
+  multivector's or colour's every component), and the counter, into the place
+  `sbPassAt` gives it: reservoir sampling, the first
+  `sbPassCap` passes in order and after that pass c replacing place j if a hash
+  of c, mod c + 1, is j < `sbPassCap`. Hashed so the same passes are kept every
+  run; lines of one loop that run equally often keep the same passes. Read back,
+  they are sorted by the counter. The places are laid one after another, so
+  reading n of them is reading a prefix (`TraceFloats(n)`): the buffer is made
+  for 256, and only what the Escape menu's count shows is read back. The counts
+  are set to nought before each
+  run, so a loop that ran no passes this time shows none. A loop's last line is
+  not a pass line: what follows its closing brace, or its one statement, runs
+  after it.
+- **A value given once is kept once** (`slotOnce_`): a variable written nowhere
+  after its declaration (`Writes`) is stored only on its first capture, and a
+  later row reads it from there. Each row has two more floats, set when the top
+  and when a function ran it (the two write the same rows in different slots),
+  since a row's slots no longer say whether it ran. Its passes come from that
+  line too, so a value set before a loop has none. **In a loop** (`readFrom_`)
+  the once row runs every pass, and a later row might not run with it: so the
+  first row of a block opened after it (where its capture runs at another brace
+  depth), and the first after a `break`, `continue`, `return` or `discard`
+  (`Jumps`), keep it too, and the rows that run whenever that one does read
+  from it -- otherwise a row inside an `if` read `t` from the last pass and
+  everything else from the last pass that went through the `if`. With an `out` or `inout`
+  parameter anywhere, every value is kept on every row. **Lesson**: keeping
+  every value on every line made a 60-line function with a loop 2149 writes,
+  and a cold compile of mum grids' main box went from about 200 ms to 1.1 s; it
+  is now about 300 ms, most of the rest being the traced copy itself. NVIDIA
+  caches compiled shaders on disk, so measure with a source it has not seen.
+  **Lesson**: a pass's numbers go where `sbPassAt` says, an index worked out at
+  run time, and those writes cost the compiler several times what a fixed-index
+  write does: a multivector's passes (and the `if` rows above) took mom grids
+  dS's main box from about 250 ms to about 305 ms, for 16 + 39 writes. So a
+  multivector's or colour's passes are kept only if `Canvas::drawnTypes` (the
+  app's `VizStore::DrawnTypes`, every type with a viz in any window) has its
+  type; `DrawnKey` puts the answer for each of the box's types in its import
+  key, so a viz for a new type rebuilds the boxes that use it.
+- **Lesson**: the hoisted half must have a line for every line of the box. A
+  free `float k;` at the top added a line to `main` and none to the functions,
+  so every function below landed a line early -- diagnostics in them were off by
+  one, and the traced copies came out of the wrong lines.
+
 **`rand`**: GLSL has no state between calls but a global, so `rand()` keeps a hash
 state moved on by each call, seeded by the pixel; `randChanging()` has a second
 state with the frame mixed in, so asking for one never moves the other. When
@@ -310,6 +383,13 @@ alike.
 - **The precedence lives in both halves**: `glslops` (the shader) and `mathline`
   (the LaTeX). `mathline` was once left on C's precedence, so `a + b | c` ran one
   way and read the other. A new operator goes in both.
+- **Choices and conditions** (`NodeKind::Conditional`, `Relational`, `Equality`,
+  `And`, `Or`, `Not`): `glslops` never rewrites a comparison, `&&`, `||`, `!`,
+  `?` or `:` -- they separate the runs it rewrites -- so in `mathline` they sit
+  below `+` with negative precedences, in GLSL's order, and `!` takes a whole
+  sum (`!a | b` is ¬(a·b), as the shader has it). A parent precedence of 0 is
+  "standing alone" and brackets nothing. A choice emits `egin{cases}`, and in
+  the wiring it is one step fed by its two values.
 - **The long tilde** (`~(a + b)`): the fonts draw a tilde at several widths (text,
   Size1..Size4, AMS -- half an em to two and a third). The nearest is chosen, and
   its *stroke* is read off the outline (its middle and thickness at a hundred
@@ -354,6 +434,14 @@ keeps atlases on a size ladder (16/24/32/48/64/96/128 px em) and uses the rung
 nearest the size being drawn. raylib's `fontSize` is a stbtt pixel *height*
 (ascent to descent), not an em, and faces disagree on the ratio, so the store reads
 `head`/`hhea` from each TTF and converts the em it wants into the per-face size.
+
+**A layout at a zoom is not in proportion to the zoom**: rules are held to a
+pixel, delimiters grow in steps, and a glyph without an outline is measured off
+its bitmap. A row is a whole number of dots tall, so a fraction's row sized from
+the layout of the moment jumped a dot as the zoom passed, and every row under it
+flickered. So a code box's rows and width come from a layout made once per line
+at a fixed 64 px em (`LineCache::extentPerEm`, `widthPerEm`), scaled by the zoom.
+The layout at the zoom is only drawn.
 
 ---
 
@@ -573,7 +661,7 @@ nearest the size being drawn. raylib's `fontSize` is a stbtt pixel *height*
   `--playhead` start it somewhere; `render` renders; `campan:`, `camzoom:`, `camfree`,
 `face:`, `facetoggle`, `box:` make keys; `settings`, `tick:`, `block:` work the
 switches; `addsound:`, `sound:`, `gain:` the sounds. `--dev-keys` has `newbox:a|b` (`_` for a
-  space), `drop` (the dev box removed; nothing after it runs) and `pan:dx,dy`, to
+  space), `drop` (the dev box removed; nothing after it runs), `pan:dx,dy` and `zoom:factor,seconds`, to
   make recordings with those in them.
 - **Not yet recorded**: conversations (an undo step holds them by reference),
   what a video was showing, and anything drawn from the real pointer rather than
@@ -871,6 +959,19 @@ editing a viz. After the first run the driver's cache makes a built-in about 2 m
   marker off the end. The line keeps its chrome: ticks, labels, play button,
   off-the-end arrows. A hit test at a point that is not the pointer (a second
   finger) goes by `position` rather than `grab`.
+- **Plane** (`shaderwindow.*`, once called Picture): x and y are the plane's own,
+  `PlaneFrame` maps the window's patch of it to the window's clip space, and the
+  viewport is set to the window as the axis does. It holds one value: the
+  argument of the function it shows (`PointOf`, a `Kind::Point`), one pane per
+  box. A press within reach of it is a drag by the viz's `drag`, which
+  `SetComponentValues` takes; pointing at it, not the bare picture, is what
+  lights the argument up. Its name and x and y are the window's chrome, on a
+  backing, kept inside the window, shown while it is pointed at or held. **The
+  picture is drawn into a texture** the window's size (`pictures_`, at most 4096
+  a side) and then onto the window, so a viz on the plane can read it:
+  `sbPicture`, bottom row first, `sbPictureSize` pixels (`VizFrame::picture`,
+  bound to unit 1 for the draw only). The loupe (22.5 pixels of chrome a side) reads the 5×5 texels around the
+  point's own with `texelFetch`.
 - **Picker / Cube / Cylinder**: the picker's plane, the ring's outer edge at radius
   1; the cube is RGB − 0.5, the cylinder HSV (radius s/2, height v − 0.5).
   Orthographic, from the window's own `Camera2`. Items are sorted far to near by
@@ -881,7 +982,7 @@ editing a viz. After the first run the driver's cache makes a built-in about 2 m
 
 - Named by in and out: `FunctionType` / `FunctionTypeOf` (R, R2, R3, C); windows
   per type in `FunctionWindows`; `sbShape` per window in `ShapeOf` (Axis 0, Plot 1,
-  Picture 2, Surface 3, Volume 4).
+  Plane 2, Surface 3, Volume 4).
 - **Spliced into every box that defines a function of its type**
   (`VizzesSource`, `VizzesMain` in `mathprogram.cpp`). Every function and global
   the window defines is renamed with a `_Type_Dw` suffix (`Rename`; not in
@@ -1142,7 +1243,8 @@ handles sit inside the rim's grab band and clear of the transport.
   they started; the file goes once Ctrl+S names it.
 - **Facts about the user, not a canvas**, live in `%APPDATA%/sketchbook`:
   `recent.txt` (written the moment a canvas opens or saves; missing files left
-  out) and `settings.txt` (fullscreen, written the moment it changes).
+  out) and `settings.txt` (fullscreen, and the Escape menu's `loopvalues` and
+  `functionvalues`, each written the moment it changes).
 - **Always-code** is a canvas record, `alwayscode 1`, written only when ticked and
   applied in `ReadCanvas` (so a new canvas, a load and an undo step all set it).
   It is a static flag on `CodeBlock` (`SetAlwaysCode`), read by `ReadsAsCode`,

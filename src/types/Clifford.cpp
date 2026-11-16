@@ -117,8 +117,9 @@ std::vector<int> BladesOf(Grades grades, const Signature& sig) {
   return blades;
 }
 
-// What a blade is called as a member: the scalar is `s`, everything else is
-// `e` and its generators, ascending.
+// What a blade is called as a member: the scalar is a bare `e`, the empty
+// product of generators, and everything else is `e` and its generators,
+// ascending.
 // **`e0` is the null generator, and only an algebra with one has an e0.** The
 // generators are counted from one, the way everybody counts the axes of a
 // space: Cl(2,2) is e1 e2 e3 e4. A degenerate algebra puts its null generator
@@ -127,7 +128,7 @@ std::vector<int> BladesOf(Grades grades, const Signature& sig) {
 // without it. (With two or more null generators they are e0, e1, ..., and the
 // rest follow on; nothing here uses one, and it has not been thought about.)
 std::string BladeName(const Signature& sig, int blade) {
-  if (blade == 0) return "s";
+  if (blade == 0) return "e";
   const int   first = (sig.r == 0) ? 1 : 0;
   std::string name = "e";
   for (int i = 0; i < 32; ++i) {
@@ -613,7 +614,7 @@ void Generator::EmitGrades(std::ostringstream& out, const Type& type) const {
 
     std::ostringstream body;
     if (resultName == "float") {
-      body << "  return a.s;\n";
+      body << "  return a.e;\n";
     } else {
       body << "  " << resultName << " r;\n";
       for (int blade : BladesOf(one, sig_)) {
@@ -670,8 +671,8 @@ void Generator::EmitScalar(std::ostringstream& out, const Type& type) const {
         const bool mine = (type.grades & (1u << Grade(blade))) != 0;
         body << "  r." << BladeName(sig_, blade) << " = ";
         if (blade == 0 && mine) {
-          body << (side == 0 ? "k " : "a.s ") << (minus ? "- " : "+ ")
-               << (side == 0 ? "a.s" : "k");
+          body << (side == 0 ? "k " : "a.e ") << (minus ? "- " : "+ ")
+               << (side == 0 ? "a.e" : "k");
         } else if (blade == 0) {
           body << (side == 0 ? "k" : (minus ? "-k" : "k"));
         } else if (mine) {

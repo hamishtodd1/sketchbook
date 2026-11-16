@@ -24,6 +24,7 @@
 
 #include <algorithm>
 
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -69,18 +70,22 @@ class ShaderPanel : public Flanking, public Resizable {
   void Forget(const CodeBlock* block);
 
   bool HandleInput(const Viewport& viewport, FontStore& fonts);
-  void Draw(const Viewport& viewport, FontStore& fonts) const;
+  // The picture, and on it the function's argument where it is being read: a
+  // point of the plane, drawn by `Viz(vec2, "Plane")` and dragged by it.
+  void Draw(const Viewport& viewport, FontStore& fonts, VizStore& vizes) const;
+  void ReleaseGpu();
 
   Rectangle DockedBounds(const CodeBlock* block, const Viewport& viewport,
                          FontStore& fonts) const;
 
-  // A picture is a function of the plane, and the pointer over it *is* that
-  // function's argument -- `p` in `vec3 ripple(vec2 p)`. It is reported like
-  // any other variable, and lights up where it is written inside the function.
+  // A picture is a function of the plane, read at a point of it -- its
+  // argument, `p` in `vec3 ripple(vec2 p)` -- which is a dot on it. Pointing at
+  // the dot reports it like any other variable, and it lights up where it is
+  // written inside the function.
   void ActiveVariables(const Viewport& viewport, FontStore& fonts,
                        std::vector<ActiveValue>* out) const;
 
-  bool Dragging() const { return dragging_; }
+  bool Dragging() const { return dragging_ || pointDragging_; }
   // True while a window is actually being carried, which is what brings up the
   // drop target. A press that has not moved yet is not carrying anything.
   bool Carrying() const { return dragging_ && dragMoved_; }
@@ -126,6 +131,10 @@ class ShaderPanel : public Flanking, public Resizable {
 
  private:
   Rectangle RectFor(std::size_t index, const Viewport& viewport, FontStore& fonts) const;
+  // The argument of the function a view shows, if it is a point of the plane.
+  const mathprogram::Variable* PointOf(const ShaderView& view) const;
+  // Where a point of a view's plane is on screen.
+  static Vector2 ScreenOf(const ShaderView& view, Rectangle rect, const float* at);
 
   std::vector<ShaderView>       views_;
   Remembered<ShaderView> gone_;   // taken away for now (remembered.h)
@@ -136,6 +145,20 @@ class ShaderPanel : public Flanking, public Resizable {
   Vector2     dragGrab_{};
   Vector2     dragScreenPos_{};
   bool        dragMoved_ = false;
+
+  // What each picture hands its viz, by box: one view per box. And the picture
+  // itself, drawn into a texture first so its vizes can read it -- the argument
+  // is a loupe on the pixels under it.
+  mutable std::map<const CodeBlock*, VizPane> panes_;
+  struct Picture {
+    RenderTexture2D target{};
+    bool            loaded = false;
+  };
+  mutable std::map<const CodeBlock*, Picture> pictures_;
+  // The argument's dot, held.
+  bool        pointDragging_ = false;
+  std::size_t pointView_ = 0;
+  std::string pointName_;
 };
 
 }  // namespace sb

@@ -494,9 +494,21 @@ class CodeBlock {
   std::vector<Rectangle> MentionsOf(const std::string& name, const Viewport& viewport,
                                     FontStore& fonts) const;
   // The variable whose name is written under this point, or empty -- in
-  // whichever reading that line is showing.
+  // whichever reading that line is showing -- and the line it is written on.
   std::string            MentionAt(Vector2 screenPoint, const Viewport& viewport,
-                                   FontStore& fonts) const;
+                                   FontStore& fonts, int* line = nullptr) const;
+  // What a spelling on a line means: a function's local inside its function --
+  // `s` in `rotate45` is `rotate45:s` -- and otherwise the box's own.
+  const mathprogram::Variable* SpelledAt(const std::string& written, int line) const;
+  // And back: how the variable `name` is written on a line, or empty where that
+  // spelling means something else.
+  std::string            WrittenOn(const std::string& name, int line) const;
+  // The name pointed at, read at the line it is pointed at while the rest of the
+  // box is read where it always is. Set every frame; empty for none.
+  void SetPeek(const std::string& name, int line) {
+    peekName_ = name;
+    peekLine_ = line;
+  }
   mathline::Flow         FlowFor(const std::string& name) const;
 
   // Every variable in this box has a colour of its own, taken from where it
@@ -632,6 +644,13 @@ class CodeBlock {
   // own toggle says, with no injected values, and the toggle is not offered.
   // Prose is words either way.
   static void SetAlwaysCode(bool on) { alwaysCode_ = on; }
+  // How many of a loop's passes a value shows, and whether a value inside a
+  // function shows with no caret in the box (its value at the return). The
+  // person's, from the Escape menu.
+  static void SetLoopValues(int count) { loopValues_ = count; }
+  static int  LoopValues() { return loopValues_; }
+  static void SetFunctionValuesWithoutCaret(bool on) { functionValuesWithoutCaret_ = on; }
+  static bool FunctionValuesWithoutCaret() { return functionValuesWithoutCaret_; }
   static bool AlwaysCode() { return alwaysCode_; }
   bool    ShowSource() const { return showSource_; }
   void    SetShowSource(bool value) { showSource_ = value; }
@@ -667,6 +686,12 @@ class CodeBlock {
     tex::Parsed    tex;
     float          emPx = -1.0f;
     tex::Layout    layout;
+    // The reading's size per em, laid out once at a fixed size: what the row is
+    // sized by. A layout at the zoom of the moment is not quite in proportion
+    // (rules held to a pixel, delimiters in steps), and a row sized by it jumped
+    // a dot as the zoom passed, taking every row under it along.
+    float          extentPerEm = 0.0f;
+    float          widthPerEm = 0.0f;
 
     // Prose only: the line broken to the measure. The pieces partition the
     // line, so `begin` plus the piece's length is the next piece's `begin` and
@@ -827,6 +852,10 @@ class CodeBlock {
   // as mathematics while still being editable line by line.
   Reading reading_ = Reading::Auto;
   static inline bool alwaysCode_ = false;
+  static inline int  loopValues_ = 16;
+  static inline bool functionValuesWithoutCaret_ = true;
+  std::string peekName_;   // SetPeek
+  int         peekLine_ = -1;
   bool   absorbed_ = false;
   bool   selected_ = false;
   std::vector<std::string> hidden_;
@@ -957,6 +986,7 @@ class CodeBlock {
   // One shader, three modes: it draws the picture, reports the values, and
   // draws the box's functions. These say which, and with what.
   int                                   modeLoc_ = -1;
+  int                                   passCapLoc_ = -1;
   int                                   rangeLoc_ = -1;
   int                                   verticalLoc_ = -1;
   int                                   indexLoc_ = -1;

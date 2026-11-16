@@ -6,6 +6,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <string_view>
 #include <unordered_map>
 
@@ -528,8 +530,9 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
                            const std::string& seed,
                            const std::vector<std::string>& functionNames,
                            const std::vector<Function>& defined, bool complex, bool colour,
-                           const Canvas& canvas, const std::string& taken, int* lines,
-                           int* functionsAt, int* sharedAt) {
+                           const Canvas& canvas, const std::string& taken,
+                           const std::string& traceGlobals, int* lines, int* functionsAt,
+                           int* sharedAt) {
   // One shader, three modes. A box used to build three -- one to draw its
   // picture, one to report its values, one to draw its functions -- from the
   // same lines with different ends. They are the same shader with a uniform
@@ -580,6 +583,9 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
       "  sbRandChangingState = sbHash(sbRandChangingState);\n"
       "  return float(sbRandChangingState >> 8u) / 16777216.0;\n"
       "}\n" + vizglsl::ExampleRandom();
+  // Which function is running at its example input, if any, and how far each
+  // loop's lines have got.
+  out += traceGlobals;
   // Feeding a function: the spread of inputs goes in, the answers come out. Two
   // buffers rather than a pixel each, because an answer is a whole multivector
   // as readily as it is one number.
@@ -599,7 +605,8 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
   // over; what a knob moves is whichever literal governs the line being read.
   for (const Variable& variable : variables) {
     if (variable.kind != Kind::Real && variable.kind != Kind::Color &&
-        variable.kind != Kind::Multivector && variable.kind != Kind::Bool) {
+        variable.kind != Kind::Multivector && variable.kind != Kind::Bool &&
+        variable.kind != Kind::Point) {
       continue;
     }
     for (const Literal& literal : variable.literals) {
@@ -608,7 +615,9 @@ std::string ShaderPrologue(const std::vector<Variable>& variables,
                std::to_string(literal.components.size()) + "];\n";
         continue;
       }
-      out += std::string(variable.kind == Kind::Color ? "uniform vec3 " : "uniform float ") +
+      out += std::string(variable.kind == Kind::Color   ? "uniform vec3 "
+                         : variable.kind == Kind::Point ? "uniform vec2 "
+                                                        : "uniform float ") +
              literal.uniform + ";\n";
     }
   }
@@ -695,17 +704,281 @@ const char* const kVertexShader =
     "  gl_Position = mvp * vec4(vertexPosition, 1.0);\n"
     "}\n";
 
+// --- where a capture can go ---------------------------------------------------
+//
+// The trace rides on the ends of the box's own lines, and a line is not always
+// the end of a statement: after `if (c)` or `for (...)` a capture would become
+// the body, and between a `}` and an `else` it would part them. So each line is
+// asked what it ends, and a capture goes only where a statement is finished.
+struct LineShape {
+  std::string code;              // without its comments, trimmed
+  int         depthBefore = 0;   // braces open as the line starts
+  int         depthLow = 0;      // the fewest open anywhere on it
+};
+
+std::vector<std::string> SplitLines(const std::string& text, int count) {
+  std::vector<std::string> out;
+  std::size_t              from = 0;
+  while (from < text.size()) {
+    const std::size_t end = text.find('\n', from);
+    out.push_back(text.substr(from, (end == std::string::npos ? text.size() : end) - from));
+    if (end == std::string::npos) break;
+    from = end + 1;
+  }
+  if (static_cast<int>(out.size()) < count) out.resize(static_cast<std::size_t>(count));
+  return out;
+}
+
+std::vector<LineShape> ShapesOf(const std::vector<std::string>& lines) {
+  std::vector<LineShape> out(lines.size());
+  bool block = false;   // inside a /* comment */
+  int  depth = 0;
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    const std::string& raw = lines[i];
+    std::string        code;
+    for (std::size_t k = 0; k < raw.size(); ++k) {
+      if (block) {
+        if (raw.compare(k, 2, "*/") == 0) { block = false; ++k; }
+        continue;
+      }
+      if (raw.compare(k, 2, "//") == 0) break;
+      if (raw.compare(k, 2, "/*") == 0) { block = true; ++k; continue; }
+      code += raw[k];
+    }
+    const std::size_t first = code.find_first_not_of(" \t\r");
+    const std::size_t last = code.find_last_not_of(" \t\r");
+    out[i].code = first == std::string::npos ? std::string() : code.substr(first, last - first + 1);
+    out[i].depthBefore = depth;
+    int low = depth;
+    for (const char c : out[i].code) {
+      if (c == '{') ++depth;
+      if (c == '}') low = std::min(low, --depth);
+    }
+    out[i].depthLow = low;
+  }
+  return out;
+}
+
+bool StartsWithWord(const std::string& code, const char* word) {
+  const std::size_t n = std::strlen(word);
+  if (code.compare(0, n, word) != 0) return false;
+  return code.size() == n ||
+         (std::isalnum(static_cast<unsigned char>(code[n])) == 0 && code[n] != '_');
+}
+
+// Where, among lines first..last, a capture may follow a line (`after`) or, on a
+// `return`, come before it (`before`).
+struct Spots {
+  std::vector<char> after, before;
+};
+
+Spots SpotsIn(const std::vector<LineShape>& shapes, int first, int last) {
+  Spots spots;
+  spots.after.assign(shapes.size(), 0);
+  spots.before.assign(shapes.size(), 0);
+  const auto finished = [](char c) { return c == ';' || c == '{' || c == '}'; };
+  char open = ';';   // the start of a region is between statements
+  for (int k = first; k <= last; ++k) {
+    const std::string& code = shapes[static_cast<std::size_t>(k)].code;
+    const bool         between = finished(open);
+    if (!code.empty()) open = code.back();
+    std::string next;
+    for (int j = k + 1; j <= last; ++j) {
+      if (!shapes[static_cast<std::size_t>(j)].code.empty()) {
+        next = shapes[static_cast<std::size_t>(j)].code;
+        break;
+      }
+    }
+    // `} else` and `} while (...)` are one statement across the break.
+    const bool joined = StartsWithWord(next, "else") ||
+                        (open == '}' && StartsWithWord(next, "while"));
+    spots.after[static_cast<std::size_t>(k)] = finished(open) && !joined;
+    spots.before[static_cast<std::size_t>(k)] = between && StartsWithWord(code, "return");
+  }
+  return spots;
+}
+
+// Where a `//` comment starts on a line, or npos.
+std::size_t CommentAt(const std::string& line) {
+  bool block = false;
+  for (std::size_t k = 0; k + 1 < line.size(); ++k) {
+    if (block) {
+      if (line.compare(k, 2, "*/") == 0) { block = false; ++k; }
+      continue;
+    }
+    if (line.compare(k, 2, "/*") == 0) { block = true; ++k; continue; }
+    if (line.compare(k, 2, "//") == 0) return k;
+  }
+  return std::string::npos;
+}
+
+// Renames the first whole-word `from` in `line`.
+bool RenameFirst(std::string* line, const std::string& from, const std::string& to) {
+  const auto word = [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+  };
+  for (std::size_t at = line->find(from); at != std::string::npos; at = line->find(from, at + 1)) {
+    const std::size_t after = at + from.size();
+    if ((at == 0 || !word((*line)[at - 1])) && (after >= line->size() || !word((*line)[after]))) {
+      line->replace(at, from.size(), to);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Whether a line can leave its block early: `break`, `continue`, `return` or
+// `discard`, as a word.
+bool Jumps(const std::string& code) {
+  const auto word = [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+  };
+  for (const std::string jump : {"break", "continue", "return", "discard"}) {
+    for (std::size_t at = code.find(jump); at != std::string::npos;
+         at = code.find(jump, at + 1)) {
+      const std::size_t after = at + jump.size();
+      if ((at == 0 || !word(code[at - 1])) && (after >= code.size() || !word(code[after]))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Whether a line of code could change `name`: an assignment to it or to a part
+// of it (`=`, `+=`, ..., `p.x =`, `a[i] =`), or `++` or `--` either side.
+bool Writes(const std::string& line, const std::string& name) {
+  const auto word = [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+  };
+  const std::string code = line.substr(0, CommentAt(line));
+  for (std::size_t at = code.find(name); at != std::string::npos; at = code.find(name, at + 1)) {
+    std::size_t after = at + name.size();
+    if (at > 0 && (word(code[at - 1]) || code[at - 1] == '.')) continue;
+    if (after < code.size() && word(code[after])) continue;
+    std::size_t before = at;
+    while (before > 0 && code[before - 1] == ' ') --before;
+    if (before >= 2 && (code.compare(before - 2, 2, "++") == 0 || code.compare(before - 2, 2, "--") == 0)) {
+      return true;
+    }
+    // Past any parts of it: `.e12`, `[i]`.
+    for (;;) {
+      while (after < code.size() && code[after] == ' ') ++after;
+      if (after < code.size() && code[after] == '.') {
+        ++after;
+        while (after < code.size() && word(code[after])) ++after;
+      } else if (after < code.size() && code[after] == '[') {
+        const std::size_t close = code.find(']', after);
+        if (close == std::string::npos) break;
+        after = close + 1;
+      } else {
+        break;
+      }
+    }
+    const std::string rest = code.substr(after, 3);
+    if (rest.rfind("++", 0) == 0 || rest.rfind("--", 0) == 0) return true;
+    if (!rest.empty() && rest[0] == '=' && (rest.size() < 2 || rest[1] != '=')) return true;
+    if (rest.size() >= 2 && rest[1] == '=' && std::strchr("+-*/%&|^", rest[0]) != nullptr) return true;
+    if (rest == "<<=" || rest == ">>=") return true;
+  }
+  return false;
+}
+
+// The last line of the statement that starts on line `k`.
+int StatementEnd(const std::vector<LineShape>& shapes, int k, int last) {
+  const auto nextCode = [&](int from) {
+    for (int j = from; j <= last; ++j) {
+      if (!shapes[static_cast<std::size_t>(j)].code.empty()) return j;
+    }
+    return last;
+  };
+  const auto closes = [&](int from, int depth) {
+    for (int j = from; j <= last; ++j) {
+      if (shapes[static_cast<std::size_t>(j)].depthLow <= depth) return j;
+    }
+    return last;
+  };
+  k = nextCode(k);
+  const LineShape& shape = shapes[static_cast<std::size_t>(k)];
+  const std::string& code = shape.code;
+  int end = k;
+  if (!code.empty() && code.back() == ')' &&
+      (StartsWithWord(code, "for") || StartsWithWord(code, "while") ||
+       StartsWithWord(code, "if") || StartsWithWord(code, "else"))) {
+    // A header whose body is the next statement.
+    end = StatementEnd(shapes, k + 1, last);
+  } else if (code == "else" ) {
+    end = StatementEnd(shapes, k + 1, last);
+  } else {
+    int depth = shape.depthBefore;
+    for (const char c : code) depth += (c == '{') - (c == '}');
+    if (depth > shape.depthBefore) {
+      end = closes(k + 1, shape.depthBefore);
+    } else if (!code.empty() && code.back() != ';' && code.back() != '}') {
+      // A statement carried over several lines.
+      for (end = k + 1; end < last; ++end) {
+        const std::string& more = shapes[static_cast<std::size_t>(end)].code;
+        if (!more.empty() && more.back() == ';') break;
+      }
+    }
+  }
+  // An `if`'s statement goes on through its `else`.
+  if (StartsWithWord(code, "if") || StartsWithWord(code, "else")) {
+    const std::string& tail = shapes[static_cast<std::size_t>(end)].code;
+    if (tail.size() > 1 && tail.back() == '{' && tail.find("else") != std::string::npos) {
+      end = closes(end + 1, shapes[static_cast<std::size_t>(end)].depthLow);
+    }
+    const int after = nextCode(end + 1);
+    if (after > end && StartsWithWord(shapes[static_cast<std::size_t>(after)].code, "else")) {
+      end = StatementEnd(shapes, after, last);
+    }
+  }
+  return std::min(end, last);
+}
+
+// Which of lines first..last run once per pass of a loop -- where a capture
+// following them is still inside it. A loop's last line is not: what follows
+// its closing brace, or its one statement, runs after it.
+std::vector<char> LoopLines(const std::vector<LineShape>& shapes, int first, int last) {
+  std::vector<char> in(shapes.size(), 0);
+  for (int h = first; h <= last; ++h) {
+    const std::string& code = shapes[static_cast<std::size_t>(h)].code;
+    if (!StartsWithWord(code, "for") && !StartsWithWord(code, "while")) continue;
+    // `} while (c);` closes a `do`, and is not a loop of its own.
+    if (!code.empty() && code.back() == ';' && code.find('{') == std::string::npos &&
+        StartsWithWord(code, "while")) {
+      continue;
+    }
+    const int end = StatementEnd(shapes, h, last);
+    if (end == h) continue;
+    if (code.back() == '{') in[static_cast<std::size_t>(h)] = 1;
+    for (int k = h + 1; k < end; ++k) in[static_cast<std::size_t>(k)] = 1;
+  }
+  return in;
+}
+
+// A declaration's last line in scope: the line before the one whose brace
+// closes the block it is in.
+int ScopeEnd(const std::vector<LineShape>& shapes, int declared, int last) {
+  const int depth = shapes[static_cast<std::size_t>(declared)].depthBefore;
+  for (int j = declared + 1; j <= last; ++j) {
+    if (shapes[static_cast<std::size_t>(j)].depthLow < depth) return j - 1;
+  }
+  return last;
+}
+
 std::string ProbeEpilogue(const std::vector<std::string>& probed,
                           const std::vector<Function>& defined,
-                          const clifford::Signature& sig) {
+                          const clifford::Signature& sig, const std::string& traced) {
   // Feeding a function comes *after* the body, unlike drawing one. It runs once
   // per change over a couple of hundred fragments rather than per pixel per
   // frame, so it can afford to be exact -- which means a function may read
   // anything the box computed, not only what its variables were declared with.
   std::string out = SampleDispatch(defined, sig);
-  out +=
-      "  if (sbMode != 1) return;\n"
-      "  float sbValue = 0.0;\n  int sbWhich = int(gl_FragCoord.x);\n";
+  out += "  if (sbMode != 1) return;\n";
+  // Each function's traced copy, run once at its example input.
+  if (!traced.empty()) out += "  if (int(gl_FragCoord.x) == 0) {" + traced + " }\n";
+  out += "  float sbValue = 0.0;\n  int sbWhich = int(gl_FragCoord.x);\n";
   for (std::size_t i = 0; i < probed.size(); ++i) {
     out += "  if (sbWhich == " + std::to_string(i) + ") sbValue = " + probed[i] + ";\n";
   }
@@ -914,6 +1187,14 @@ Canvas Gather(const std::vector<const Program*>& programs) {
   return canvas;
 }
 
+std::string Program::DrawnKey(const Canvas& canvas) const {
+  std::string key;
+  for (const std::string& type : passTypes_) {
+    key += type + (canvas.drawnTypes.count(type) != 0 ? "+;" : "-;");
+  }
+  return key;
+}
+
 std::string Program::ExampleKey(const Canvas& canvas) const {
   if (!writesExample_) return {};
   const std::string type = vizType_.substr(0, vizType_.find('@'));
@@ -927,7 +1208,7 @@ bool Program::ImportsStale(const Canvas& canvas) const {
   const Taken taken = Take(canvas, wanted_, this, ownNames_);
   return KeyOf(canvas, taken, definedNames_, saysAlgebra_,
                DerivedElsewhere(canvas, wanted_, this)) + VizzesKey(functions_, canvas, importedSource_) +
-             ExampleKey(canvas) !=
+             ExampleKey(canvas) + DrawnKey(canvas) !=
          importKey_;
 }
 
@@ -1018,7 +1299,9 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   std::unordered_map<std::string, std::vector<float>> previousColour;
   for (const Variable& variable : variables_) {
     if (variable.free) previous.emplace(variable.name, variable.value);
-    if (variable.free && (variable.kind == Kind::Color || variable.kind == Kind::Multivector) &&
+    if (variable.free &&
+        (variable.kind == Kind::Color || variable.kind == Kind::Multivector ||
+         variable.kind == Kind::Point) &&
         !variable.literals.empty()) {
       previousColour.emplace(variable.name, variable.literals.front().components);
     }
@@ -1187,6 +1470,7 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
       std::map<std::string, std::string> renames;
       std::vector<Variable>              knobs;
       const std::vector<std::pair<int, int>> fnSpans = vizglsl::FunctionSpans(lines);
+      const std::vector<std::string>         fnNames = vizglsl::FunctionNames(lines);
       for (std::size_t i = 0; i < lines.size(); ++i) {
         const std::string&   raw = lines[i];
         const mathline::Line line = mathline::Parse(raw, signature);
@@ -1200,10 +1484,23 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
         }
         const int at = static_cast<int>(i);
         bool      inside = false;
-        for (const auto& [first, last] : fnSpans) inside = inside || (at > first && at <= last);
-        Variable variable;
-        variable.declaredLine = at;
+        Variable  variable;
         variable.name = line.name;
+        for (std::size_t k = 0; k < fnSpans.size() && k < fnNames.size(); ++k) {
+          if (inside || at <= fnSpans[k].first || at > fnSpans[k].second) continue;
+          // Named for its function, as a local anywhere is.
+          inside = true;
+          int before = 0;
+          for (const Variable& knob : knobs) {
+            if (knob.Spelled() == line.name && knob.declaredLine > fnSpans[k].first) ++before;
+          }
+          variable.spelled = line.name;
+          variable.name = fnNames[k] + ":" + line.name +
+                          (before == 0 ? "" : "#" + std::to_string(before + 1));
+          variable.spelledFrom = at;
+          variable.spelledTo = ScopeEnd(ShapesOf(lines), at, fnSpans[k].second);
+        }
+        variable.declaredLine = at;
         variable.type = line.type;
         variable.latexName = mathline::NameToLatex(line.name);
         variable.kind = Kind::Real;
@@ -1214,12 +1511,12 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
         bool kept = typedNumber;
         variable.value = typed;
         if (!kept) {
-          if (auto was = previous.find(line.name); was != previous.end()) {
+          if (auto was = previous.find(variable.name); was != previous.end()) {
             variable.value = was->second;
             kept = true;
           } else {
             for (const auto& [name, value] : restore_) {
-              if (name == line.name) { variable.value = value; kept = true; break; }
+              if (name == variable.name) { variable.value = value; kept = true; break; }
             }
           }
         }
@@ -1389,18 +1686,25 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
     std::string owner;
     int         component = -1;   // -1 for a real
     int         line = 0;
+    int         variable = -1;    // its place among the variables
+    int         function = -1;    // the function it is a local of, or -1
+    int         scopeEnd = std::numeric_limits<int>::max();
   };
   std::vector<Slot> liveFrom;
-  // Every component of a multivector, since one is not a number.
-  const auto addSlots = [&](const Variable& variable, int at) {
+  // Every component of a multivector, since one is not a number. Called just
+  // after the variable is added.
+  const auto addSlots = [&](const Variable& variable, int at, int function = -1) {
+    const int index = static_cast<int>(variables.size()) - 1;
+    const int scope = variable.scopeEnd < 0 ? std::numeric_limits<int>::max() : variable.scopeEnd;
     if (variable.kind == Kind::Real) {
-      liveFrom.push_back({variable.name, variable.name, -1, at});
+      liveFrom.push_back({variable.name, variable.name, -1, at, index, function, scope});
       return;
     }
     if (variable.kind == Kind::Color) {
       const char* const parts[] = {"r", "g", "b"};
       for (int i = 0; i < 3; ++i) {
-        liveFrom.push_back({variable.name + "." + parts[i], variable.name, i, at});
+        liveFrom.push_back(
+            {variable.name + "." + parts[i], variable.name, i, at, index, function, scope});
       }
       return;
     }
@@ -1408,9 +1712,13 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
     const std::vector<std::string> members = clifford::MemberNames(variable.type, signature);
     for (std::size_t i = 0; i < members.size(); ++i) {
       liveFrom.push_back({variable.name + "." + members[i], variable.name,
-                          static_cast<int>(i), at});
+                          static_cast<int>(i), at, index, function, scope});
     }
   };
+  // How the box's lines nest, for where a local stops being in scope.
+  const std::vector<LineShape> nesting = ShapesOf(lines);
+  // Each function with a body, run at its example input: the call that does it.
+  std::vector<std::pair<int, std::string>> exampleCalls;
   int lineIndex = 0;
   // A knob's uniform is named for its variable, its line and its box. The box,
   // because a function shared from one box is compiled into another, and two
@@ -1429,19 +1737,30 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   // function -- it is not one of the box's globals -- and nothing traces it,
   // since the one number it can be is the number its knob chose.
   //
-  // A *derived* one is different, and deliberately left without a window:
-  // `float m = sqrt(ip);` inside a function has a different value for every
-  // input the function is called with, so there is no one number for a marker
-  // to show.
-  const auto chosenBool = [&](const std::string& named) -> float {
-    if (auto was = previous.find(named); was != previous.end()) return was->second;
+  // **A derived one is traced**, at the function's example input: its argument
+  // is a knob too, and what the function works out from it has markers like
+  // any derived value.
+  const auto chosenBool = [&](const std::string& named, const std::string& key) -> float {
+    if (auto was = previous.find(key); was != previous.end()) return was->second;
     for (const auto& [name, value] : restore_) {
-      if (name == named) return value;
+      if (name == key) return value;
     }
     return (types::NameSeed(named) & 1u) != 0u ? 1.0f : 0.0f;
   };
+  // What a local is called (below the main loop), worked out before it is made
+  // so that what it was set to can be found: `f:m`, and `f:m#2` for the second
+  // `m` declared in `f`, which is another variable in another block.
+  const auto localName = [&](const std::string& within, int from, const std::string& name) {
+    int before = 0;
+    for (const Variable& variable : variables) {
+      if (variable.local && variable.name == name && variable.declaredLine >= from) ++before;
+    }
+    return within + ":" + name + (before == 0 ? "" : "#" + std::to_string(before + 1));
+  };
+  // `within` is the function's name, and `from` its first line: a local is kept
+  // and saved under its function's name too.
   const auto knobInside = [&](const std::string& raw, const mathline::Line& line, int thisLine,
-                              std::string* written) {
+                              const std::string& within, int from, std::string* written) {
     // A bool's checkbox, as one at the top has (BoolDeclaration).
     if (std::string named; true) {
       bool typedBool = false, given = false;
@@ -1456,7 +1775,7 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
         variable.local = true;
         variable.known = true;
         variable.written = typedBool;
-        variable.value = typedBool ? (given ? 1.0f : 0.0f) : chosenBool(named);
+        variable.value = typedBool ? (given ? 1.0f : 0.0f) : chosenBool(named, localName(within, from, named));
         Literal literal;
         literal.line = thisLine;
         literal.uniform = uniformFor(named, thisLine);
@@ -1491,13 +1810,14 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
       variable.example = typedHere;
       variable.value = typedHere;
     } else {
-      bool kept = false;
-      if (auto was = previous.find(line.name); was != previous.end()) {
+      bool              kept = false;
+      const std::string key = localName(within, from, line.name);
+      if (auto was = previous.find(key); was != previous.end()) {
         variable.value = was->second;
         kept = true;
       } else {
         for (const auto& [name, value] : restore_) {
-          if (name == line.name) { variable.value = value; kept = true; break; }
+          if (name == key) { variable.value = value; kept = true; break; }
         }
       }
       if (!kept) variable.value = chosenReal(line.name);
@@ -1539,7 +1859,8 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
     if (const int other = otherAt(thisLine); other >= 0) {
       std::string written = raw;
       if (thisLine != otherSpans[static_cast<std::size_t>(other)].first) {
-        knobInside(raw, line, thisLine, &written);
+        knobInside(raw, line, thisLine, otherNames[static_cast<std::size_t>(other)],
+                   otherSpans[static_cast<std::size_t>(other)].first, &written);
       }
       hoisted[static_cast<std::size_t>(thisLine)] = written;
       shaderFunctions += written + "\n";
@@ -1604,10 +1925,149 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
           written = WidenedReturns(written, found.head.returnType);
         }
 
-        if (thisLine != found.first) knobInside(raw, line, thisLine, &written);
+        const std::size_t had = variables.size();
+        if (thisLine != found.first) {
+          knobInside(raw, line, thisLine, found.head.name, found.first, &written);
+        }
+        if (variables.size() > had) {
+          variables.back().scopeEnd = ScopeEnd(nesting, thisLine, found.last);
+          // A knob's real is traced too, as one at the top is: the lines after
+          // it can assign over it.
+          if (shares && variables.back().kind == Kind::Real) {
+            addSlots(variables.back(), thisLine, span);
+          }
+        }
         hoisted[static_cast<std::size_t>(thisLine)] =
             thisLine == found.first ? GlslSignature(raw, found.head) : written;
         shaderFunctions += hoisted[static_cast<std::size_t>(thisLine)] + "\n";
+
+        if (shares && thisLine == found.first && !found.head.paramName.empty()) {
+          // **The argument is a knob**: the function is read at an example input,
+          // chosen as `float x;` would be, and everything it works out is worked
+          // out from that. Run once, after the body, by the call made here.
+          const std::string& type = found.head.paramType;
+          const std::string& name = found.head.paramName;
+          const std::string  keptAs = found.head.name + ":" + name;
+          const std::string  glslType = mathline::GlslTypeName(type);
+          Variable variable;
+          variable.declaredLine = thisLine;
+          variable.name = name;
+          variable.type = type;
+          variable.latexName = mathline::NameToLatex(name);
+          variable.free = true;
+          variable.local = true;
+          variable.argument = true;
+          variable.known = true;
+          variable.scopeEnd = found.last - 1;
+          Literal literal;
+          literal.line = thisLine;
+          literal.uniform = uniformFor(name, thisLine);
+          std::string given;   // the argument, as the call passes it
+          bool        knob = true;
+          if (mathline::IsMultivectorType(type, signature)) {
+            variable.kind = Kind::Multivector;
+            const std::vector<std::string> members = clifford::MemberNames(type, signature);
+            std::vector<float> parts = clifford::ExampleComponents(type, name, signature);
+            bool saved = false;
+            for (const auto& [named, value] : restore_) {
+              saved = saved || named.rfind(keptAs + ".", 0) == 0;
+            }
+            if (auto was = previousColour.find(keptAs);
+                was != previousColour.end() && was->second.size() == parts.size()) {
+              parts = was->second;
+            } else if (!saved && chosen(type, name, parts.size(), &parts)) {
+              // Its viz chose it.
+            } else if (members.size() == parts.size()) {
+              for (std::size_t i = 0; i < members.size(); ++i) {
+                for (const auto& [named, value] : restore_) {
+                  if (named == keptAs + "." + members[i]) parts[i] = value;
+                }
+              }
+            }
+            literal.components = parts;
+            literal.array = true;
+            variable.components = parts;
+            given = type + "(";
+            for (std::size_t i = 0; i < parts.size(); ++i) {
+              given += (i == 0 ? "" : ", ") + literal.uniform + "[" + std::to_string(i) + "]";
+            }
+            given += ")";
+          } else if (glslType == "float") {
+            variable.kind = Kind::Real;
+            bool kept = false;
+            if (auto was = previous.find(keptAs); was != previous.end()) {
+              variable.value = was->second;
+              kept = true;
+            } else {
+              for (const auto& [named, value] : restore_) {
+                if (named == keptAs) { variable.value = value; kept = true; break; }
+              }
+            }
+            if (!kept) variable.value = chosenReal(name);
+            variable.example = variable.value;
+            literal.value = variable.value;
+            given = literal.uniform;
+          } else if (glslType == "vec2" && !mathline::IsColorType(type)) {
+            // **A point of the plane**, two numbers behind one vec2: kept, else
+            // saved, else chosen by its viz's `example`.
+            variable.kind = Kind::Point;
+            std::vector<float> xy = {types::ExampleReal(name + ".x"),
+                                     types::ExampleReal(name + ".y")};
+            bool saved = false;
+            for (const auto& [named, value] : restore_) {
+              saved = saved || named == keptAs + ".x" || named == keptAs + ".y";
+            }
+            if (auto was = previousColour.find(keptAs);
+                was != previousColour.end() && was->second.size() == 2) {
+              xy = was->second;
+            } else if (!saved && chosen("vec2", name, 2, &xy)) {
+              // Its viz chose it.
+            } else {
+              for (const auto& [named, value] : restore_) {
+                if (named == keptAs + ".x") xy[0] = value;
+                if (named == keptAs + ".y") xy[1] = value;
+              }
+            }
+            literal.components = xy;
+            variable.components = xy;
+            given = literal.uniform;
+          } else if (glslType == "vec3" && !mathline::IsColorType(type)) {
+            // A point of space: chosen, with no knob of its own yet.
+            knob = false;
+            const char* const axes[] = {"x", "y", "z"};
+            given = glslType + "(";
+            for (int i = 0; i < 3; ++i) {
+              given += (i == 0 ? "" : ", ") + std::to_string(types::ExampleReal(name + "." + axes[i]));
+            }
+            given += ")";
+          } else {
+            knob = false;
+          }
+          if (knob) {
+            variable.literals.push_back(literal);
+            variables.push_back(variable);
+          }
+          if (!given.empty()) exampleCalls.emplace_back(span, found.head.name + "(" + given + ")");
+        } else if (shares && thisLine != found.first && variables.size() == had &&
+                   line.kind == mathline::Kind::Declaration && line.hasInitialiser) {
+          // **A value worked out inside a function is derived like any other**,
+          // from the example input, and is traced while the function runs at it.
+          const bool multivector = mathline::IsMultivectorType(line.type, signature);
+          const bool colourType = mathline::IsColorType(line.type);
+          if (multivector || colourType || mathline::GlslTypeName(line.type) == "float") {
+            Variable variable;
+            variable.declaredLine = thisLine;
+            variable.name = line.name;
+            variable.type = line.type;
+            variable.latexName = mathline::NameToLatex(line.name);
+            variable.kind = multivector ? Kind::Multivector : colourType ? Kind::Color : Kind::Real;
+            variable.free = false;
+            variable.local = true;
+            variable.scopeEnd = ScopeEnd(nesting, thisLine, found.last);
+            variables.push_back(variable);
+            addSlots(variables.back(), thisLine, span);
+          }
+        }
       }
       shaderBody += "\n";
 
@@ -1753,6 +2213,9 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
       shaderBody +=
           "  " + std::string(ordinary ? "" : "float ") + line.name + " = " + injected.uniform +
           ";\n";
+      // A blank in the hoisted half too, or every function below lands a line
+      // early and a diagnostic in one is reported on the wrong line.
+      shaderFunctions += "\n";
       ++freeIndex;
       continue;
     }
@@ -1776,7 +2239,7 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
         variable.free = true;
         variable.known = true;
         variable.written = typedBool;
-        variable.value = typedBool ? (given ? 1.0f : 0.0f) : chosenBool(named);
+        variable.value = typedBool ? (given ? 1.0f : 0.0f) : chosenBool(named, named);
         Literal literal;
         literal.line = thisLine;
         literal.uniform = uniformFor(named, thisLine);
@@ -1926,6 +2389,35 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
     shaderFunctions += "\n";
   }
 
+  // **A local is called by its function too**: `rotate45:s`, written `s` inside
+  // `rotate45` only. Two functions' `s` are two variables -- and so are two `m`s
+  // in one function's two blocks, the second `rotate45:m#2`, each written `m`
+  // from its declaration to the end of its block.
+  std::map<std::string, int> declaredSoFar;
+  for (Variable& variable : variables) {
+    if (!variable.local) continue;
+    std::string within;
+    int         from = 0;
+    int         to = -1;
+    if (const int span = SpanAt(spans, variable.declaredLine); span >= 0) {
+      const Span& found = spans[static_cast<std::size_t>(span)];
+      within = found.head.name;
+      from = found.first;
+      to = found.last;
+    } else if (const int other = otherAt(variable.declaredLine); other >= 0) {
+      within = otherNames[static_cast<std::size_t>(other)];
+      from = otherSpans[static_cast<std::size_t>(other)].first;
+      to = otherSpans[static_cast<std::size_t>(other)].second;
+    }
+    if (within.empty()) continue;
+    const int many = ++declaredSoFar[within + ":" + variable.name];
+    variable.spelled = variable.name;
+    variable.name = within + ":" + variable.name + (many == 1 ? "" : "#" + std::to_string(many));
+    // An argument is its whole function's; anything else, its block's.
+    variable.spelledFrom = variable.argument ? from : variable.declaredLine;
+    variable.spelledTo = variable.argument ? to : ScopeEnd(nesting, variable.declaredLine, to);
+  }
+
   // --- what this box offers the canvas ------------------------------------
   //
   // Worked out whether or not the rest succeeds, so a mistake does not make a
@@ -1953,7 +2445,8 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
       fn.text = text;
       glslops::Rewrite(text, &fn.text, nullptr);
       for (const Variable& variable : variables) {
-        if (!variable.local || variable.declaredLine < span.first ||
+        // The argument's knob is this box's reading of the function, not part of it.
+        if (!variable.local || variable.argument || variable.declaredLine < span.first ||
             variable.declaredLine > span.last) {
           continue;
         }
@@ -2066,12 +2559,20 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   if (!shares) {
     // A viz defines no names on the canvas, but its own are still its own.
     for (std::string& name : vizglsl::FunctionNames(lines)) ownNames_.push_back(std::move(name));
-    for (const Variable& variable : variables) ownNames_.push_back(variable.name);
+    for (const Variable& variable : variables) ownNames_.push_back(variable.Spelled());
   }
   const Taken taken = Take(canvas, wanted_, this, ownNames_);
   derivedElsewhere_ = DerivedElsewhere(canvas, wanted_, this);
+  passTypes_.clear();
+  for (const Variable& variable : variables) {
+    if ((variable.kind == Kind::Multivector || variable.kind == Kind::Color) &&
+        std::find(passTypes_.begin(), passTypes_.end(), variable.type) == passTypes_.end()) {
+      passTypes_.push_back(variable.type);
+    }
+  }
   importKey_ = KeyOf(canvas, taken, definedNames_, saysAlgebra_, derivedElsewhere_) +
-               VizzesKey(functions_, canvas, importedSource_) + ExampleKey(canvas);
+               VizzesKey(functions_, canvas, importedSource_) + ExampleKey(canvas) +
+               DrawnKey(canvas);
 
   std::string importSeed;
   std::string imports = WriteImports(taken.values, taken.functions, &importSeed);
@@ -2261,7 +2762,9 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
   }
   probed_.clear();
   for (const Variable& variable : variables) {
-    if (!variable.free && variable.kind == Kind::Real) probed_.push_back(variable.name);
+    if (!variable.free && !variable.local && variable.kind == Kind::Real) {
+      probed_.push_back(variable.name);
+    }
   }
 
   // The value each variable is *given* where it is declared, set before the
@@ -2290,47 +2793,275 @@ void Program::Rebuild(const std::vector<std::string>& lines, const Canvas& canva
                        importedSource_.find(types::complexnum::kName) != std::string::npos;
   const bool colour = joined.find(types::color::kName) != std::string::npos ||
                       importedSource_.find(types::color::kName) != std::string::npos;
-  const std::string head =
-      ShaderPrologue(variables, signature, algebraTypes,
-                     vizOf.empty() ? imports : vizglsl::Stubs() + imports, functions, seed,
-                     functionNames_, functions_, complex, colour, canvas, importedSource_,
-                     &prologueLines, &functionsAt, &sharedAt);
-  // The box's lines appear twice: hoisted above main, and again inside it.
-  glslLines_ = {functionsAt, prologueLines, static_cast<int>(lines.size()), sharedAt,
-                functionsAt};
-  // The trace: after each line, what every real in scope is at that point. It
-  // rides on the end of the line rather than on a line of its own, so the line
-  // numbering a diagnostic depends on is untouched.
+  // --- the trace -------------------------------------------------------------
+  //
+  // After each line, what every value in scope is at that point: at the top
+  // while the box reports, and in each function while it runs once at its
+  // example input (a traced copy of it, below). It rides on the end of the line
+  // rather than on a line of its own, so the line numbering a diagnostic depends
+  // on is untouched -- and only where a statement is finished (SpotsIn). A line inside
+  // a loop keeps its reals' every pass as well, up to `sbPassCap` of them, one
+  // pass after another so that only as many as are shown need reading.
+  const int lineCount = static_cast<int>(lines.size());
+  const int slotCount = static_cast<int>(liveFrom.size());
   tracedSlots_.clear();
-  for (const Slot& slot : liveFrom) tracedSlots_.emplace_back(slot.owner, slot.component);
-  tracedLines_ = static_cast<int>(lines.size());
+  slotVariable_.clear();
+  slotFunction_.clear();
+  for (const Slot& slot : liveFrom) {
+    tracedSlots_.emplace_back(slot.owner, slot.component);
+    slotVariable_.push_back(slot.variable);
+    slotFunction_.push_back(slot.function);
+  }
+  tracedLines_ = lineCount;
   trace_.clear();
+  passLines_.clear();
+  passSlots_ = 0;
+  mainRow_.assign(static_cast<std::size_t>(lineCount), -1);
+  functionRow_.assign(static_cast<std::size_t>(lineCount), -1);
+  functionEnd_.assign(functions_.size(), -1);
 
-  std::string traced;
-  {
-    std::size_t begin = 0;
-    int         k = 0;
-    while (begin <= rewritten.size() && k < tracedLines_) {
-      const std::size_t end = rewritten.find('\n', begin);
-      traced += rewritten.substr(begin, (end == std::string::npos ? rewritten.size() : end) - begin);
-      std::string captures;
-      for (std::size_t i = 0; i < liveFrom.size(); ++i) {
-        if (liveFrom[i].line > k) continue;
-        captures += " sbTrace[" + std::to_string(k * static_cast<int>(liveFrom.size()) +
-                                                 static_cast<int>(i)) +
-                    "] = " + liveFrom[i].expression + ";";
-      }
-      // Guarded, because the same shader draws the picture: without this every
-      // pixel of every frame would be racing to write the trace.
-      if (!captures.empty()) traced += " if (sbMode == 1) {" + captures + " }";
-      traced += "\n";
-      if (end == std::string::npos) break;
-      begin = end + 1;
-      ++k;
+  std::vector<std::string>     bodyText = SplitLines(rewritten, lineCount);
+  const std::vector<std::string> functionText = SplitLines(functions, lineCount);
+  const std::vector<LineShape> bodyShape = ShapesOf(SplitLines(shaderBody, lineCount));
+  const std::vector<LineShape> functionShape = ShapesOf(SplitLines(shaderFunctions, lineCount));
+
+  // The top (-1), and each function that runs at its example input.
+  struct Region {
+    int               function = -1;
+    int               first = 0;
+    int               last = 0;
+    Spots             spots;
+    std::vector<char> loop;
+  };
+  std::vector<Region> regions;
+  if (lineCount > 0) {
+    regions.push_back({-1, 0, lineCount - 1, SpotsIn(bodyShape, 0, lineCount - 1),
+                       LoopLines(bodyShape, 0, lineCount - 1)});
+  }
+  for (const auto& [function, call] : exampleCalls) {
+    const Function& fn = functions_[static_cast<std::size_t>(function)];
+    regions.push_back({function, fn.firstLine, fn.lastLine,
+                       SpotsIn(functionShape, fn.firstLine, fn.lastLine),
+                       LoopLines(functionShape, fn.firstLine, fn.lastLine)});
+  }
+  const auto inScope = [&](const Slot& slot, int function, int k) {
+    return slot.function == function && slot.line <= k && k <= slot.scopeEnd;
+  };
+  // 1 after the line, 2 before it (a function's `return`), 0 not at all: not on
+  // a signature, where nothing is in scope yet, nor after a function's last
+  // brace, which is outside it.
+  const auto spotAt = [&](const Region& region, int k) {
+    const std::size_t at = static_cast<std::size_t>(k);
+    if (region.function >= 0 && k == region.first) return 0;
+    if (region.function >= 0 && region.spots.before[at] != 0) return 2;
+    if (region.function >= 0 && k == region.last) return 0;
+    return region.spots.after[at] != 0 ? 1 : 0;
+  };
+  // **A value given once is kept once.** Most of a box's values are declared
+  // and never written again, and keeping every one of them on every line made
+  // a long function's traced copy thousands of writes, which the driver took a
+  // second to compile. Such a value is kept on the first row it is in scope on,
+  // and read from there on every later one -- once that row has run. With an
+  // `out` parameter anywhere a call could write anything, so nothing is.
+  bool outParameters = false;
+  for (const std::string* source : {&rewritten, &functions, &importedSource_}) {
+    for (const std::string& line : SplitLines(*source, 0)) {
+      std::string probe = line.substr(0, CommentAt(line));
+      outParameters = outParameters || RenameFirst(&probe, "out", "") || RenameFirst(&probe, "inout", "");
     }
   }
+  // **Inside a loop**, though, the row it is kept on runs every pass, and a
+  // later row that does not run with it -- in a block of its own, or after a
+  // `break`, `continue` or `return` -- would be read alongside a later pass than
+  // its own. The first such row keeps the value as well, and the rows that run
+  // whenever it does read it from there.
+  slotOnce_.assign(static_cast<std::size_t>(slotCount), -1);
+  readFrom_.assign(static_cast<std::size_t>(slotCount) * static_cast<std::size_t>(lineCount), -1);
+  for (int i = 0; i < slotCount && !outParameters; ++i) {
+    const Slot& slot = liveFrom[static_cast<std::size_t>(i)];
+    const auto  region = std::find_if(regions.begin(), regions.end(), [&](const Region& r) {
+      return r.function == slot.function;
+    });
+    if (region == regions.end()) continue;
+    const std::vector<std::string>& text = slot.function < 0 ? bodyText : functionText;
+    const int end = std::min(slot.scopeEnd, region->last);
+    int       first = -1;
+    bool      again = false;
+    for (int k = std::max(slot.line, region->first); k <= end && !again; ++k) {
+      if (first < 0) {
+        if (spotAt(*region, k) != 0) first = k;
+        continue;
+      }
+      again = Writes(text[static_cast<std::size_t>(k)], slot.owner);
+    }
+    if (first < 0 || again) continue;
+    slotOnce_[static_cast<std::size_t>(i)] = first;
+    int* from = &readFrom_[static_cast<std::size_t>(i) * static_cast<std::size_t>(lineCount)];
+    // How deep in braces a row's capture runs: after the line, so inside a
+    // block the line opens -- or, before a `return`, where the line starts.
+    const std::vector<LineShape>& shape = slot.function < 0 ? bodyShape : functionShape;
+    const auto capturedAt = [&](int k) {
+      const LineShape& line = shape[static_cast<std::size_t>(k)];
+      int              depth = line.depthBefore;
+      if (spotAt(*region, k) == 2) return depth;
+      for (const char c : line.code) depth += c == '{' ? 1 : c == '}' ? -1 : 0;
+      return depth;
+    };
+    // The row each open block keeps it on, by depth. A row in the same block,
+    // with nothing that jumps between, runs exactly when that one does.
+    const bool         looped = region->loop[static_cast<std::size_t>(first)] != 0;
+    std::map<int, int> kept{{capturedAt(first), first}};
+    for (int k = first + 1; k <= end; ++k) {
+      const LineShape& line = shape[static_cast<std::size_t>(k)];
+      kept.erase(kept.upper_bound(line.depthLow), kept.end());   // blocks closed
+      if (spotAt(*region, k) == 0) continue;
+      if (!looped) {
+        from[k] = first;
+        continue;
+      }
+      const int depth = capturedAt(k);
+      if (Jumps(line.code)) {
+        kept.clear();
+        kept[depth] = k;
+      } else if (const auto there = kept.find(depth); there != kept.end()) {
+        from[k] = there->second;
+      } else {
+        kept[depth] = k;
+      }
+    }
+  }
+  const auto keptAt = [&](int i, int k) {
+    return readFrom_[static_cast<std::size_t>(i) * static_cast<std::size_t>(lineCount) +
+                     static_cast<std::size_t>(k)] < 0;
+  };
+  // A row is shared by the top and the function the line is in, each writing
+  // its own slots -- so each has its own float saying that it ran.
+  const int rowWidth = slotCount + 2;
 
-  glsl_ = head + traced + ProbeEpilogue(probed_, functions_, signature);
+  for (const Region& region : regions) {
+    for (int k = region.first; k <= region.last; ++k) {
+      if (region.loop[static_cast<std::size_t>(k)] == 0 || spotAt(region, k) == 0) continue;
+      PassLine pass;
+      pass.line = k;
+      pass.function = region.function;
+      for (int i = 0; i < slotCount; ++i) {
+        const Slot& slot = liveFrom[static_cast<std::size_t>(i)];
+        // A multivector's or colour's passes only where something can show them.
+        const bool shown = slot.component < 0 ||
+                           canvas.drawnTypes.count(variables[static_cast<std::size_t>(slot.variable)].type) != 0;
+        if (shown && inScope(slot, region.function, k) && keptAt(i, k)) pass.slots.push_back(i);
+      }
+      if (pass.slots.empty()) continue;
+      pass.count = static_cast<int>(passLines_.size());
+      pass.first = passSlots_;
+      passSlots_ += static_cast<int>(pass.slots.size()) + 1;   // and which pass it was
+      passLines_.push_back(std::move(pass));
+    }
+  }
+  const int rowsEnd = lineCount * rowWidth;
+  passesAt_ = rowsEnd + static_cast<int>(passLines_.size());
+
+  // A function is traced in **a copy of its own**, `sbTraced_f`, called only
+  // while the box reports: the one that draws the picture runs every pixel of
+  // every frame, and is left exactly as it was written.
+  // **A loop with more passes than are kept is sampled across all of them**, not
+  // cut off after the first: a reservoir, so each pass is as likely to be kept as
+  // any other, and hashed rather than random, so the same passes are kept every
+  // time and a knob being dragged does not shuffle them. Where a pass lands says
+  // nothing about which it was, so its number is kept with it.
+  std::string traceGlobals =
+      "uniform int sbPassCap; int sbPassAt(int c) { if (c < sbPassCap) return c;"
+      " uint h = uint(c) * 747796405u + 2891336453u;"
+      " h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u; h = (h >> 22u) ^ h;"
+      " int j = int(h % uint(c + 1)); return j < sbPassCap ? j : -1; }";
+  std::string bodyResets;       // a loop that runs no passes this time has none
+  std::string functionResets;
+  std::string copies;
+  std::size_t nextPass = 0;
+  for (const Region& region : regions) {
+    const bool               top = region.function < 0;
+    std::vector<std::string> copy;
+    if (!top) {
+      copy.assign(functionText.begin() + region.first, functionText.begin() + region.last + 1);
+    }
+    std::vector<int>& rows = top ? mainRow_ : functionRow_;
+    int               row = -1;
+    for (int k = region.first; k <= region.last; ++k) {
+      const std::size_t at = static_cast<std::size_t>(k);
+      std::string&      text = top ? bodyText[at] : copy[at - static_cast<std::size_t>(region.first)];
+      const int         spot = spotAt(region, k);
+      std::string       capture;
+      if (spot != 0) {
+        row = k;
+        capture += " sbTrace[" + std::to_string(k * rowWidth + slotCount + (top ? 0 : 1)) + "] = 1.0;";
+        for (int i = 0; i < slotCount; ++i) {
+          const Slot& slot = liveFrom[static_cast<std::size_t>(i)];
+          if (!inScope(slot, region.function, k) || !keptAt(i, k)) continue;
+          capture += " sbTrace[" + std::to_string(k * rowWidth + i) + "] = " + slot.expression + ";";
+        }
+        if (nextPass < passLines_.size() && passLines_[nextPass].line == k &&
+            passLines_[nextPass].function == region.function) {
+          const PassLine&   pass = passLines_[nextPass++];
+          const std::string counter = "sbPass" + std::to_string(pass.count);
+          const std::string countAt = std::to_string(rowsEnd + pass.count);
+          traceGlobals += " int " + counter + " = 0;";
+          const std::string kept = "sbAt" + std::to_string(pass.count);
+          // Where this pass's run starts, worked out once rather than per number.
+          std::string keep = " " + kept + " = " + std::to_string(passesAt_ + pass.first) + " + " +
+                             kept + " * " + std::to_string(passSlots_) + ";";
+          for (std::size_t j = 0; j <= pass.slots.size(); ++j) {
+            keep += " sbTrace[" + kept + " + " + std::to_string(j) + "] = " +
+                    (j < pass.slots.size()
+                         ? liveFrom[static_cast<std::size_t>(pass.slots[j])].expression
+                         : "float(" + counter + ")") +
+                    ";";
+          }
+          capture += " int " + kept + " = sbPassAt(" + counter + "); if (" + kept + " >= 0) {" + keep +
+                     " } " + counter + "++; sbTrace[" + countAt + "] = float(" + counter + ");";
+          (top ? bodyResets : functionResets) += " sbTrace[" + countAt + "] = 0.0;";
+        }
+      }
+      rows[at] = row;
+      if (capture.empty()) continue;
+      // At the top, guarded, because the same shader draws the picture: without
+      // this every pixel of every frame would be racing to write the trace.
+      const std::string wrapped = top ? " if (sbMode == 1) {" + capture + " }" : capture;
+      if (spot == 2) {
+        text = wrapped + " " + text;
+      } else if (const std::size_t comment = CommentAt(text); comment != std::string::npos) {
+        // Before a comment on the line, which would otherwise swallow it.
+        text.insert(comment, wrapped.substr(1) + " ");
+      } else {
+        text += wrapped;
+      }
+    }
+    if (top) continue;
+    functionEnd_[static_cast<std::size_t>(region.function)] = row;
+    const std::string& name = functions_[static_cast<std::size_t>(region.function)].name;
+    if (!copy.empty() && RenameFirst(&copy.front(), name, "sbTraced_" + name)) {
+      for (const std::string& line : copy) copies += line + "\n";
+    }
+  }
+  traceGlobals += "\n";
+  if (!bodyResets.empty()) seed += "  if (sbMode == 1) {" + bodyResets + " }\n";
+  std::string exampleRuns = functionResets;
+  for (const auto& [function, call] : exampleCalls) exampleRuns += " sbTraced_" + call + ";";
+
+  std::string traced;
+  for (const std::string& line : bodyText) traced += line + "\n";
+
+  const std::string head =
+      ShaderPrologue(variables, signature, algebraTypes,
+                     vizOf.empty() ? imports : vizglsl::Stubs() + imports, functions + copies,
+                     seed, functionNames_, functions_, complex, colour, canvas, importedSource_,
+                     traceGlobals, &prologueLines, &functionsAt, &sharedAt);
+  // The box's lines appear twice: hoisted above main, and again inside it. The
+  // traced copies come after its functions, outside both: a mistake in one is
+  // the same mistake already reported on the box's own line.
+  glslLines_ = {functionsAt, prologueLines, static_cast<int>(lines.size()), sharedAt,
+                functionsAt};
+
+  glsl_ = head + traced + ProbeEpilogue(probed_, functions_, signature, exampleRuns);
   if (!vizOf.empty() && !assembleViz()) return;
 
   variables_ = std::move(variables);
@@ -2410,7 +3141,7 @@ void Program::SetProbedValues(const std::vector<float>& values) {
   // n-th derived real.
   std::size_t index = 0;
   for (Variable& variable : variables_) {
-    if (variable.free || variable.kind != Kind::Real) continue;
+    if (variable.free || variable.local || variable.kind != Kind::Real) continue;
     if (index >= values.size()) break;
     if (std::isfinite(values[index])) {
       variable.value = values[index];
@@ -2452,7 +3183,10 @@ void Program::SetValue(std::size_t index, float value, int atLine) {
 void Program::SetComponents(std::size_t index, const std::vector<float>& parts, int atLine) {
   if (index >= variables_.size()) return;
   Variable& variable = variables_[index];
-  if (variable.kind != Kind::Color && variable.kind != Kind::Multivector) return;
+  if (variable.kind != Kind::Color && variable.kind != Kind::Multivector &&
+      variable.kind != Kind::Point) {
+    return;
+  }
   const int which = variable.GoverningLiteral(atLine);
   if (which < 0) return;
   Literal& literal = variable.literals[static_cast<std::size_t>(which)];
@@ -2461,34 +3195,133 @@ void Program::SetComponents(std::size_t index, const std::vector<float>& parts, 
   variable.components = parts;
 }
 
+int Program::TraceFloats(int passes) const {
+  if (tracedSlots_.empty() && passLines_.empty()) return 0;
+  return passesAt_ + std::clamp(passes, 0, kMaxPasses) * passSlots_;
+}
+
 void Program::TakeTrace(std::vector<float> values) { trace_ = std::move(values); }
 
-void Program::ApplyTrace(int line) {
+void Program::ApplyTrace(int line, int passes, bool functionsWithoutCaret, int peek,
+                         int peekLine) {
+  for (Variable& variable : variables_) variable.passes.clear();
   const int slots = static_cast<int>(tracedSlots_.size());
+  const int width = slots + 2;   // and whether the row ran, at the top and in a function
   if (slots == 0 || tracedLines_ == 0) return;
-  if (static_cast<int>(trace_.size()) < tracedLines_ * slots) return;
+  if (static_cast<int>(trace_.size()) < tracedLines_ * width) return;
+  if (static_cast<int>(slotVariable_.size()) != slots ||
+      static_cast<int>(slotOnce_.size()) != slots ||
+      readFrom_.size() != static_cast<std::size_t>(slots) * static_cast<std::size_t>(tracedLines_) ||
+      static_cast<int>(mainRow_.size()) != tracedLines_) {
+    return;
+  }
 
   // Off the end -- and a box nobody has touched -- is read at the end, which is
-  // what the whole block came to.
-  const int at = (line < 0 || line >= tracedLines_) ? tracedLines_ - 1 : line;
+  // what the whole block came to. A function is read where the caret is in it,
+  // and with no caret at its return. A name being pointed at is read where it is
+  // pointed at, and nothing else is.
+  const auto lineOf = [&](int variable) { return peek >= 0 && variable == peek ? peekLine : line; };
+  const auto caretAt = [&](int readLine) { return readLine >= 0 && readLine < tracedLines_; };
+  const auto rowOf = [&](int function, int readLine) {
+    const bool caret = caretAt(readLine);
+    if (function < 0) return mainRow_[static_cast<std::size_t>(caret ? readLine : tracedLines_ - 1)];
+    if (function >= static_cast<int>(functions_.size())) return -1;
+    if (caret) {
+      return functions_[static_cast<std::size_t>(function)].Spans(readLine)
+                 ? functionRow_[static_cast<std::size_t>(readLine)]
+                 : -1;
+    }
+    return functionsWithoutCaret ? functionEnd_[static_cast<std::size_t>(function)] : -1;
+  };
+  const auto variableOf = [&](int slot) -> Variable* {
+    const int index = slotVariable_[static_cast<std::size_t>(slot)];
+    if (index < 0 || index >= static_cast<int>(variables_.size())) return nullptr;
+    Variable& variable = variables_[static_cast<std::size_t>(index)];
+    return variable.Spelled() == tracedSlots_[static_cast<std::size_t>(slot)].first ? &variable
+                                                                                    : nullptr;
+  };
+  // The row a slot is read from at a row: its own, or the one a value given
+  // once was kept on for it.
+  const auto sourceOf = [&](int slot, int row) {
+    if (row < 0 || row >= tracedLines_) return row;
+    const int from = readFrom_[static_cast<std::size_t>(slot) * static_cast<std::size_t>(tracedLines_) +
+                               static_cast<std::size_t>(row)];
+    return from >= 0 ? from : row;
+  };
   for (int i = 0; i < slots; ++i) {
-    const float value = trace_[static_cast<std::size_t>(at * slots + i)];
-    if (!std::isfinite(value)) continue;
-    const auto& [owner, component] = tracedSlots_[static_cast<std::size_t>(i)];
-    for (Variable& variable : variables_) {
-      if (variable.name != owner) continue;
-      if (component < 0) {
-        variable.value = value;
-        variable.known = true;
-      } else {
-        // A multivector is a fixed, short list of numbers rather than one.
-        if (static_cast<int>(variable.components.size()) <= component) {
-          variable.components.resize(static_cast<std::size_t>(component) + 1, 0.0f);
-        }
-        variable.components[static_cast<std::size_t>(component)] = value;
-        variable.known = true;
+    Variable* variable = variableOf(i);
+    if (variable == nullptr) continue;
+    const int function = slotFunction_[static_cast<std::size_t>(i)];
+    const int row = rowOf(function, lineOf(slotVariable_[static_cast<std::size_t>(i)]));
+    // A value given once is read from the row it was kept on.
+    const int from = sourceOf(i, row);
+    float     value = std::numeric_limits<float>::quiet_NaN();
+    const bool inScope = variable->scopeEnd < 0 || row <= variable->scopeEnd;
+    const int  ran = row * width + slots + (function < 0 ? 0 : 1);
+    if (row >= 0 && from <= row && inScope && std::isfinite(trace_[static_cast<std::size_t>(ran)])) {
+      value = trace_[static_cast<std::size_t>(from * width + i)];
+    }
+    if (!std::isfinite(value)) {
+      // A derived local of a function not being read, or not reached, has
+      // nothing to show. A knob still has its own number.
+      if (function >= 0 && !variable->free) variable->known = false;
+      continue;
+    }
+    const int component = tracedSlots_[static_cast<std::size_t>(i)].second;
+    if (component < 0) {
+      variable->value = value;
+    } else {
+      // A multivector is a fixed, short list of numbers rather than one.
+      if (static_cast<int>(variable->components.size()) <= component) {
+        variable->components.resize(static_cast<std::size_t>(component) + 1, 0.0f);
       }
-      break;
+      variable->components[static_cast<std::size_t>(component)] = value;
+    }
+    variable->known = true;
+  }
+
+  // **Every pass of a loop**, at the line being read, in the order they ran: a
+  // real's numbers, or a multivector's or colour's, one pass after another.
+  if (passes <= 1) return;
+  // A value given once in the loop has its passes on the line it was given on.
+  for (const PassLine& pass : passLines_) {
+    const std::size_t countAt = static_cast<std::size_t>(tracedLines_ * width + pass.count);
+    if (countAt >= trace_.size() || !std::isfinite(trace_[countAt])) continue;
+    const int count = std::min({static_cast<int>(trace_[countAt]), passes, kMaxPasses});
+    const std::size_t numberAt = static_cast<std::size_t>(passesAt_ + pass.first) + pass.slots.size();
+    if (numberAt + static_cast<std::size_t>(std::max(count - 1, 0) * passSlots_) >= trace_.size()) continue;
+    // Kept where the sampling put them, so sorted back into the order they ran.
+    std::vector<int> order(static_cast<std::size_t>(count));
+    for (int p = 0; p < count; ++p) order[static_cast<std::size_t>(p)] = p;
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+      return trace_[numberAt + static_cast<std::size_t>(a * passSlots_)] <
+             trace_[numberAt + static_cast<std::size_t>(b * passSlots_)];
+    });
+    for (std::size_t j = 0; j < pass.slots.size(); ++j) {
+      const int slot = pass.slots[j];
+      const int readLine = lineOf(slotVariable_[static_cast<std::size_t>(slot)]);
+      if (!caretAt(readLine)) continue;
+      const int row = rowOf(pass.function, readLine);
+      if (row < pass.line || sourceOf(slot, row) != pass.line) continue;
+      Variable* variable = variableOf(slot);
+      if (variable == nullptr || !variable->known) continue;
+      if (variable->scopeEnd >= 0 && row > variable->scopeEnd) continue;
+      const auto passAt = [&](int p) {
+        return trace_[static_cast<std::size_t>(passesAt_ + p * passSlots_ + pass.first) + j];
+      };
+      const int component = tracedSlots_[static_cast<std::size_t>(slot)].second;
+      if (component < 0) {
+        for (const int p : order) variable->passes.push_back(passAt(p));
+        continue;
+      }
+      const std::size_t parts = variable->components.size();
+      if (static_cast<std::size_t>(component) >= parts) continue;
+      if (variable->passes.size() != order.size() * parts) {
+        variable->passes.assign(order.size() * parts, std::numeric_limits<float>::quiet_NaN());
+      }
+      for (std::size_t q = 0; q < order.size(); ++q) {
+        variable->passes[q * parts + static_cast<std::size_t>(component)] = passAt(order[q]);
+      }
     }
   }
 }

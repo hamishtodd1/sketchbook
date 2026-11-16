@@ -47,7 +47,7 @@ it, then use the arrow keys.
 | Click away | Put it back; rebuild if the text changed |
 | `Ctrl`+`Enter` | Rebuild the box being edited |
 | Hover a line | Show it as code, with the value the app chose in blue |
-| Drag a knob on a number line | Choose that variable's value |
+| Drag a knob on a number line | Choose that variable's value; it settles on a notch it passes near (Alt: not) |
 | Hover a knob, press play | Swing the value back and forth |
 | Press a number line off its markers | Make a new variable there |
 | Right-drag a number line | Scroll that axis |

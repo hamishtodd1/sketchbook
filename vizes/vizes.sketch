@@ -92,7 +92,7 @@ block 1383.78 768.768 20 0 0 0 0 0 0 35
 > }
 end
 block 1191.59 1153.15 20 0 0 0 0 0 0 36
-> Viz(R2ToR3, "Picture");
+> Viz(R2ToR3, "Plane");
 > // A function of the plane is a picture: each pixel is the answer there, and
 > // a vec3 is a colour.
 > vec4 frag(vec2 at) {
@@ -105,7 +105,7 @@ block 1191.59 1153.15 20 0 0 0 0 0 0 36
 > }
 end
 block 1191.59 1729.73 20 0 0 0 0 0 0 37
-> Viz(R2ToC, "Picture");
+> Viz(R2ToC, "Plane");
 > // A complex answer is domain colouring: hue for its argument, lightness for
 > // its size.
 > vec4 frag(vec2 at) {
@@ -118,7 +118,7 @@ block 1191.59 1729.73 20 0 0 0 0 0 0 37
 > }
 end
 block 1268.47 2306.3 20 0 0 0 0 0 0 38
-> Viz(CToC, "Picture");
+> Viz(CToC, "Plane");
 > vec4 frag(vec2 at) {
 >   return sbPaint(value(Complex(at.x, at.y)));
 > }
@@ -129,7 +129,7 @@ block 1268.47 2306.3 20 0 0 0 0 0 0 38
 > }
 end
 block 1383.78 2767.56 20 0 0 0 0 0 0 39
-> Viz(CToR3, "Picture");
+> Viz(CToR3, "Plane");
 > vec4 frag(vec2 at) {
 >   return sbPaint(value(Complex(at.x, at.y)));
 > }
@@ -140,7 +140,7 @@ block 1383.78 2767.56 20 0 0 0 0 0 0 39
 > }
 end
 block 1383.78 3267.26 20 0 0 0 0 0 0 40
-> Viz(CToR, "Picture");
+> Viz(CToR, "Plane");
 > vec4 frag(vec2 at) {
 >   return sbPaint(value(Complex(at.x, at.y)));
 > }
@@ -189,8 +189,9 @@ block 2229.43 -768.768 20 0 0 0 0 0 0 41
 >   float d = length(p);
 >   return shape(d, rand(), rand());
 > }
-val nearest -0.6916
-val ignored 0.862
+val shade:nearest -0.6916
+val frag:nearest -0.6916
+val frag:ignored 0.862
 end
 block 2421.62 538.138 20 0 0 0 0 0 0 42
 > Viz(R3ToR, "Volume");
@@ -412,6 +413,66 @@ block -1306.91 -230.63 20 0 0 0 0 0 0 47
 >   return k * d;
 > }
 end
+block -115.315 1691.29 20 0 0 0 0 0 0 48
+> Viz(vec2, "Plane");
+> // A point of the plane is a loupe on it: the five by five pixels of the picture
+> // around it, magnified, with lines between them, so it can be put on the pixel
+> // you mean -- the middle one is the point's. Chrome, measured in pixels of
+> // chrome -- sbPixel -- so it stays one size however the plane is zoomed.
+> const float kLoupe = 22.5;
+> void mesh() {
+>   float h = kLoupe * 0.5;
+>   emit(vec3(-h, -h, 0.0), vec3(0.0, 0.0, 1.0), vec2(0.0, 0.0));
+>   emit(vec3(h, -h, 0.0), vec3(0.0, 0.0, 1.0), vec2(1.0, 0.0));
+>   emit(vec3(h, h, 0.0), vec3(0.0, 0.0, 1.0), vec2(1.0, 1.0));
+>   emit(vec3(-h, -h, 0.0), vec3(0.0, 0.0, 1.0), vec2(0.0, 0.0));
+>   emit(vec3(h, h, 0.0), vec3(0.0, 0.0, 1.0), vec2(1.0, 1.0));
+>   emit(vec3(-h, h, 0.0), vec3(0.0, 0.0, 1.0), vec2(0.0, 1.0));
+> }
+> void vert(vec2 v, inout vec3 p, inout vec3 n) {
+>   p = vec3(v, 0.0) + p * sbPixel;
+> }
+> vec4 frag(vec2 v, vec3 p, vec3 n, vec2 uv) {
+>   // Which of the five by five this is, from the bottom left, and so which of
+>   // the picture's pixels: the point's, and its neighbours. The picture is kept
+>   // bottom row first; the screen counts down from the top.
+>   vec2 cell = uv * 5.0;
+>   vec2 k = clamp(floor(cell), 0.0, 4.0) - 2.0;
+>   vec2 at = sbScreen(vec3(v, 0.0));
+>   vec2 px = vec2(floor(at.x), sbPictureSize.y - 1.0 - floor(at.y)) + k;
+>   vec3 c = texelFetch(sbPicture, ivec2(clamp(px, vec2(0.0), sbPictureSize - 1.0)), 0).rgb;
+>   // A line between pixels, a screen pixel wide at any zoom, and a frame in the
+>   // colour of the variable, by how much of the pixel each covers.
+>   vec2 f = fract(cell);
+>   vec2 toLine = min(f, 1.0 - f) / fwidth(cell);
+>   float line = clamp(1.0 - min(toLine.x, toLine.y), 0.0, 1.0);
+>   vec2 toEdge = min(uv, 1.0 - uv) / fwidth(uv);
+>   float frame = clamp(1.5 - min(toEdge.x, toEdge.y), 0.0, 1.0);
+>   c = mix(c, vec3(0.11), line * 0.85);
+>   c = mix(c, sbTint.rgb, frame);
+>   return vec4(c, 1.0);
+> }
+> vec3 position(vec2 v) {
+>   return vec3(v, 0.0);
+> }
+> // Nought anywhere on the loupe, and how far off it outside.
+> float grab(vec2 v) {
+>   vec2 at = sbScreen(position(v));
+>   vec2 edge = sbScreen(position(v) + vec3(kLoupe * 0.5 * sbPixel, 0.0, 0.0));
+>   vec2 d = abs(sbPointer - at);
+>   return max(0.0, max(d.x, d.y) - abs(edge.x - at.x));
+> }
+> // Wherever on the plane the pointer is.
+> vec2 drag(vec2 v) {
+>   return sbRayOrigin.xy;
+> }
+> 
+> // A new point: tidy numbers in [-1, 1), three decimals.
+> vec2 example() {
+>   return floor((vec2(rand(), rand()) * 2.0 - 1.0) * 1000.0) / 1000.0;
+> }
+end
 axis 1 0 0 0.0852 2.21943 9 1 0
-ref 9 nearest
-ref 9 ignored
+ref 9 shade:nearest
+ref 9 frag:nearest
+ref 9 frag:ignored

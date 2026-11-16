@@ -21,7 +21,10 @@ enum class Tok {
   // algebra is what gives them these meanings.
   Bar, Caret, Tilde,
   // `>>`, the sandwich: what a versor does to something.
-  Shift
+  Shift,
+  // **A choice**: `c ? a : b`, and what `c` is made of -- a comparison (its
+  // spelling in the text), `&&`, `||` and `!`.
+  Question, Colon, Compare, AndAnd, OrOr, Bang
 };
 
 struct Token {
@@ -76,11 +79,21 @@ std::vector<Token> Tokenize(std::string_view source, bool* ok) {
       continue;
     }
 
-    // `>>` is two characters, and the only one here that is.
-    if (c == '>' && i + 1 < source.size() && source[i + 1] == '>') {
-      tokens.push_back({Tok::Shift, ">>"});
-      i += 2;
-      continue;
+    // `>>` is two characters, and so are the comparisons and the logic that
+    // have one: read first, so `==` is not two assignments, `<=` not `<` and
+    // `=`, and `&&` not two meets.
+    if (i + 1 < source.size()) {
+      const std::string_view pair = source.substr(i, 2);
+      Tok                    two = Tok::End;
+      if (pair == ">>") two = Tok::Shift;
+      if (pair == "==" || pair == "!=" || pair == "<=" || pair == ">=") two = Tok::Compare;
+      if (pair == "&&") two = Tok::AndAnd;
+      if (pair == "||") two = Tok::OrOr;
+      if (two != Tok::End) {
+        tokens.push_back({two, std::string(pair)});
+        i += 2;
+        continue;
+      }
     }
 
     Tok kind = Tok::End;
@@ -103,6 +116,11 @@ std::vector<Token> Tokenize(std::string_view source, bool* ok) {
       case '&': kind = Tok::Amp; break;
       case '=': kind = Tok::Assign; break;
       case ';': kind = Tok::Semi; break;
+      case '<': kind = Tok::Compare; break;
+      case '>': kind = Tok::Compare; break;
+      case '!': kind = Tok::Bang; break;
+      case '?': kind = Tok::Question; break;
+      case ':': kind = Tok::Colon; break;
       default:
         *ok = false;   // anything else is outside the subset
         return tokens;
@@ -122,7 +140,10 @@ enum class NodeKind {
   // over the thing and a star after it.
   Inner, Outer, Regressive, Reverse,
   // The sandwich, `a >> b`, which is written out as the sandwich it is.
-  Sandwich
+  Sandwich,
+  // A choice, `c ? a : b` (args: c, a, b), and what a condition is made of.
+  // `text` holds a comparison's spelling.
+  Conditional, Relational, Equality, And, Or, Not
 };
 
 struct Node;
@@ -157,6 +178,15 @@ int Precedence(NodeKind kind) {
     case NodeKind::Div: return 5;
     case NodeKind::Neg:
     case NodeKind::Reverse: return 6;
+    // **Looser than all of it**, as GLSL has them and as the rewrite leaves them
+    // (`glslops` never crosses one): a comparison compares two whole sums, and
+    // `!` takes everything up to the next one.
+    case NodeKind::Not: return -1;
+    case NodeKind::Relational: return -2;
+    case NodeKind::Equality: return -3;
+    case NodeKind::And: return -4;
+    case NodeKind::Or: return -5;
+    // A choice is a brace with its rows behind it, which brackets itself.
     default: return 7;  // atoms
   }
 }
@@ -165,7 +195,7 @@ class Parser {
  public:
   explicit Parser(const std::vector<Token>& tokens) : tokens_(tokens) {}
 
-  NodePtr ParseExpression() { return ParseSum(); }
+  NodePtr ParseExpression() { return ParseConditional(); }
   bool    ok() const { return ok_; }
   const Token& Peek() const { return tokens_[pos_]; }
   void    Advance() { if (tokens_[pos_].kind != Tok::End) ++pos_; }
@@ -176,6 +206,70 @@ class Parser {
   }
 
  private:
+  // `c ? a : b`, which nests to the right: `c ? a : d ? b : e` is one choice of
+  // three.
+  NodePtr ParseConditional() {
+    NodePtr node = ParseOr();
+    if (!ok_ || Peek().kind != Tok::Question) return node;
+    Advance();
+    auto choice = std::make_unique<Node>();
+    choice->kind = NodeKind::Conditional;
+    choice->args.push_back(std::move(node));
+    choice->args.push_back(ParseConditional());
+    if (!Accept(Tok::Colon)) ok_ = false;
+    choice->args.push_back(ParseConditional());
+    return choice;
+  }
+
+  NodePtr ParseOr() {
+    NodePtr node = ParseAnd();
+    while (ok_ && Peek().kind == Tok::OrOr) {
+      Advance();
+      node = Combine(NodeKind::Or, std::move(node), ParseAnd());
+    }
+    return node;
+  }
+
+  NodePtr ParseAnd() {
+    NodePtr node = ParseEquality();
+    while (ok_ && Peek().kind == Tok::AndAnd) {
+      Advance();
+      node = Combine(NodeKind::And, std::move(node), ParseEquality());
+    }
+    return node;
+  }
+
+  NodePtr ParseEquality() {
+    NodePtr node = ParseRelational();
+    while (ok_ && Peek().kind == Tok::Compare && (Peek().text == "==" || Peek().text == "!=")) {
+      const std::string spelled = Peek().text;
+      Advance();
+      node = Combine(NodeKind::Equality, std::move(node), ParseRelational());
+      node->text = spelled;
+    }
+    return node;
+  }
+
+  NodePtr ParseRelational() {
+    NodePtr node = ParseNot();
+    while (ok_ && Peek().kind == Tok::Compare && Peek().text != "==" && Peek().text != "!=") {
+      const std::string spelled = Peek().text;
+      Advance();
+      node = Combine(NodeKind::Relational, std::move(node), ParseNot());
+      node->text = spelled;
+    }
+    return node;
+  }
+
+  NodePtr ParseNot() {
+    if (Peek().kind != Tok::Bang) return ParseSum();
+    Advance();
+    auto node = std::make_unique<Node>();
+    node->kind = NodeKind::Not;
+    node->lhs = ParseNot();
+    return node;
+  }
+
   // The loosest first: every algebra operator binds tighter than + and -, and
   // the sandwich is looser than the products it is made of, so `R >> a * b` is
   // the versor acting on the product. The same ordering `glslops` uses, since
@@ -274,14 +368,14 @@ class Parser {
       Advance();
       node->kind = NodeKind::Call;
       if (Peek().kind != Tok::RParen) {
-        node->args.push_back(ParseSum());
-        while (ok_ && Accept(Tok::Comma)) node->args.push_back(ParseSum());
+        node->args.push_back(ParseExpression());
+        while (ok_ && Accept(Tok::Comma)) node->args.push_back(ParseExpression());
       }
       if (!Accept(Tok::RParen)) ok_ = false;
       return Parts(std::move(node));
     }
     if (Accept(Tok::LParen)) {
-      NodePtr inner = ParseSum();
+      NodePtr inner = ParseExpression();
       if (!Accept(Tok::RParen)) ok_ = false;
       return Parts(std::move(inner));
     }
@@ -406,6 +500,11 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
     case NodeKind::Ident:
       return Marked(node.text, marks);
     case NodeKind::Member:
+      // A multivector's scalar part, `a.e`, is its grade 0, and reads as
+      // `grade0(a)` does. (No vector has an `e`, so the name alone tells.)
+      if (node.text == "e") {
+        return "\\langle " + Emit(*node.lhs, 0, marks) + " \\rangle_{0}";
+      }
       // The parts of a value are its subscripts. `p.x` is the x of p, which is
       // what a mathematician has always written as a small x under it.
       return Emit(*node.lhs, precedence, marks) + "_{" + NameToLatex(node.text) + "}";
@@ -487,6 +586,42 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
     }
     case NodeKind::Neg:
       out = "-" + Emit(*node.lhs, precedence, marks);
+      break;
+    // **A choice is cases**: each value with the condition it is taken on, and
+    // the last one otherwise -- `c ? a : d ? b : e` is one brace of three rows.
+    case NodeKind::Conditional: {
+      std::string rows;
+      const Node* at = &node;
+      while (at->kind == NodeKind::Conditional && at->args.size() == 3) {
+        rows += Emit(*at->args[1], 0, marks) + " & \\text{if } " + Emit(*at->args[0], 0, marks) +
+                " \\\\ ";
+        at = at->args[2].get();
+      }
+      return "\\begin{cases} " + rows + Emit(*at, 0, marks) + " & \\text{otherwise} \\end{cases}";
+    }
+    case NodeKind::Relational:
+    case NodeKind::Equality: {
+      // `==` is the equals sign: a condition is a statement, not an assignment.
+      const char* relation = node.text == "==" ? " = "
+                             : node.text == "!=" ? " \\neq "
+                             : node.text == "<=" ? " \\leq "
+                             : node.text == ">=" ? " \\geq "
+                             : node.text == "<"  ? " < "
+                                                 : " > ";
+      out = Emit(*node.lhs, precedence, marks) + relation + Emit(*node.rhs, precedence + 1, marks);
+      break;
+    }
+    // In words: the wedge and the vee are the algebra's products here.
+    case NodeKind::And:
+      out = Emit(*node.lhs, precedence, marks) + " \\text{ and } " +
+            Emit(*node.rhs, precedence + 1, marks);
+      break;
+    case NodeKind::Or:
+      out = Emit(*node.lhs, precedence, marks) + " \\text{ or } " +
+            Emit(*node.rhs, precedence + 1, marks);
+      break;
+    case NodeKind::Not:
+      out = "\\neg " + Emit(*node.lhs, Precedence(NodeKind::Neg), marks);
       break;
     // The geometric product is juxtaposition, so it is already what Mul emits;
     // the other two get the symbols a geometric algebra text uses.
@@ -570,7 +705,9 @@ std::string Emit(const Node& node, int parentPrecedence, std::vector<std::string
     }
   }
 
-  return (precedence < parentPrecedence) ? Bracket(out) : out;
+  // A parent of 0 is nothing at all -- the whole right-hand side, an argument,
+  // a condition -- and nothing standing alone needs brackets, however loose.
+  return (parentPrecedence != 0 && precedence < parentPrecedence) ? Bracket(out) : out;
 }
 
 // The types a declaration or a parameter may be written in: the reals, the one
@@ -765,6 +902,18 @@ int Flatten(const Node& node, Flow* flow) {
       FlowNode leaf;
       leaf.name = base->text;
       flow->nodes.push_back(leaf);
+      return static_cast<int>(flow->nodes.size()) - 1;
+    }
+
+    case NodeKind::Conditional: {
+      // A choice is fed by what it chooses between. What it chooses *by* is a
+      // condition, not a value, and draws no wire.
+      if (node.args.size() != 3) return -1;
+      FlowNode op;
+      op.op = "?";
+      op.lhs = Flatten(*node.args[1], flow);
+      op.rhs = Flatten(*node.args[2], flow);
+      flow->nodes.push_back(op);
       return static_cast<int>(flow->nodes.size()) - 1;
     }
 
@@ -1217,33 +1366,20 @@ static Line ParseCode(std::string_view source, const clifford::Signature& sig,
   return line;
 }
 
-// **A comment is for the reader, not the machine.** The line is read without
-// it -- so `float k = 0.; // 0.5 is flat` is a declaration with a knob, as it is
-// without the comment -- and the comment is set beside the reading, in words.
-// A line that is nothing but a comment has no reading, and stays code.
+// **A comment is not mathematics.** The line is read without it -- so
+// `float k = 0.; // 0.5 is flat` is a declaration with a knob, as it is without
+// the comment -- and the reading leaves it out: it is there in the code. A line
+// that is nothing but a comment has no reading, and stays code.
 Line Parse(std::string_view source, const clifford::Signature& sig, const Inside& inside) {
   const std::size_t slashes = source.find("//");
   if (slashes == std::string_view::npos) return ParseCode(source, sig, inside);
   const std::string_view code = source.substr(0, slashes);
-  if (code.find_first_not_of(" \t") == std::string_view::npos) {
+  if (code.find_first_not_of(" 	") == std::string_view::npos) {
     Line line;
     line.kind = Kind::Unparsed;
     return line;
   }
-  Line line = ParseCode(code, sig, inside);
-  std::string words(source.substr(slashes + 2));
-  // Braces and backslashes would be read as TeX; nothing else in a text is.
-  for (char& c : words) {
-    if (c == '{') c = '(';
-    else if (c == '}') c = ')';
-    else if (c == '\\') c = '/';
-  }
-  const std::size_t first = words.find_first_not_of(" \t");
-  const std::size_t last = words.find_last_not_of(" \t");
-  if (!line.latex.empty() && first != std::string::npos) {
-    line.latex += "\\qquad\\text{" + words.substr(first, last + 1 - first) + "}";
-  }
-  return line;
+  return ParseCode(code, sig, inside);
 }
 
 }  // namespace sb::mathline

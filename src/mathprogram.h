@@ -10,6 +10,7 @@
 
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -30,6 +31,7 @@ enum class Kind {
   Multivector,  // an element of a Clifford algebra: Bi, Even, ...
   Color,        // a vec3 that is a colour: three numbers, one knob
   Bool,         // a bool: a checkbox beside it, and `value` is 0 or 1
+  Point,        // a vec2 argument: a dot on its function's Plane, two numbers behind a vec2
 };
 
 // One literal assignment to a variable, and the uniform standing behind it.
@@ -144,15 +146,35 @@ struct Function {
 };
 
 struct Variable {
+  // What the app calls it. A local of a function is called by its function as
+  // well -- `rotate45:s` -- since any function may have an `s` of its own, and
+  // they are different variables: their own knobs, windows and saved values.
   std::string name;
+  // How the box writes it, where that differs from `name`: `s`. And the lines
+  // that spelling means this variable on: from its declaration to the end of
+  // its block, or its whole function for an argument.
+  std::string spelled;
+  int         spelledFrom = 0;
+  int         spelledTo = -1;
+  const std::string& Spelled() const { return spelled.empty() ? name : spelled; }
+  // Whether `s` written on this line is this variable.
+  bool SpelledOn(int line) const {
+    return spelled.empty() || (line >= spelledFrom && line <= spelledTo);
+  }
   std::string type;       // as the user spelled it, which is what a viz claims
   std::string latexName;
   Kind        kind = Kind::Real;
   bool        free = false;    // declared with no initialiser: yours to choose
   // Declared inside one of the box's functions rather than at the top. It is a
-  // local there, not one of the box's globals, and nothing traces it: the only
-  // thing it can be is the number its knob chose.
+  // local there, not one of the box's globals. A free one is what its knob
+  // chose; a derived one is traced while the function runs at its example input.
   bool        local = false;
+  // The argument of the function it belongs to: the example input that function
+  // is read at, which is a knob like `float x;`.
+  bool        argument = false;
+  // A local's last line in scope: the line before the brace that closes its
+  // block. -1 for one at the top, which lasts to the end.
+  int         scopeEnd = -1;
   // Declared with a number typed into it -- `float a = 0.4;` -- rather than with
   // no value for the app to inject. A knob like any free variable's; but its
   // number lives in the text, so the text is what is saved and what a closed
@@ -168,6 +190,11 @@ struct Variable {
   // multivector is not one number, so it does not fit `value` -- but it is a
   // fixed, short list of them, so it needs nothing cleverer than this.
   std::vector<float> components;
+  // Its every value at the reading line, in order, when that line is in a loop:
+  // one per pass, up to the cap asked for -- a real's one number per pass, a
+  // multivector's or colour's `components` one pass after another. Empty
+  // otherwise. Read-only.
+  std::vector<float> passes;
   // Every literal assigned to this variable, in the order they are written.
   std::vector<Literal> literals;
   // Which of them decides the value at `line`: the last at or before it, or -1.
@@ -269,6 +296,10 @@ struct Canvas {
   // -- and a box that defines one compiles that viz in. The canvas's own, or
   // the built-in one.
   std::map<std::string, FunctionViz> functionVizes;
+  // **What can be drawn**: every type with a viz, in any window. A loop keeps a
+  // multivector's or colour's every pass only if its type is one -- they are
+  // dear to compile, and for nothing where nothing can show them.
+  std::set<std::string> drawnTypes;
   // **A new value is chosen by its type's viz**, its `example`, which runs on
   // the GPU -- so it is asked for through the app. Unset, or false, and the
   // type's own generator here chooses.
@@ -418,12 +449,22 @@ class Program {
   // which of its components -- -1 for a real, which is only ever one number.
   const std::vector<std::pair<std::string, int>>& tracedSlots() const { return tracedSlots_; }
   int                             tracedLines() const { return tracedLines_; }
-  // `values` is tracedLines() * tracedNames().size() floats, line-major.
+  // **A loop's every pass is kept**, for reals on the lines inside it, up to
+  // this many: past a couple of hundred they are a smear rather than a set.
+  static constexpr int kMaxPasses = 256;
+  // How many floats the trace is when `passes` of each loop's passes are kept:
+  // the buffer is made for kMaxPasses, and only as much as is shown is read.
+  int  TraceFloats(int passes) const;
+  // The first TraceFloats(n) floats of the buffer.
   void TakeTrace(std::vector<float> values);
-  // Sets every real to what it was after `line`, which is what the windows then
-  // show. Out of range means the end, which is where a box with no caret in it
-  // is read from.
-  void ApplyTrace(int line);
+  // Sets every value to what it was after `line`, which is what the windows then
+  // show, with up to `passes` of a loop's passes. Out of range means the end,
+  // which is where a box with no caret in it is read from -- and there a value
+  // inside a function is what it came to at the return, or unknown unless
+  // `functionsWithoutCaret`.
+  // `peek`, a variable's index, is read at `peekLine` instead: a name pointed at.
+  void ApplyTrace(int line, int passes, bool functionsWithoutCaret, int peek = -1,
+                  int peekLine = -1);
   const std::vector<std::string>& probedNames() const { return probed_; }
   // What the probe read, in probedNames() order.
   void                            SetProbedValues(const std::vector<float>& values);
@@ -454,6 +495,39 @@ class Program {
   std::vector<std::pair<std::string, int>> tracedSlots_;
   int                      tracedLines_ = 0;
   std::vector<float>       trace_;
+  // Per slot: the variable it is (an index into variables_), and the function
+  // it is a local of, or -1 for the top.
+  std::vector<int>         slotVariable_;
+  std::vector<int>         slotFunction_;
+  // Per slot: for a variable given its value once, where it is declared and
+  // never written again, the one row it is kept in; -1 for one kept on every
+  // row. A row also has one float more, past its slots, saying that it ran.
+  std::vector<int>         slotOnce_;
+  // Per slot and row, flat: the row it is read from there -- its `slotOnce_`
+  // row, or in a loop the first row of a block that runs without that one --
+  // or -1 for the row's own.
+  std::vector<int>         readFrom_;
+  // The types of this box's multivectors and colours, whose passes are kept
+  // only if something can draw them (Canvas::drawnTypes).
+  std::vector<std::string> passTypes_;
+  // Which row answers a reading line: the last line at or before it with a
+  // capture, at the top and in the functions. -1 for none.
+  std::vector<int>         mainRow_;
+  std::vector<int>         functionRow_;
+  // Per function: the row read with no caret -- its return.
+  std::vector<int>         functionEnd_;
+  // A line inside a loop, whose reals keep every pass: where its count is, the
+  // function it is in (-1 the top), and where its slots start in a pass.
+  struct PassLine {
+    int              line = 0;
+    int              function = -1;
+    int              count = 0;
+    int              first = 0;
+    std::vector<int> slots;
+  };
+  std::vector<PassLine>    passLines_;
+  int                      passSlots_ = 0;   // one pass is this many floats
+  int                      passesAt_ = 0;    // where the first pass starts
   std::vector<std::string> probed_;
   compiler::ShaderLines    glslLines_;
   // A viz box's own three programs, as one string to compare, and where its
@@ -489,6 +563,8 @@ class Program {
   bool                        writesExample_ = false;
   std::map<int, std::string>  injectedBodies_;
   std::string                 ExampleKey(const Canvas& canvas) const;
+  // Whether each type in `passTypes_` can be drawn, which decides its passes.
+  std::string                 DrawnKey(const Canvas& canvas) const;
   std::string WriteImports(const std::vector<const SharedValue*>& values,
                            const std::vector<const SharedFunction*>& functions, std::string* seed);
   std::string                 importedSource_;

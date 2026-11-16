@@ -382,6 +382,14 @@ void CodeBlock::EnsureCache(FontStore& fonts, float emPx, float measurePx) const
       entry.tex = entry.latex.empty() ? tex::Parsed{} : tex::Parse(entry.latex);
       entry.emPx = -1.0f;
       entry.wrapWidth = -1.0f;
+      entry.extentPerEm = 0.0f;
+      entry.widthPerEm = 0.0f;
+      if (!entry.latex.empty()) {
+        constexpr float kReferenceEm = 64.0f;
+        const tex::Layout reference = tex::BuildLayout(entry.tex, fonts, kReferenceEm, false);
+        entry.extentPerEm = (reference.height + reference.depth) / kReferenceEm;
+        entry.widthPerEm = reference.width / kReferenceEm;
+      }
     }
 
     if (prose) {
@@ -552,20 +560,48 @@ std::vector<Rectangle> CodeBlock::MentionsOf(const std::string& name, const View
   const Geometry& g = Measure(viewport, fonts);
   if (g.emPx < 0.4f) return found;
   for (std::size_t r = 0; r < g.rows.size(); ++r) {
-    for (const Rectangle& box : MentionRects(r, name, g, fonts)) found.push_back(box);
+    for (const Rectangle& box : MentionRects(r, WrittenOn(name, g.rows[r].line), g, fonts)) {
+      found.push_back(box);
+    }
   }
   return found;
 }
 
+const mathprogram::Variable* CodeBlock::SpelledAt(const std::string& written, int line) const {
+  const mathprogram::Variable* outside = nullptr;
+  const mathprogram::Variable* local = nullptr;
+  for (const mathprogram::Variable& variable : program_.variables()) {
+    if (variable.Spelled() != written) continue;
+    if (!variable.spelled.empty()) {
+      // A local hides the box's own, and an inner block's hides an outer's.
+      if (variable.SpelledOn(line) && (local == nullptr || variable.spelledFrom > local->spelledFrom)) {
+        local = &variable;
+      }
+    } else if (outside == nullptr) {
+      outside = &variable;
+    }
+  }
+  return local != nullptr ? local : outside;
+}
+
+std::string CodeBlock::WrittenOn(const std::string& name, int line) const {
+  const mathprogram::Variable* variable = FindVariable(name);
+  if (variable == nullptr) return name;   // shared from another box, written as itself
+  return SpelledAt(variable->Spelled(), line) == variable ? variable->Spelled() : std::string();
+}
+
 std::string CodeBlock::MentionAt(Vector2 screenPoint, const Viewport& viewport,
-                                 FontStore& fonts) const {
+                                 FontStore& fonts, int* line) const {
   if (absorbed_ || IsText()) return {};
   const Geometry& g = Measure(viewport, fonts);
   if (g.emPx < 0.4f || !CheckCollisionPointRec(screenPoint, g.rect)) return {};
   const int row = RowAt(screenPoint, viewport, fonts);
   if (row < 0) return {};
+  const int at = g.rows[static_cast<std::size_t>(row)].line;
+  if (line != nullptr) *line = at;
   for (const mathprogram::Variable& variable : program_.variables()) {
-    for (const Rectangle& box : MentionRects(static_cast<std::size_t>(row), variable.name, g, fonts)) {
+    const std::string written = WrittenOn(variable.name, at);
+    for (const Rectangle& box : MentionRects(static_cast<std::size_t>(row), written, g, fonts)) {
       if (CheckCollisionPointRec(screenPoint, box)) return variable.name;
     }
   }
@@ -581,13 +617,21 @@ std::string CodeBlock::MentionAt(Vector2 screenPoint, const Viewport& viewport,
 mathline::Flow CodeBlock::FlowFor(const std::string& name) const {
   mathline::Flow            latest;
   const clifford::Signature sig = Algebra();
-  for (const std::string& raw : lines_) {
+  for (std::size_t i = 0; i < lines_.size(); ++i) {
+    const std::string&   raw = lines_[i];
     const mathline::Line parsed = mathline::Parse(raw, sig);
-    if (parsed.name != name || !parsed.hasInitialiser) continue;
+    if (!parsed.hasInitialiser || parsed.name != WrittenOn(name, static_cast<int>(i))) continue;
     if (parsed.kind != mathline::Kind::Declaration && parsed.kind != mathline::Kind::Assignment) {
       continue;
     }
     mathline::Flow flow = mathline::Wiring(raw, sig);
+    // What it is made of, by what the app calls each: a local by its function.
+    for (mathline::FlowNode& node : flow.nodes) {
+      if (!node.op.empty()) continue;
+      if (const mathprogram::Variable* input = SpelledAt(node.name, static_cast<int>(i))) {
+        node.name = input->name;
+      }
+    }
     // The *last* line that defines it wins, since a variable is mutable and
     // what its window shows is what the block ended with.
     if (flow.Interesting()) latest = std::move(flow);
@@ -643,7 +687,7 @@ bool CodeBlock::BakeVariable(const std::string& name) {
   for (std::size_t i = 0; i < lines_.size(); ++i) {
     const mathline::Line parsed = mathline::Parse(lines_[i]);
     if (parsed.kind != mathline::Kind::Declaration || parsed.hasInitialiser) continue;
-    if (parsed.name != name) continue;
+    if (parsed.name != WrittenOn(name, static_cast<int>(i))) continue;
 
     // The value that was only ever injected becomes the user's own text. It was
     // theirs to choose and they have chosen it.
@@ -666,6 +710,8 @@ bool CodeBlock::MentionedBetween(const std::string& name, int fromLine, int from
   if (name.empty()) return false;
   for (int i = std::max(fromLine, 0); i <= toLine && i < static_cast<int>(lines_.size()); ++i) {
     const std::string& line = lines_[static_cast<std::size_t>(i)];
+    const std::string  written = WrittenOn(name, i);
+    if (written.empty()) continue;
     std::size_t begin = 0;
     std::size_t end = line.size();
     if (!wholeLines) {
@@ -673,9 +719,9 @@ bool CodeBlock::MentionedBetween(const std::string& name, int fromLine, int from
       if (i == toLine) end = std::min(static_cast<std::size_t>(toCol), line.size());
     }
 
-    for (std::size_t at = line.find(name); at != std::string::npos;
-         at = line.find(name, at + 1)) {
-      const std::size_t after = at + name.size();
+    for (std::size_t at = line.find(written); at != std::string::npos;
+         at = line.find(written, at + 1)) {
+      const std::size_t after = at + written.size();
       const bool clearBefore = at == 0 || !IsWordChar(line[at - 1]);
       const bool clearAfter = after >= line.size() || !IsWordChar(line[after]);
       if (!clearBefore || !clearAfter) continue;
@@ -717,9 +763,13 @@ bool CodeBlock::InScope(const std::string& name) const {
   // This holds however the box is being read -- by the caret or by the pointer
   // -- because it is a fact about the program rather than about the reading.
   const int at = ExecutedUpTo();
-  if (at >= 0) {
-    const mathprogram::Variable* variable = FindVariable(name);
-    if (variable != nullptr && variable->declaredLine > at) return false;
+  const mathprogram::Variable* variable = FindVariable(name);
+  if (at >= 0 && variable != nullptr && variable->declaredLine > at) return false;
+  // And a local has a value only while its function is being read, inside its
+  // block: worked out at the function's example input, which the trace says.
+  if (variable != nullptr && variable->local) {
+    if (!variable->free && !variable->known) return false;
+    if (at >= 0 && variable->scopeEnd >= 0 && at > variable->scopeEnd) return false;
   }
 
   // Nobody is reading this box a line at a time, so all of it counts.
@@ -888,6 +938,8 @@ void CodeBlock::SetLiveUniforms() const {
                       static_cast<int>(literal->components.size()));
     } else if (literal->components.size() == 3) {
       SetShaderValue(shader_, location, literal->components.data(), SHADER_UNIFORM_VEC3);
+    } else if (literal->components.size() == 2) {
+      SetShaderValue(shader_, location, literal->components.data(), SHADER_UNIFORM_VEC2);
     } else {
       SetShaderValue(shader_, location, &literal->value, SHADER_UNIFORM_FLOAT);
     }
@@ -1162,8 +1214,13 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
       float latexExtent = 0.0f;
       if (layout != nullptr) {
         row.width = layout->width;
-        latexExtent = layout->height + layout->depth + 6.0f * g.zoom;
-        contentWidth = std::max(contentWidth, row.width + row.indent);
+        if (wrapped) {
+          latexExtent = layout->height + layout->depth + 6.0f * g.zoom;
+          contentWidth = std::max(contentWidth, row.width + row.indent);
+        } else {
+          // Sized by the reference layout, in proportion to the zoom.
+          contentWidth = std::max(contentWidth, cache_[i].widthPerEm * g.emPx + row.indent);
+        }
         row.baseline = 0.0f;
       } else {
         row.width = text::Measure(fonts, Face::Mono, lines_[i], g.emPx);
@@ -1171,13 +1228,12 @@ const CodeBlock::Geometry& CodeBlock::Measure(const Viewport& viewport, FontStor
 
       // A line is the same height in *either* reading, so flipping one never
       // changes the shape of the box -- the same rule the width already
-      // follows. Taken from the cached layout whether or not this row is the
+      // follows. Taken from the reference layout whether or not this row is the
       // one showing it. Prose is exempt: there the two readings are not two
       // readings of a line but of the whole box, and they do not even have the
       // same number of rows.
       if (!IsText() && !cache_[i].latex.empty()) {
-        const tex::Layout& both = cache_[i].layout;
-        latexExtent = std::max(latexExtent, both.height + both.depth + 6.0f * g.zoom);
+        latexExtent = std::max(latexExtent, cache_[i].extentPerEm * g.emPx + 6.0f * g.zoom);
       }
 
       // And a whole number of dots tall, so a line that a fraction makes taller
@@ -1521,8 +1577,9 @@ std::string CodeBlock::SelectedVariable() const {
   if (end <= begin) return {};
 
   const std::string word = line.substr(begin, end - begin);
-  for (const mathprogram::Variable& variable : program_.variables()) {
-    if (variable.name == word && variable.kind == mathprogram::Kind::Real) return word;
+  if (const mathprogram::Variable* variable = SpelledAt(word, fromLine);
+      variable != nullptr && variable->kind == mathprogram::Kind::Real) {
+    return variable->name;
   }
   // A real shared from another box comes out too. Its axis is its home box's,
   // which is the app's business: here it is enough that it is a real.
@@ -1889,6 +1946,7 @@ void CodeBlock::DevKeys(const std::string& keys) {
       std::sscanf(key.c_str() + 6, "%d,%d", &caretLine_, &caretCol_);
       ClampCaret();
       SelectNone();
+      caretUsed_ = true;   // put there, as a click would
     } else if (key.rfind("anchor:", 0) == 0) {
       std::sscanf(key.c_str() + 7, "%d,%d", &anchorLine_, &anchorCol_);
     } else if (key == "ctrl+d") {
@@ -1991,7 +2049,10 @@ void CodeBlock::SetColorValue(const std::string& name, const float rgb[3], bool 
 void CodeBlock::SetComponentValues(const std::string& name, const std::vector<float>& parts) {
   const std::vector<mathprogram::Variable>& variables = program_.variables();
   for (std::size_t i = 0; i < variables.size(); ++i) {
-    if (variables[i].name != name || variables[i].kind != mathprogram::Kind::Multivector) continue;
+    if (variables[i].name != name || (variables[i].kind != mathprogram::Kind::Multivector &&
+                                      variables[i].kind != mathprogram::Kind::Point)) {
+      continue;
+    }
     program_.SetComponents(i, parts, ExecutedUpTo());
     return;
   }
@@ -2046,6 +2107,11 @@ std::vector<std::pair<std::string, float>> CodeBlock::KnobValues() const {
       out.emplace_back(variable.name + ".r", rgb[0]);
       out.emplace_back(variable.name + ".g", rgb[1]);
       out.emplace_back(variable.name + ".b", rgb[2]);
+    } else if (variable.kind == mathprogram::Kind::Point && !variable.literals.empty() &&
+               variable.literals.front().components.size() == 2) {
+      const std::vector<float>& xy = variable.literals.front().components;
+      out.emplace_back(variable.name + ".x", xy[0]);
+      out.emplace_back(variable.name + ".y", xy[1]);
     } else if (variable.kind == mathprogram::Kind::Multivector && !variable.literals.empty() &&
                variable.literals.front().array) {
       const std::vector<float>&       parts = variable.literals.front().components;
@@ -2993,12 +3059,16 @@ void CodeBlock::ProbeIfNeeded() {
   // A box that says `time` or `randChanging` has moved whether or not anything
   // else has, so it is asked again every frame.
   if (animated_) signature.push_back(static_cast<float>(frame_));
+  // And how many of a loop's passes are wanted, which decides how much is read.
+  signature.push_back(static_cast<float>(loopValues_));
   if (signature == probeSignature_) return;
   probeSignature_ = signature;
 
   SetLiveUniforms();
   const int reportMode = 1;
   if (modeLoc_ >= 0) SetShaderValue(shader_, modeLoc_, &reportMode, SHADER_UNIFORM_INT);
+  const int passCap = std::clamp(loopValues_, 1, mathprogram::Program::kMaxPasses);
+  if (passCapLoc_ >= 0) SetShaderValue(shader_, passCapLoc_, &passCap, SHADER_UNIFORM_INT);
 
   if (traceBuffer_ != 0) rlBindShaderBuffer(traceBuffer_, 0);
 
@@ -3014,11 +3084,13 @@ void CodeBlock::ProbeIfNeeded() {
   rlEnableColorBlend();
   EndInnerTexture();
 
-  if (traceBuffer_ != 0 && traceFloats_ > 0) {
-    std::vector<float> values(static_cast<std::size_t>(traceFloats_), 0.0f);
+  // Only as many of each loop's passes as are shown: they are laid one pass after
+  // another, so the rest is simply not read.
+  const int wanted = std::min(traceFloats_, program_.TraceFloats(passCap));
+  if (traceBuffer_ != 0 && wanted > 0) {
+    std::vector<float> values(static_cast<std::size_t>(wanted), 0.0f);
     rlReadShaderBuffer(traceBuffer_, values.data(),
-                       static_cast<unsigned int>(traceFloats_ * static_cast<int>(sizeof(float))),
-                       0);
+                       static_cast<unsigned int>(wanted * static_cast<int>(sizeof(float))), 0);
     program_.TakeTrace(std::move(values));
   }
 
@@ -3108,7 +3180,7 @@ void CodeBlock::CompileShader() {
       if (!variable.free) continue;
       if (variable.kind != mathprogram::Kind::Real && variable.kind != mathprogram::Kind::Color &&
           variable.kind != mathprogram::Kind::Multivector &&
-          variable.kind != mathprogram::Kind::Bool) {
+          variable.kind != mathprogram::Kind::Bool && variable.kind != mathprogram::Kind::Point) {
         continue;
       }
       for (const mathprogram::Literal& literal : variable.literals) {
@@ -3132,6 +3204,7 @@ void CodeBlock::CompileShader() {
     // The same shader answers the other two questions, so there is nothing
     // else to compile -- only the rest of its slots to look up.
     modeLoc_ = GetShaderLocation(shader_, "sbMode");
+    passCapLoc_ = GetShaderLocation(shader_, "sbPassCap");
     timeLoc_ = GetShaderLocation(shader_, "time");
     frameLoc_ = GetShaderLocation(shader_, "sbFrameCount");
     // `time` counts from here.
@@ -3182,8 +3255,7 @@ void CodeBlock::CompileShader() {
     // than a pixel each, because there is no packing to undo and no limit at
     // four bytes.
     {
-      const int floats = program_.tracedLines() *
-                         static_cast<int>(program_.tracedSlots().size());
+      const int floats = program_.TraceFloats(mathprogram::Program::kMaxPasses);
       if (floats > 0) {
         if (traceBuffer_ != 0) rlUnloadShaderBuffer(traceBuffer_);
         traceFloats_ = floats;
@@ -3316,8 +3388,19 @@ void CodeBlock::Poll() {
     }
   }
 
-  // What the windows show is what the values were where the box is being read.
-  program_.ApplyTrace(ExecutedUpTo());
+  // What the windows show is what the values were where the box is being read --
+  // except a name being pointed at, which is read at the line it is pointed at.
+  int peek = -1;
+  const std::vector<mathprogram::Variable>& variables = program_.variables();
+  for (std::size_t i = 0; i < variables.size() && !peekName_.empty(); ++i) {
+    const mathprogram::Variable& variable = variables[i];
+    if (variable.name == peekName_ && variable.declaredLine <= peekLine_ &&
+        (variable.scopeEnd < 0 || peekLine_ <= variable.scopeEnd)) {
+      peek = static_cast<int>(i);
+      break;
+    }
+  }
+  program_.ApplyTrace(ExecutedUpTo(), loopValues_, functionValuesWithoutCaret_, peek, peekLine_);
 
   // A shader has to be compiled on the thread holding the graphics context, so
   // the program assembles it and stops, and this is where it is compiled.
@@ -3388,7 +3471,7 @@ void CodeBlock::Draw(const Viewport& viewport, FontStore& fonts) const {
     for (const ActiveValue& active : highlights_) {
       if (!active.Covers(row.line)) continue;
       const Color tint = VariableColor(active.name);
-      for (const Rectangle& box : MentionRects(r, active.name, g, fonts)) {
+      for (const Rectangle& box : MentionRects(r, WrittenOn(active.name, g.rows[r].line), g, fonts)) {
         DrawRectangleRounded(box, 0.30f, 6, Fade(tint, kMentionFillAlpha));
         DrawRectangleRoundedLinesEx(box, 0.30f, 6, std::max(1.0f, 1.1f * g.zoom), tint);
       }
@@ -3642,7 +3725,8 @@ void CodeBlock::DrawOverlay(const Viewport& viewport, FontStore& fonts) const {
         std::vector<Rectangle> mentions;
         for (std::size_t i = 0; i < g.rows.size(); ++i) {
           if (!active.Covers(g.rows[i].line)) continue;
-          for (const Rectangle& box : MentionRects(i, active.name, g, fonts)) {
+          for (const Rectangle& box :
+               MentionRects(i, WrittenOn(active.name, g.rows[i].line), g, fonts)) {
             mentions.push_back(box);
           }
         }

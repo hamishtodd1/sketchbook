@@ -27,7 +27,7 @@ flags: `--screenshot <file.png> --frames <n> --width <w> --height <h>`,
 `--open <file>`, `--verbose`, `--assemble <file>`, `--describe`, `--converse "..."`,
 `--animate_text_transition "<code>" ["<code or $latex$>"]`, `--edit <recording>`
 (with `--playhead <s>`, `--play`, `--edit-keys`), `--list-devices`; `--dev-keys`
-has `record`, `menu`, `newbox:`, `drop`, `pan:`. **Never record with the real
+has `record`, `menu`, `newbox:`, `drop`, `pan:`, `zoom:factor,seconds`. **Never record with the real
 camera or microphone in a test**: set `SKETCHBOOK_TEST_CAPTURE=1`.
 How to test on this machine
 without disturbing Hamish's own session is in `TECHNICAL.md`, *Building and

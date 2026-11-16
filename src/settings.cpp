@@ -63,6 +63,12 @@ std::string Value(const std::string& key) {
   return found == store.end() ? std::string() : found->second;
 }
 
+void Remember(const std::string& key, const std::string& value) {
+  Store store = Read();
+  store[key] = value;
+  Write(store);
+}
+
 bool Fullscreen() {
   const Store store = Read();
   const auto found = store.find("fullscreen");

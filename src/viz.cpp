@@ -88,6 +88,8 @@ VizGpu::Slots VizGpu::Find(unsigned int program) const {
   s.limitsMin = at("sbLimitsMin");
   s.limitsMax = at("sbLimitsMax");
   s.pixel = at("sbPixel");
+  s.picture = at("sbPicture");
+  s.pictureSize = at("sbPictureSize");
   s.seed = at("sbSeed");
   EachKnob([&](const mathprogram::Literal& knob) {
     const int where = at(knob.uniform.c_str());
@@ -302,6 +304,15 @@ void VizGpu::Draw(unsigned int values, int count, const VizFrame& frame) const {
   rlEnableShader(draw_.id);
   Set(frame, drawAt_, count);
   rlBindShaderBuffer(values, 2);
+  // The picture under the values, on a unit of its own.
+  const bool picture = frame.picture != 0 && drawAt_.picture >= 0;
+  if (picture) {
+    const int unit = 1;
+    rlActiveTextureSlot(unit);
+    rlEnableTexture(frame.picture);
+    rlSetUniform(drawAt_.picture, &unit, RL_SHADER_UNIFORM_INT, 1);
+    SetVec2(drawAt_.pictureSize, frame.pictureSize);
+  }
 
   // A flat shape has no back face, and a mesh written the way anyone would
   // write one should not vanish because the camera or the screen's upside-down
@@ -317,6 +328,11 @@ void VizGpu::Draw(unsigned int values, int count, const VizFrame& frame) const {
   }
   rlDisableVertexArray();
   rlEnableBackfaceCulling();
+  if (picture) {
+    rlActiveTextureSlot(1);
+    rlDisableTexture();
+    rlActiveTextureSlot(0);
+  }
   rlDisableShader();
 }
 
@@ -467,7 +483,8 @@ void VizPane::Draw(const VizGpu& viz, const VizFrame& frame) const {
 
 int VizPane::Find(const CodeBlock* block, const std::string& name) const {
   for (std::size_t i = 0; i < items_.size(); ++i) {
-    if (items_[i].sample < 0 && items_[i].block == block && items_[i].name == name) {
+    if (items_[i].sample < 0 && items_[i].pass < 0 && items_[i].block == block &&
+        items_[i].name == name) {
       return static_cast<int>(i);
     }
   }
@@ -656,6 +673,16 @@ bool VizStore::Has(const std::string& type, const std::string& dw) const {
     if (library->vizes.count(key) > 0) return true;
   }
   return false;
+}
+
+std::set<std::string> VizStore::DrawnTypes() const {
+  std::set<std::string> out;
+  const auto add = [&](const std::string& key) { out.insert(key.substr(0, key.find('@'))); };
+  for (const auto& [key, block] : local_) add(key);
+  for (const std::unique_ptr<Library>& library : libraries_) {
+    for (const auto& [key, block] : library->vizes) add(key);
+  }
+  return out;
 }
 
 std::map<std::string, mathprogram::FunctionViz> VizStore::FunctionVizes(

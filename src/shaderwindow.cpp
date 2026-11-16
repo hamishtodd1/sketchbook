@@ -5,18 +5,91 @@
 
 #include <algorithm>
 
+#include <cstdio>
+
+#include "carry.h"
 #include "grid.h"
+#include "rlgl.h"
+#include "screen.h"
 #include "selection.h"
 #include "hover.h"
+#include "tex/tex.h"
+#include "text.h"
 #include "theme.h"
 #include "windowname.h"
 
 namespace sb {
 namespace {
 
-// World units, like every other window.
+// How far outside the argument's viz the pointer may be and still take hold of
+// it, by its `grab`, in pixels at a zoom of one.
+constexpr float kPointReach = 4.0f;
+// The largest a picture's texture is made: past this a window is mostly off
+// screen anyway.
+constexpr int kMaxPicture = 4096;
+
+// A view's plane as its viz is told it: value units into the window's own clip
+// space, with the pointer as a ray straight down into it.
+VizFrame PlaneFrame(const ShaderView& view, Rectangle rect, Vector2 pointer, float zoom) {
+  const float span = std::max(view.span, 1e-4f);
+  const float half = span * 0.5f;
+  VizFrame    frame;
+  frame.viewProj = Matrix{};
+  frame.viewProj.m0 = 2.0f / span;
+  frame.viewProj.m12 = -2.0f * view.centre.x / span;
+  frame.viewProj.m5 = 2.0f / span;
+  frame.viewProj.m13 = -2.0f * view.centre.y / span;
+  frame.viewProj.m10 = 1.0f;
+  frame.viewProj.m15 = 1.0f;
+  frame.size = {rect.width, rect.height};
+  frame.pointer = {pointer.x - rect.x, pointer.y - rect.y};
+  frame.rayOrigin = {view.centre.x - half + (pointer.x - rect.x) / std::max(rect.width, 1.0f) * span,
+                     view.centre.y + half - (pointer.y - rect.y) / std::max(rect.height, 1.0f) * span,
+                     1.0f};
+  frame.rayDir = {0.0f, 0.0f, -1.0f};
+  frame.eye = {frame.rayOrigin.x, frame.rayOrigin.y, 1.0f};
+  frame.pixel = zoom * span / std::max(rect.width, 1.0f);
+  return frame;
+}
+
+std::string Number(float value) {
+  char buffer[64];
+  std::snprintf(buffer, sizeof(buffer), "%.4g", static_cast<double>(value));
+  return buffer;
+}
 
 }  // namespace
+
+const mathprogram::Variable* ShaderPanel::PointOf(const ShaderView& view) const {
+  if (view.block == nullptr) return nullptr;
+  const int which = view.block->FlatPictureFunction();
+  const std::vector<mathprogram::Function>& functions = view.block->Functions();
+  if (which < 0 || which >= static_cast<int>(functions.size())) return nullptr;
+  const mathprogram::Function& fn = functions[static_cast<std::size_t>(which)];
+  for (const mathprogram::Variable& variable : view.block->Variables()) {
+    if (variable.kind == mathprogram::Kind::Point && variable.argument &&
+        variable.declaredLine == fn.firstLine && variable.components.size() == 2) {
+      return &variable;
+    }
+  }
+  return nullptr;
+}
+
+Vector2 ShaderPanel::ScreenOf(const ShaderView& view, Rectangle rect, const float* at) {
+  const float span = std::max(view.span, 1e-4f);
+  const float half = span * 0.5f;
+  return {rect.x + (at[0] - (view.centre.x - half)) / span * rect.width,
+          rect.y + ((view.centre.y + half) - at[1]) / span * rect.height};
+}
+
+void ShaderPanel::ReleaseGpu() {
+  for (auto& [block, pane] : panes_) pane.Release();
+  panes_.clear();
+  for (auto& [block, picture] : pictures_) {
+    if (picture.loaded) UnloadRenderTexture(picture.target);
+  }
+  pictures_.clear();
+}
 
 void ShaderPanel::Forget(const CodeBlock* block) {
   views_.erase(std::remove_if(views_.begin(), views_.end(),
@@ -24,6 +97,15 @@ void ShaderPanel::Forget(const CodeBlock* block) {
                views_.end());
   gone_.Drop([block](const ShaderView& view) { return view.block == block; });
   dragging_ = false;
+  pointDragging_ = false;
+  if (auto pane = panes_.find(block); pane != panes_.end()) {
+    pane->second.Release();
+    panes_.erase(pane);
+  }
+  if (auto picture = pictures_.find(block); picture != pictures_.end()) {
+    if (picture->second.loaded) UnloadRenderTexture(picture->second.target);
+    pictures_.erase(picture);
+  }
 }
 
 bool ShaderPanel::Sync(const Blocks& blocks) {
@@ -149,20 +231,23 @@ void ShaderPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
   if (out == nullptr) return;
   const Vector2 pointer = hover::Pointer();
   for (std::size_t i = 0; i < views_.size(); ++i) {
-    if (views_[i].block == nullptr) continue;
-    // Inside the picture only: on the rim you are holding the window, not
-    // pointing at a value.
-    if (!CheckCollisionPointRec(pointer, RectFor(i, viewport, fonts))) continue;
-    // The one window whose wire really does leave the pointer, because here the
-    // pointer *is* the value: it is the point the function is being asked at.
-    const int which = views_[i].block->FlatPictureFunction();
+    const mathprogram::Variable* point = PointOf(views_[i]);
+    if (point == nullptr) continue;
+    const Rectangle rect = RectFor(i, viewport, fonts);
+    const Vector2   dot = ScreenOf(views_[i], rect, point->components.data());
+    const bool      held = pointDragging_ && pointView_ == i;
+    // The argument under the pointer, by its viz's `grab`, inside the picture: on
+    // the rim you are holding the window, not pointing at a value.
+    const auto pane = panes_.find(views_[i].block);
+    const bool over = pane != panes_.end() &&
+                      pane->second.Nearest(kPointReach * viewport.Zoom(),
+                                           [](const VizItem&) { return true; }) >= 0;
+    if (!held && (!CheckCollisionPointRec(pointer, rect) || !over)) continue;
     const std::vector<mathprogram::Function>& functions = views_[i].block->Functions();
-    if (which < 0 || which >= static_cast<int>(functions.size())) return;
-    const mathprogram::Function& fn = functions[static_cast<std::size_t>(which)];
-    if (fn.parameter.empty()) return;
-    ActiveValue value{views_[i].block, fn.parameter, pointer};
-    value.firstLine = fn.firstLine;
-    value.lastLine = fn.lastLine;
+    const int which = views_[i].block->FlatPictureFunction();
+    ActiveValue value{views_[i].block, point->name, dot, /*wired=*/false, held};
+    value.firstLine = functions[static_cast<std::size_t>(which)].firstLine;
+    value.lastLine = functions[static_cast<std::size_t>(which)].lastLine;
     out->push_back(value);
     return;
   }
@@ -171,6 +256,22 @@ void ShaderPanel::ActiveVariables(const Viewport& viewport, FontStore& fonts,
 bool ShaderPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
   if (views_.empty()) return false;
   const Vector2 pointer = GetMousePosition();
+
+  // The argument's dot, held: where the viz's `drag` says the pointer is asking
+  // it to be, which arrives a frame after it was asked.
+  if (pointDragging_) {
+    if (pointView_ < views_.size()) {
+      std::vector<float> parts;
+      if (auto pane = panes_.find(views_[pointView_].block);
+          pane != panes_.end() && pane->second.TakeDrag(&parts) && parts.size() == 2) {
+        views_[pointView_].block->SetComponentValues(pointName_, parts);
+      }
+    }
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT) || pointView_ >= views_.size()) {
+      pointDragging_ = false;
+    }
+    return true;
+  }
 
   if (dragging_) {
     if (dragView_ >= views_.size()) { dragging_ = false; return false; }
@@ -209,7 +310,21 @@ bool ShaderPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
       }
     }
     if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return true;  // hovering claims it
-    if (!onRim) return true;
+    if (!onRim) {
+      // A press on the dot takes hold of the argument; anywhere else in the
+      // picture it is only a look.
+      auto pane = panes_.find(views_[i].block);
+      if (pane != panes_.end() && pane->second.Drags()) {
+        const int j = pane->second.Nearest(kPointReach * viewport.Zoom(),
+                                           [](const VizItem&) { return true; });
+        if (j >= 0) {
+          pointDragging_ = true;
+          pointView_ = i;
+          pointName_ = pane->second.Items()[static_cast<std::size_t>(j)].name;
+        }
+      }
+      return true;
+    }
 
     dragging_ = true;
     dragView_ = i;
@@ -220,10 +335,27 @@ bool ShaderPanel::HandleInput(const Viewport& viewport, FontStore& fonts) {
   return false;
 }
 
-void ShaderPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
+void ShaderPanel::Draw(const Viewport& viewport, FontStore& fonts, VizStore& vizes) const {
+  // What a picture that has gone was holding on the GPU goes with it.
+  const auto present = [&](const CodeBlock* block) {
+    return std::any_of(views_.begin(), views_.end(),
+                       [&](const ShaderView& v) { return v.block == block; });
+  };
+  for (auto it = panes_.begin(); it != panes_.end();) {
+    if (present(it->first)) { ++it; continue; }
+    it->second.Release();
+    it = panes_.erase(it);
+  }
+  for (auto it = pictures_.begin(); it != pictures_.end();) {
+    if (present(it->first)) { ++it; continue; }
+    if (it->second.loaded) UnloadRenderTexture(it->second.target);
+    it = pictures_.erase(it);
+  }
   const float zoom = viewport.Zoom();
   if (zoom < 0.02f) return;
   const Vector2 pointer = GetMousePosition();
+  // How a point of the plane is drawn is a viz, the canvas's or a built-in.
+  const VizGpu* viz = vizes.Find("vec2", "Plane");
 
   for (std::size_t i = 0; i < views_.size(); ++i) {
     const ShaderView& view = views_[i];
@@ -234,11 +366,85 @@ void ShaderPanel::Draw(const Viewport& viewport, FontStore& fonts) const {
 
     const Rectangle rect = RectFor(i, viewport, fonts);
 
-    view.block->DrawPictureInto(rect, view.centre, view.span);
+    // The picture, into a texture of the window's size and then onto the window:
+    // a viz drawn on it reads it there.
+    const int w = std::clamp(static_cast<int>(std::lround(rect.width)), 1, kMaxPicture);
+    const int h = std::clamp(static_cast<int>(std::lround(rect.height)), 1, kMaxPicture);
+    Picture&  picture = pictures_[view.block];
+    if (picture.loaded && (picture.target.texture.width != w || picture.target.texture.height != h)) {
+      UnloadRenderTexture(picture.target);
+      picture.loaded = false;
+    }
+    if (!picture.loaded) {
+      picture.target = LoadRenderTexture(w, h);
+      picture.loaded = picture.target.id != 0;
+    }
+    if (picture.loaded) {
+      BeginTextureMode(picture.target);
+      ClearBackground(BLANK);
+      view.block->DrawPictureInto({0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h)},
+                                  view.centre, view.span);
+      EndInnerTexture();
+      DrawTexturePro(picture.target.texture,
+                     {0.0f, 0.0f, static_cast<float>(w), -static_cast<float>(h)}, rect, {0.0f, 0.0f},
+                     0.0f, WHITE);
+    }
+
+    // The argument, where the function is being read.
+    if (const mathprogram::Variable* point = PointOf(view); viz != nullptr && point != nullptr) {
+      VizPane& pane = panes_[view.block];
+      pane.Collect();
+      pane.Begin();
+      const Color tint = view.block->VariableColor(point->name);
+      pane.Add({view.block, point->name}, tint, point->components.data(), 2);
+      const Vector2  aim = carry::Position();
+      VizFrame       frame = PlaneFrame(view, rect, aim, zoom);
+      if (picture.loaded) {
+        frame.picture = picture.target.texture.id;
+        frame.pictureSize = {static_cast<float>(w), static_cast<float>(h)};
+      }
+      pane.Settle(*viz, frame, {view.centre.x, view.centre.y, view.span, rect.x, rect.y, rect.width, rect.height},
+                  CheckCollisionPointRec(aim, rect), pointDragging_ && pointView_ == i ? 0 : -1);
+      rlDrawRenderBatchActive();
+      rlViewport(static_cast<int>(rect.x), ScreenHeight() - static_cast<int>(rect.y + rect.height),
+                 static_cast<int>(rect.width), static_cast<int>(rect.height));
+      pane.Draw(*viz, frame);
+      rlViewport(0, 0, ScreenWidth(), ScreenHeight());
+
+      // Its name and its x and y beside it while it is pointed at or held, on a
+      // backing so they read over any picture -- kept inside the window.
+      const Vector2 dot = ScreenOf(view, rect, point->components.data());
+      const float   em = 13.0f * zoom;
+      const bool    pointed = (pointDragging_ && pointView_ == i) ||
+                           (CheckCollisionPointRec(aim, rect) &&
+                            pane.Nearest(kPointReach * zoom, [](const VizItem&) { return true; }) >= 0);
+      if (pointed && em >= 5.0f && CheckCollisionPointRec(dot, rect)) {
+        const tex::Layout name = tex::Render(point->latexName, fonts, em, /*display=*/false);
+        const std::string xy =
+            "x " + Number(point->components[0]) + "   y " + Number(point->components[1]);
+        const float gap = 5.0f * zoom;
+        const float width = name.width + gap + text::Measure(fonts, Face::MainRegular, xy, em);
+        const float pad = 4.0f * zoom;
+        const float height = em * 1.35f;
+        // Clear of the loupe, which is half this wide either side of the point.
+        const float clear = 17.0f * zoom;
+        float left = dot.x + clear;
+        if (left + width + pad > rect.x + rect.width) left = dot.x - clear - width;
+        left = std::max(left, rect.x + pad);
+        const float top = std::clamp(dot.y - height * 0.5f, rect.y + pad,
+                                     rect.y + rect.height - height - pad);
+        DrawRectangleRounded({left - pad, top, width + 2.0f * pad, height}, 0.35f, 6,
+                             Fade(kAxisBg, 0.85f));
+        const float baseline = top + height * 0.74f;
+        tex::DrawLayout(name, fonts, {left, baseline}, tint);
+        text::Draw(fonts, Face::MainRegular, xy, {left + name.width + gap, baseline}, em,
+                   kAxisValue);
+      }
+    }
     DrawRectangleLinesEx(rect, std::max(1.0f, 1.0f * zoom), Fade(kCodeFg, 0.25f));
     if (carried || PointOnRim(rect, hover::Pointer())) DrawRim(rect, zoom, carried);
     if (carried || CheckCollisionPointRec(hover::Pointer(), rect) || PointOnRim(rect, hover::Pointer())) {
-      windowname::Offer(rect, "Picture");
+      windowname::Offer(rect, "Plane");
     }
   }
 }

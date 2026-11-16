@@ -161,7 +161,7 @@ block -1383.78 0 26 0 0 0 0 0 0
 > vec3 triToVec3( in Tri t)  { return vec3(t.e023, t.e013, t.e012) / t.e123; }
 > Tri triFromVec3(in vec3 v) { return e123 + v.x * e023 + v.y * e013 + v.z * e012; }
 > 
-> float spinorNormSq(in Even r) { return (r * ~r).s; }
+> float spinorNormSq(in Even r) { return (r * ~r).e; }
 > Even cheapSqrt(in Even r) {
 >   return 1. + r / sqrt(spinorNormSq(r)); 
 > }
@@ -169,8 +169,8 @@ end
 axis 1 0 0 -0.0637 4 2 1 0
 ref 2 d
 axis 0 -172.973 1902.7 10.06 28.4 4 1.44166 0
-ref 4 cylinderRadius
-ref 4 cylinderHeight
+ref 4 mesh:cylinderRadius
+ref 4 mesh:cylinderHeight
 axis 1 0 0 0 4 5 1 0
 space 0 0 -826.426 1883.48 2 2.44 -0.28 10.1724 1 1 1
 point 2 a

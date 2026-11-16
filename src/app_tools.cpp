@@ -134,28 +134,51 @@ std::string App::DescribeBox(CodeBlock& block) {
     out += "Values:\n";
     for (const mathprogram::Variable& variable : program.variables()) {
       out += "  " + variable.name + " : " + variable.type;
-      out += variable.free ? " (free: has a knob)" : " (derived)";
+      out += !variable.free                              ? " (derived)"
+             : variable.kind == mathprogram::Kind::Point ? " (free: a loupe he drags on its Plane)"
+                                                         : " (free: has a knob)";
       if (variable.local) out += " (inside a function)";
       if (!variable.known) {
         out += " = not worked out yet";
       } else if (variable.kind == mathprogram::Kind::Real) {
         out += " = " + Number(variable.value);
+        // Read on a line inside a loop: what it was on each pass there.
+        if (!variable.passes.empty()) {
+          out += " (each pass:";
+          for (std::size_t p = 0; p < variable.passes.size(); ++p) {
+            out += (p == 0 ? " " : ", ") + Number(variable.passes[p]);
+          }
+          out += ")";
+        }
       } else if (!variable.components.empty()) {
         // Each part by name -- `e012 = 0.5` -- since a list of bare numbers says
         // nothing about which blade is which.
         std::vector<std::string> names;
         if (variable.kind == mathprogram::Kind::Color) names = {"r", "g", "b"};
+        else if (variable.kind == mathprogram::Kind::Point) names = {"x", "y"};
         else if (variable.kind == mathprogram::Kind::Multivector) {
           names = clifford::MemberNames(variable.type, block.Algebra());
         }
         if (names.size() != variable.components.size()) names.clear();
-        out += " = (";
-        for (std::size_t i = 0; i < variable.components.size(); ++i) {
-          if (i > 0) out += ", ";
-          if (!names.empty()) out += names[i] + " ";
-          out += Number(variable.components[i]);
+        const auto parts = [&](const float* at) {
+          std::string said = "(";
+          for (std::size_t i = 0; i < variable.components.size(); ++i) {
+            if (i > 0) said += ", ";
+            if (!names.empty()) said += names[i] + " ";
+            said += Number(at[i]);
+          }
+          return said + ")";
+        };
+        out += " = " + parts(variable.components.data());
+        // Read on a line inside a loop: what it was on each pass there.
+        const std::size_t n = variable.components.size();
+        if (variable.passes.size() >= n && variable.passes.size() % n == 0) {
+          out += " (each pass:";
+          for (std::size_t p = 0; p < variable.passes.size(); p += n) {
+            out += (p == 0 ? " " : ", ") + parts(&variable.passes[p]);
+          }
+          out += ")";
         }
-        out += ")";
       }
       out += "\n";
     }

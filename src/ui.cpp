@@ -37,13 +37,16 @@ struct MenuLayout {
   Rectangle ask;
   Rectangle record;
   Rectangle alwaysCode;
+  Rectangle functionValues;
+  Rectangle loopHeader;
+  Rectangle loop[kLoopValueCount];
   Rectangle apiKey;
   Rectangle fullscreen;
 };
 
 // The panel is as tall as what is in it, since what is in it changes: the slide
 // shapes fold away and the recent list is however long it is.
-MenuLayout Compute(bool aspectOpen, int recentCount) {
+MenuLayout Compute(bool aspectOpen, bool loopOpen, int recentCount) {
   MenuLayout m;
   m.aspectOpen = aspectOpen;
   m.recentRows = std::clamp(recentCount, 0, recent::kMaxRecent);
@@ -104,6 +107,23 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   // stays put while the menu is up, and the tick is what says which it is in.
   m.alwaysCode = {inset, y, inner, kRowHeight};
   y += kRowHeight + 8.0f;
+  m.functionValues = {inset, y, inner, kRowHeight};
+  y += kRowHeight + 8.0f;
+  // How many of a loop's passes a value shows: chosen now and then, so folded
+  // away like the slide shapes, with the choice written on the header.
+  m.loopHeader = {inset, y, inner, kRowHeight};
+  y += kRowHeight;
+  if (loopOpen) {
+    y += 10.0f;
+    constexpr float kLoopGap = 8.0f;
+    const float     width =
+        (inner - kLoopGap * static_cast<float>(kLoopValueCount - 1)) / kLoopValueCount;
+    for (int i = 0; i < kLoopValueCount; ++i) {
+      m.loop[i] = {inset + static_cast<float>(i) * (width + kLoopGap), y, width, kRowHeight};
+    }
+    y += kRowHeight;
+  }
+  y += 8.0f;
   // The Claude API key, pasted rather than typed: it is copied from the
   // Console, and a key never has to be shown on screen to be given.
   m.apiKey = {inset, y, inner, kButtonHeight};
@@ -136,6 +156,9 @@ MenuLayout Compute(bool aspectOpen, int recentCount) {
   place(&m.ask);
   place(&m.record);
   place(&m.alwaysCode);
+  place(&m.functionValues);
+  place(&m.loopHeader);
+  for (int i = 0; i < kLoopValueCount; ++i) place(&m.loop[i]);
   place(&m.apiKey);
   place(&m.fullscreen);
   m.recentLabelTop += at.y;
@@ -227,7 +250,7 @@ void OptionsMenu::Toggle() {
 MenuAction OptionsMenu::Update(Options* options) {
   if (!visible_) return MenuAction::None;
 
-  const MenuLayout m = Compute(aspectOpen_, static_cast<int>(recent_.size()));
+  const MenuLayout m = Compute(aspectOpen_, loopOpen_, static_cast<int>(recent_.size()));
   const Vector2 mouse = GetMousePosition();
   if (!IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return MenuAction::None;
 
@@ -264,6 +287,19 @@ MenuAction OptionsMenu::Update(Options* options) {
   if (CheckCollisionPointRec(mouse, m.ask)) return MenuAction::AskClaude;
   if (CheckCollisionPointRec(mouse, m.record)) return MenuAction::Record;
   if (CheckCollisionPointRec(mouse, m.alwaysCode)) return MenuAction::AlwaysCode;
+  if (CheckCollisionPointRec(mouse, m.functionValues)) return MenuAction::FunctionValues;
+  if (CheckCollisionPointRec(mouse, m.loopHeader)) {
+    loopOpen_ = !loopOpen_;
+    return MenuAction::None;
+  }
+  if (loopOpen_) {
+    for (int i = 0; i < kLoopValueCount; ++i) {
+      if (CheckCollisionPointRec(mouse, m.loop[i])) {
+        options->loopValues = kLoopValues[i];
+        return MenuAction::LoopValues;
+      }
+    }
+  }
   if (CheckCollisionPointRec(mouse, m.apiKey)) return MenuAction::PasteApiKey;
   if (CheckCollisionPointRec(mouse, m.fullscreen)) return MenuAction::Fullscreen;
   return MenuAction::None;
@@ -272,7 +308,7 @@ MenuAction OptionsMenu::Update(Options* options) {
 void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
   if (!visible_) return;
 
-  const MenuLayout m = Compute(aspectOpen_, static_cast<int>(recent_.size()));
+  const MenuLayout m = Compute(aspectOpen_, loopOpen_, static_cast<int>(recent_.size()));
   DrawRectangle(0, 0, ScreenWidth(), ScreenHeight(), kScrim);
 
   DrawRectangleRounded(m.panel, 0.06f, 12, kPanelBg);
@@ -356,6 +392,37 @@ void OptionsMenu::Draw(FontStore& fonts, const Options& options) const {
              CheckCollisionPointRec(mouse, m.record));
   DrawTickbox(fonts, m.alwaysCode, "Always show code", options.alwaysCode,
               CheckCollisionPointRec(mouse, m.alwaysCode));
+  DrawTickbox(fonts, m.functionValues, "Values inside functions without a caret",
+              options.functionValuesWithoutCaret, CheckCollisionPointRec(mouse, m.functionValues));
+
+  // --- how many of a loop's passes, folded away until asked for --------------
+  const bool overLoop = CheckCollisionPointRec(mouse, m.loopHeader);
+  if (overLoop) DrawRectangleRounded(m.loopHeader, 0.25f, 8, Fade(kAccent, 0.08f));
+  const float loopBaseline = TextBaseline(fonts, m.loopHeader, kLabelEm);
+  text::Draw(fonts, Face::MainRegular, "Max loop values to show",
+             {m.loopHeader.x + 26.0f, loopBaseline}, kLabelEm, kPanelText);
+  DrawChevron({m.loopHeader.x + 11.0f, m.loopHeader.y + m.loopHeader.height * 0.5f}, loopOpen_,
+              overLoop ? kPanelText : kPanelMuted);
+  if (!loopOpen_) {
+    const std::string current = std::to_string(options.loopValues);
+    const float       width = text::Measure(fonts, Face::MainRegular, current, kLabelEm);
+    text::Draw(fonts, Face::MainRegular, current,
+               {m.loopHeader.x + m.loopHeader.width - width - 12.0f, loopBaseline}, kLabelEm,
+               kPanelMuted);
+  } else {
+    for (int i = 0; i < kLoopValueCount; ++i) {
+      const bool        chosen = options.loopValues == kLoopValues[i];
+      const bool        over = CheckCollisionPointRec(mouse, m.loop[i]);
+      const std::string label = std::to_string(kLoopValues[i]);
+      DrawRectangleRounded(m.loop[i], 0.25f, 8, chosen ? (over ? kAccentHover : kAccent) : kBoxIdle);
+      DrawRectangleRoundedLines(m.loop[i], 0.25f, 8, chosen ? kAccent : kBoxBorder);
+      const float w = text::Measure(fonts, Face::MainRegular, label, kLabelEm);
+      text::Draw(fonts, Face::MainRegular, label,
+                 {m.loop[i].x + (m.loop[i].width - w) * 0.5f,
+                  m.loop[i].y + m.loop[i].height * 0.5f + kLabelEm * 0.34f},
+                 kLabelEm, chosen ? RAYWHITE : kPanelText);
+    }
+  }
   // Says what pressing it does, and which key is set if one is.
   const std::string keyLabel =
       !options.apiKeyNote.empty() ? options.apiKeyNote

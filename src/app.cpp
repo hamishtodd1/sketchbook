@@ -48,6 +48,16 @@ constexpr int kFileVersion = 3;
 bool App::Init(const std::string& assetDir, std::string* error) {
   if (!fonts_.Load(assetDir + "/fonts", error)) return false;
   options_.apiKeyTail = KeyTail(settings::ApiKey());
+  // How boxes are read, as the person last left it.
+  if (const std::string kept = settings::Value("loopvalues"); !kept.empty()) {
+    const int n = std::atoi(kept.c_str());
+    for (const int offered : kLoopValues) {
+      if (offered == n) options_.loopValues = n;
+    }
+  }
+  options_.functionValuesWithoutCaret = settings::Value("functionvalues") != "0";
+  CodeBlock::SetLoopValues(options_.loopValues);
+  CodeBlock::SetFunctionValuesWithoutCaret(options_.functionValuesWithoutCaret);
   // Every message to Claude carries the canvas as it is when it is sent.
   chats_.SetCanvasViewer([this]() { return ViewCanvas(); });
   canvas_.example = ExampleSource();
@@ -110,6 +120,7 @@ void App::Shutdown() {
   colours_.ReleaseGpu();
   axes_.ReleaseGpu();
   plots_.ReleaseGpu();
+  shaders_.ReleaseGpu();
   // The built-in vizes, which are boxes too, just not on this canvas.
   vizes_.ReleaseGpu();
   if (cursorHidden_) {
@@ -962,6 +973,18 @@ void App::DevKeysStep() {
     }
     if (key == "blur") SetFocus(nullptr);
     else if (key == "focus") SetFocus(devKeysBlock_);
+    // Dev: the canvas's n-th box (from 0) takes the keys from here on, the box
+    // made for them going away -- for a box whose lines `|` cannot carry.
+    else if (key.rfind("into:", 0) == 0) {
+      const int n = std::atoi(key.c_str() + 5);
+      if (n < 0 || n >= static_cast<int>(codeBlocks_.size())) continue;
+      CodeBlock* into = codeBlocks_[static_cast<std::size_t>(n)].get();
+      if (into == devKeysBlock_) continue;
+      if (focus_ == devKeysBlock_) SetFocus(nullptr);
+      RemoveBlock(devKeysBlock_);
+      devKeysBlock_ = into;
+      SetFocus(into);
+    }
     // Dev: the menu's recording button, pressed.
     else if (key == "record") Recording() ? StopRecording() : StartRecording();
     // Dev: Escape on the canvas -- the menu, open or shut.
@@ -987,6 +1010,12 @@ void App::DevKeysStep() {
       std::sscanf(key.c_str() + 4, "%f,%f", &dx, &dy);
       const Vector2 c = viewport_.Centre();
       viewport_.GlideTo({c.x + dx, c.y + dy}, viewport_.Zoom(), 0.4f);
+    }
+    // Dev: the camera glides to `factor` times the zoom it has, over `seconds`.
+    else if (key.rfind("zoom:", 0) == 0) {
+      float factor = 1.0f, seconds = 0.4f;
+      std::sscanf(key.c_str() + 5, "%f,%f", &factor, &seconds);
+      viewport_.GlideTo(viewport_.Centre(), viewport_.Zoom() * factor, seconds);
     }
     else if (key.rfind("dwgrip:", 0) == 0) {
       // Display window `index` of kind `kind` (Resizables() order) dragged by its
@@ -1823,14 +1852,18 @@ void App::ShareAcrossCanvas() {
   std::map<std::string, mathprogram::FunctionViz> drawnWith =
       vizes_.FunctionVizes(codeBlocks_, &vizKnobs);
 
+  // And which types anything can draw, which decides whose loop passes are kept.
+  std::set<std::string> drawable = vizes_.DrawnTypes();
+
   // Nothing any box offers has changed -- the answer nearly every frame.
-  if (now != sharedFrom_ || drawnWith != canvas_.functionVizes) {
+  if (now != sharedFrom_ || drawnWith != canvas_.functionVizes || drawable != canvas_.drawnTypes) {
     sharedFrom_ = std::move(now);
     std::vector<const mathprogram::Program*> programs;
     programs.reserve(sharedFrom_.size());
     for (const auto& [program, version] : sharedFrom_) programs.push_back(program);
     canvas_ = mathprogram::Gather(programs);
     canvas_.functionVizes = std::move(drawnWith);
+    canvas_.drawnTypes = std::move(drawable);
     canvas_.example = ExampleSource();
 
     // Only a box whose share of it changed is built again, and a build that
@@ -2073,6 +2106,15 @@ void App::Update() {
     case MenuAction::AlwaysCode:
       // The menu stays, so the tick can be seen to have changed.
       SetAlwaysCode(!options_.alwaysCode);
+      break;
+    case MenuAction::FunctionValues:
+      options_.functionValuesWithoutCaret = !options_.functionValuesWithoutCaret;
+      CodeBlock::SetFunctionValuesWithoutCaret(options_.functionValuesWithoutCaret);
+      settings::Remember("functionvalues", options_.functionValuesWithoutCaret ? "1" : "0");
+      break;
+    case MenuAction::LoopValues:
+      CodeBlock::SetLoopValues(options_.loopValues);
+      settings::Remember("loopvalues", std::to_string(options_.loopValues));
       break;
     case MenuAction::PasteApiKey: {
       // Whatever is on the clipboard, if it is a key. The menu stays, so the
@@ -2348,6 +2390,17 @@ void App::Update() {
   // polling is where a box puts its spread through its function.
   FeedFunctions();
   ShareAcrossCanvas();
+  // A name pointed at is read at the line it is pointed at -- that one name, so
+  // nothing else on the canvas moves as the pointer crosses a box.
+  for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->SetPeek({}, -1);
+  if (canvasActive) {
+    const Vector2 aim = hover::Pointer();
+    if (CodeBlock* over = BlockAt(aim); over != nullptr) {
+      int line = -1;
+      const std::string name = over->MentionAt(aim, viewport_, fonts_, &line);
+      over->SetPeek(name, line);
+    }
+  }
   for (const std::unique_ptr<CodeBlock>& block : codeBlocks_) block->Poll();
 
   // A box that has just gained (or lost) number lines is a different size than
@@ -2678,7 +2731,7 @@ void App::DrawCanvas(bool look) {
   for (const MathBlock& block : mathBlocks_) block.Draw(viewport_, fonts_);
 
   plots_.Draw(viewport_, fonts_);
-  shaders_.Draw(viewport_, fonts_);
+  shaders_.Draw(viewport_, fonts_, vizes_);
   colours_.Draw(viewport_, fonts_, vizes_);
   surfaces_.Draw(viewport_, fonts_);
   volumes_.Draw(viewport_, fonts_);

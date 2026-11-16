@@ -795,7 +795,8 @@ SpacePanel::Hit SpacePanel::Nearest(std::size_t index, bool samples, float reach
     const VizPane* pane = PaneFor(index, type);
     if (pane == nullptr) continue;
     const int j = pane->Nearest(
-        bestReach, [samples](const VizItem& one) { return (one.sample >= 0) == samples; });
+        bestReach,
+        [samples](const VizItem& one) { return (one.sample >= 0) == samples && one.pass < 0; });
     if (j < 0) continue;
     best = {type, j};
     bestReach = pane->Reach(j);
@@ -840,7 +841,17 @@ void SpacePanel::Prepare(std::size_t index, Rectangle rect, const std::string& t
     for (const ActiveValue& value : lit_) {
       on = on || (value.block == ref.block && value.name == ref.name);
     }
-    pane->Add({ref.block, ref.name}, Blink(ref.block->VariableColor(ref.name), on), parts, n);
+    // **Every pass of a loop**, at the line being read: drawn as the value is,
+    // fainter the earlier, and under the value itself, which is the last.
+    const Color       tint = ref.block->VariableColor(ref.name);
+    const std::size_t passes = variable->passes.size() / static_cast<std::size_t>(n);
+    for (std::size_t p = 0; passes >= 2 && p < passes; ++p) {
+      const float along = static_cast<float>(p) / static_cast<float>(passes - 1);
+      VizItem     item{ref.block, ref.name};
+      item.pass = static_cast<int>(p);
+      pane->Add(item, Fade(tint, 0.2f + 0.5f * along), &variable->passes[p * static_cast<std::size_t>(n)], n);
+    }
+    pane->Add({ref.block, ref.name}, Blink(tint, on), parts, n);
   }
   if (window.home && window.dock != nullptr && window.dock->Samples().Live()) {
     const Sampling& fed = window.dock->Samples();

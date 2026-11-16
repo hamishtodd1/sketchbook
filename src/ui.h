@@ -34,7 +34,16 @@ struct Options {
   std::string apiKeyNote;
   // Whether this session is being recorded (recording.h).
   bool        recording = false;
+  // How a box is read: how many of a loop's passes a value shows, and whether a
+  // value inside a function shows with no caret in the box. The person's, so
+  // kept in their settings rather than with a canvas.
+  int         loopValues = 16;
+  bool        functionValuesWithoutCaret = true;
 };
+
+// What *Max loop values to show* offers.
+inline constexpr int kLoopValueCount = 5;
+inline constexpr int kLoopValues[kLoopValueCount] = {1, 4, 16, 64, 256};
 
 // The shapes the menu offers. A deck is made for one of them, not for an
 // arbitrary number typed in.
@@ -45,7 +54,8 @@ inline constexpr const char* kAspectNames[kAspectCount] = {"3:2", "16:9", "4:3",
 
 // What the menu is asking the app to do this frame.
 enum class MenuAction { None, NewCanvas, Save, Load, Insert, NewSlide, OpenRecent, Fullscreen,
-                        AlwaysCode, PasteApiKey, AskClaude, Record };
+                        AlwaysCode, PasteApiKey, AskClaude, Record, LoopValues,
+                        FunctionValues };
 
 // The Escape menu. Drawn in screen space at a fixed pixel size, so it does not
 // take part in the canvas zoom.
@@ -70,6 +80,8 @@ class OptionsMenu {
   // then left alone, so the four of them are folded away by default; this is a
   // fact about the menu rather than about the canvas, so it is not saved.
   bool                     aspectOpen_ = false;
+  // Whether the loop counts are showing, folded away like the slide shapes.
+  bool                     loopOpen_ = false;
   std::vector<std::string> recent_;
   std::string              chosen_;
 };

@@ -474,7 +474,7 @@ int ColorPanel::ValueNear(std::size_t index, float zoom) const {
   const VizPane* pane = PaneFor(index);
   if (pane == nullptr) return -1;
   return pane->Nearest(std::max(8.0f, 11.0f * zoom),
-                       [](const VizItem& one) { return one.sample < 0; });
+                       [](const VizItem& one) { return one.sample < 0 && one.pass < 0; });
 }
 
 bool ColorPanel::VizDrags() const {
@@ -880,6 +880,16 @@ void ColorPanel::Draw(const Viewport& viewport, FontStore& fonts, VizStore& vize
         bool inUse = false;
         for (const ActiveValue& value : active) {
           inUse = inUse || (value.block == view.block && value.name == variable.name);
+        }
+        // Every pass of a loop, fainter the earlier, as a number line draws them.
+        const std::size_t passes = variable.passes.size() / 3;
+        for (std::size_t p = 0; passes >= 2 && p < passes; ++p) {
+          const float along = static_cast<float>(p) / static_cast<float>(passes - 1);
+          const float* rgb = &variable.passes[p * 3];
+          VizItem      item{view.block, variable.name};
+          item.pass = static_cast<int>(p);
+          entries.push_back({item, Fade(view.block->VariableColor(variable.name), 0.2f + 0.5f * along),
+                             rgb, depthOf(rgb)});
         }
         entries.push_back({{view.block, variable.name},
                            Blink(view.block->VariableColor(variable.name), inUse),

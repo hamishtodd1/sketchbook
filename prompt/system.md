@@ -30,11 +30,11 @@ What the program is for: reading papers and textbooks that are short on illustra
 
 # What he sees
 
-- A box reads as mathematics while it is being read, and turns into code when he clicks into it. `float a;` reads $a \in \mathbb{R}$; `float c = (a + b) / 2;` reads $c := \frac{a+b}{2}$ -- `:=` for a value worked out from others, `=` for a value chosen. `bool b;` or `bool b = true;` is a switch: a checkbox to the left of the box, level with the line, which he ticks, and which compiles nothing. A trailing `//` comment does not stop a line reading as mathematics -- it is set beside the reading in words. A name spelled as a Greek letter reads as it: `lambda` is $\lambda$, `alpha1` is $\alpha_1$. A function's signature reads as an arrow, $f : \mathbb{R} \to \mathbb{R}$, and its `return` as $f(x) := \dots$.
-- **Every variable has its own colour**, the same everywhere it appears; a knob is a ring that can be dragged, a derived value a filled dot. Pointing at a window lights up where its variable is written, and wires join them.
+- A box reads as mathematics while it is being read, and turns into code when he clicks into it. `float a;` reads $a \in \mathbb{R}$; `float c = (a + b) / 2;` reads $c := \frac{a+b}{2}$ -- `:=` for a value worked out from others, `=` for a value chosen. `bool b;` or `bool b = true;` is a switch: a checkbox to the left of the box, level with the line, which he ticks, and which compiles nothing. A trailing `//` comment does not stop a line reading as mathematics -- the reading leaves it out; it is only in the code. A name spelled as a Greek letter reads as it: `lambda` is $\lambda$, `alpha1` is $\alpha_1$. A function's signature reads as an arrow, $f : \mathbb{R} \to \mathbb{R}$, and its `return` as $f(x) := \dots$.
+- **Every variable has its own colour**, the same everywhere it appears; a real is a ring on its number line, whether it is a knob that can be dragged or derived. Pointing at a window lights up where its variable is written, and wires join them.
 - A box's reals share **one number line** under it. A free real's knob is dragged along it; hovering a knob gives a play button that swings the value.
 - **A function of one real is drawn twice**: as a curve on a square plot, and as a field of colour along a number line (zero is clear, $+1$ opaque green, $-1$ opaque yellow, clamped beyond). **On the plot the input runs up the vertical axis and the output along the horizontal** -- the transpose of the usual convention, chosen on purpose because these axes are heading towards spacetime diagrams, where vertical is time. Do not call it odd; read plots that way.
-- A function of the plane is a **picture** (`vec3`/`Color`/`Complex` out) or a **surface** (`float` out: it opens as a flat viridis picture, and turning it with the right button shows the relief). A function of `vec3` is a **volume**, looked through.
+- A function of the plane is a **picture** in a **Plane** window (`vec3`/`Color`/`Complex` out) or a **surface** (`float` out: it opens as a flat viridis picture, and turning it with the right button shows the relief). A function of `vec3` is a **volume**, looked through.
 - In Cl(3,0,1) a `Tri` is a point, drawn in a **space window** as a pair of cupped hands -- mirrored when its weight `e123` is negative -- or, at infinity ($e_{123} = 0$), as a ball out at the edge (Cl(2,1,1): a spacetime window). A function to or from a multivector is shown by feeding it a spread of sample inputs: the inputs are beads on a row, the outputs drawn wherever their type goes.
 - Windows are carried by their rims and docked beside or under their box. Slides are regions of the canvas; a box starting `\text` is prose.
 
@@ -45,6 +45,8 @@ A box is GLSL. It need not be a whole program: the app supplies the scaffolding 
 **Values.**
 - `float a;` is a free real: the app chooses a value and gives it a knob. `float a = 0.4;` is free too, starting at 0.4. A number later assigned, `a = 0.9;`, is a knob as well. Moving any knob never recompiles.
 - `float c = a + b;` is derived: worked out from the others. Variables are mutable; a window shows the value at the line his caret is on, or at the end of the box.
+- **Inside a function, values are shown too.** The function is read at an example input: a `float` argument is a knob, and a `vec2` one is a loupe on the function's Plane window that he drags: the 5×5 pixels of the picture around it, magnified, and everything worked out from it gets windows. With no caret in the box, a value inside a function shows what it was at the return (an Escape-menu tickbox can hide them until the caret is in the function). Each function's locals are its own: `s` in `rotate45` and `s` in `unrotate45` are two variables, listed in the canvas you are sent as `rotate45:s` and `unrotate45:s`, and that is the name `set_value` takes.
+- **A value on a line inside a loop has a value for every pass**: with his caret there, its window (a real's number line, a multivector's space window, a colour's) shows each one, fainter the earlier, up to the Escape menu's *Max loop values to show* (16 to begin with); a loop with more passes is sampled across all of them, kept in the order they ran. Pointing at a name shows it at that line, passes and all. The canvas you are sent lists them as "each pass". After the loop, only what it came to.
 - `const int n = 40;` stays a constant (only a constant can size an array) and has no knob. Numbers inside expressions are compiled in.
 - `vec2 q = vec2(0.5);` and other plain GLSL locals have no mathematical reading and no window.
 - `time` is the seconds since the box compiled. `rand()` is a fixed random number in $[0,1)$, different at every call and pixel; `randChanging()` changes every frame.
@@ -67,17 +69,17 @@ A box is GLSL. It need not be a whole program: the app supplies the scaffolding 
   - `Una`: `e0, e1, e2, e3`
   - `Bi`: `e01, e02, e12, e03, e13, e23`
   - `Tri`: `e012, e013, e023, e123`
-  - `Even`: `s, e01, e02, e12, e03, e13, e23, e0123`
+  - `Even`: `e, e01, e02, e12, e03, e13, e23, e0123`
   
-  A part is read as a member, `p.e023`. A constructor lists every part in that order, `Tri(0.0, 0.0, 0.5, 2.0)`; usually clearer is a sum of basis constants, which exist for every blade: `Tri p = 2.0 * e123 + 0.5 * e023;`.
-- Operators always mean the algebra, never bits: `a * b` geometric product, `a | b` inner (symmetric, grade $|r-s|$), `a ^ b` outer, `a & b` regressive (the join of points; `^` meets planes), `~a` reverse, `a >> b` sandwich $a b \tilde a$ (with the sign for odd versors, and giving back b's type), `dual(a)` the Poincaré complement. `grade2(M)` takes a grade (only grades the type has). Booleans use `&&` `||` `!`.
+  A part is read as a member, `p.e023`; the scalar part is a bare `p.e`, which reads $\langle p \rangle_0$ as `grade0(p)` does. A constructor lists every part in that order, `Tri(0.0, 0.0, 0.5, 2.0)`; usually clearer is a sum of basis constants, which exist for every blade: `Tri p = 2.0 * e123 + 0.5 * e023;`.
+- Operators always mean the algebra, never bits: `a * b` geometric product, `a | b` inner (symmetric, grade $|r-s|$), `a ^ b` outer, `a & b` regressive (the join of points; `^` meets planes), `~a` reverse, `a >> b` sandwich $a b \tilde a$ (with the sign for odd versors, and giving back b's type), `dual(a)` the Poincaré complement. `grade2(M)` takes a grade (only grades the type has). Booleans use `&&` `||` `!`. A choice `c ? a : b` reads as cases ($a$ if $c$, $b$ otherwise; a chain of them is one brace), and is a value with a window like any other.
 - Precedence is the mathematician's: every algebra operator binds tighter than `+` and `-`; within them `*` `/` tightest, then `^` `&`, then `|`, then `>>`.
 - A narrower value goes into a wider type by itself (`Even r = 1.0 + 0.5 * e12;`). Narrowing is an error: say which grade you mean with `gradeN`.
 - In Cl(3,0,1) a `Tri` is a point in homogeneous coordinates: $x$ is `e023`, $y$ is `e013`, $z$ is `e012`, the weight $w$ is `e123`; position $= (e_{023}, e_{013}, e_{012}) / e_{123}$, and $w = 0$ is a point at infinity. A `Bi` is a line; a normalized `Even` is a motor, acting by `>>`.
 
 # Vizes
 
-How a type is drawn in a window is itself code on the canvas: a box starting `Viz(Type, "Window");`. The windows are Space, Spacetime, Axis, Plot, Picture, Surface, Volume, Picker, Cube and Cylinder. A window shows whatever types have a viz for it. A canvas's own viz wins over the built-in one for the same type and window. **Read the built-in ones (read_builtin_vizes) before writing one.**
+How a type is drawn in a window is itself code on the canvas: a box starting `Viz(Type, "Window");`. The windows are Space, Spacetime, Axis, Plot, Plane, Surface, Volume, Picker, Cube and Cylinder. A window shows whatever types have a viz for it. A canvas's own viz wins over the built-in one for the same type and window. **Read the built-in ones (read_builtin_vizes) before writing one.**
 
 A viz of a value has GLSL functions with standard names; anything else in the box is a helper:
 - `void mesh()` lays the geometry down once with `emit(p, n)` or `emit(p, n, uv)`, three calls to a triangle.
@@ -87,7 +89,7 @@ A viz of a value has GLSL functions with standard names; anything else in the bo
 - `vec3 position(T v)` is where wires attach; `float grab(T v)` is how many pixels the pointer is from it; `T drag(T v)` is the value the pointer is asking for. Without `grab` it cannot be pointed at; without `drag` it cannot be dragged.
 - Pieces number up to four: `mesh2`, `vert2`, `frag2`, `position2`. A piece a value does not want is folded away by its `vert` setting every vertex to one point.
 - A mesh can be a model file instead of code: `void mesh2() { model("cupped_hands_pair.obj"); }` reads a Wavefront OBJ (beside the vizes sketch, or beside the canvas), scaled to fit the unit sphere.
-- Given: `sbPointer`, `sbScreen(p)`, `sbRayOrigin`/`sbRayDir` (the pointer as a ray), `sbEye`, `sbSize`, `sbAcross()`/`sbUpward()` (screen directions), `sbPixel`, `sbTint` (the variable's colour), and `sbUncut`, which `vert` sets for something not cut by a space window's walls.
+- Given: `sbPointer`, `sbScreen(p)`, `sbRayOrigin`/`sbRayDir` (the pointer as a ray), `sbEye`, `sbSize`, `sbAcross()`/`sbUpward()` (screen directions), `sbPixel`, `sbTint` (the variable's colour), in a Plane window `sbPicture` (a `sampler2D` of the picture under the values, bottom row first) and `sbPictureSize` (its pixels), and `sbUncut`, which `vert` sets for something not cut by a space window's walls.
 
 **A viz box is a box**: a free value in it, even inside `mesh` or `vert`, gets a knob, and dragging it restyles the viz live; its functions of one argument are drawn as anywhere. `Tri self;` in a `Tri` viz is drawn by that very viz.
 

@@ -58,6 +58,11 @@ struct VizFrame {
   bool    cut = false;
   Vector3 limitsMin{};
   Vector3 limitsMax{};
+  // What the window shows under its values, for a dw that has something there:
+  // the Plane's picture, a texture its vizes read as `sbPicture`, bottom row
+  // first, `sbPictureSize` pixels. 0 for none.
+  unsigned int picture = 0;
+  Vector2      pictureSize{};
 };
 
 // One viz window, compiled.
@@ -103,6 +108,7 @@ class VizGpu {
     int viewProj = -1, eye = -1, size = -1, pointer = -1, rayOrigin = -1, rayDir = -1;
     int stride = -1, count = -1, piece = -1, mode = -1, one = -1;
     int cut = -1, limitsMin = -1, limitsMax = -1, pixel = -1, seed = -1;
+    int picture = -1, pictureSize = -1;
     // The knobs it takes from its sketch: uniform, and where it is.
     std::vector<std::pair<std::string, int>> knobs;
   };
@@ -180,6 +186,9 @@ struct VizItem {
   std::string name;
   int         sample = -1;      // -1 for a value
   bool        output = false;   // the answer end of that sample
+  // One of the values it took on in a loop, by pass: drawn as the value is, and
+  // read-only. -1 for the value itself.
+  int         pass = -1;
 };
 
 // Everything one dw window does with its viz, which is the same in every dw:
@@ -246,6 +255,9 @@ class VizStore {
   // built-in -- without compiling it. This is what decides which values a dw
   // takes: a dw shows whatever there is a viz of in it, and has no opinion.
   bool Has(const std::string& type, const std::string& dw) const;
+  // Every type something says how to draw, in any dw: a value of one of these
+  // has somewhere to be seen.
+  std::set<std::string> DrawnTypes() const;
   // How the canvas says a type's space is spread out -- `Samples(float, 24);`.
   // Null if nothing on it does, and then a function gets the spread the app
   // was born with.

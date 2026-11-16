@@ -123,7 +123,8 @@ const json::Value& Tools() {
                      "Moves a free value's knob, as Hamish would by dragging it. Nothing "
                      "recompiles. Returns the box's values afterwards.",
                      {{"box", Property("string", "The box's id, like b7.")},
-                      {"name", Property("string", "The free variable's name.")},
+                      {"name", Property("string", "The free variable's name, as the canvas lists it: "
+                                                  "`f:k` for a `k` inside function `f`.")},
                       {"value", std::move(value)}},
                      {"box", "name", "value"}));
     }

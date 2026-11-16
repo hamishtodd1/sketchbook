@@ -16,7 +16,7 @@ namespace sb::vizglsl {
 namespace {
 
 // The windows that ask for a viz, as a viz box names them.
-const char* const kWindows[] = {"Space",   "Spacetime", "Axis",   "Plot",    "Picture",
+const char* const kWindows[] = {"Space",   "Spacetime", "Axis",   "Plot",    "Plane",
                                 "Surface", "Volume",    "Picker", "Cube", "Cylinder"};
 
 // What each standard name is, and which stage it belongs to.
@@ -208,6 +208,7 @@ int CountLines(const std::string& text) {
 // GLSL reaches them. A real is itself.
 std::vector<std::string> Parts(const std::string& type, const clifford::Signature& sig) {
   if (type == "float") return {""};
+  if (type == "vec2") return {"x", "y"};
   if (mathline::IsColorType(type)) return {"x", "y", "z"};
   if (mathline::IsComplexType(type)) return types::complexnum::MemberNames();
   return clifford::MemberNames(type, sig);
@@ -426,7 +427,7 @@ std::vector<std::string> FunctionWindows(const std::string& type) {
   if (type == "R2ToR") return {"Surface"};
   if (type == "R2ToR3" || type == "R2ToC" || type == "CToR" || type == "CToR3" ||
       type == "CToC") {
-    return {"Picture"};
+    return {"Plane"};
   }
   if (type == "R3ToR" || type == "R3ToC") return {"Volume"};
   return {};
@@ -435,7 +436,7 @@ std::vector<std::string> FunctionWindows(const std::string& type) {
 int ShapeOf(const std::string& dw) {
   if (dw == "Axis") return 0;
   if (dw == "Plot") return 1;
-  if (dw == "Picture") return 2;
+  if (dw == "Plane") return 2;
   if (dw == "Surface") return 3;
   if (dw == "Volume") return 4;
   return -1;
@@ -451,7 +452,7 @@ std::string Spliced(const std::string& name, const std::string& type, const std:
 
 std::string AtOf(const std::string& dw) {
   if (dw == "Axis") return "vec2(mix(sbRange.x, sbRange.y, sbVarying.x), 0.0)";
-  if (dw == "Plot" || dw == "Picture") {
+  if (dw == "Plot" || dw == "Plane") {
     return "vec2(mix(sbRange.x, sbRange.y, sbVarying.x), mix(sbVertical.x, sbVertical.y, "
            "sbVarying.y))";
   }
@@ -915,6 +916,10 @@ Sources Assemble(const std::vector<std::string>& lines, const std::string& type,
       "in vec3 sbNV;\n"
       "in vec2 sbUvV;\n"
       "out vec4 sbColour;\n"
+      // What the window shows under its values, where it has something: the
+      // Plane's picture, bottom row first.
+      "uniform sampler2D sbPicture;\n"
+      "uniform vec2 sbPictureSize;\n"
       "vec4 sbTint;\n" +
       common + stub +
       "vec4 sbLit(vec3 p, vec3 n) {\n"
